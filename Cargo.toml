@@ -1,5 +1,5 @@
 [package]
-name = "crabboy_advance"
+name = "crabboy-advance"
 version = "0.1.0"
 edition = "2021"
 description = "CrabBoy Advance: Cycle-accurate Game Boy Advance emulator in Rust with 5.1 Spatial Audio, xBRZ/NIS upscaling, TAS Engine, and Hardware Sensors"
@@ -11,7 +11,7 @@ name = "gba_simulator"
 path = "src/lib.rs"
 
 [[bin]]
-name = "crabboy_advance"
+name = "crabboy-advance"
 path = "src/main.rs"
 
 [dependencies]

@@ -76,7 +76,7 @@ cargo build --release
 
 The optimized executable will be located at:
 ```powershell
-target/release/crabboy_advance.exe
+target/release/crabboy-advance.exe
 ```
 
 ### Run
@@ -85,7 +85,7 @@ cargo run --release
 ```
 Or launch directly with a ROM:
 ```powershell
-.\target\release\crabboy_advance.exe "path\to\game.gba"
+.\target\release\crabboy-advance.exe "path\to\game.gba"
 ```
 
 ---
