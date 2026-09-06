@@ -123,7 +123,7 @@ pub fn render_sprites(
 
             for bx in 0..orig_w {
                 let screen_x = sprite_x + bx as i32;
-                if screen_x < 0 || screen_x >= 240 {
+                if !(0..240).contains(&screen_x) {
                     continue;
                 }
                 let sx = screen_x as usize;
@@ -225,7 +225,7 @@ pub fn render_sprites(
 
             for bx in 0..bound_w {
                 let screen_x = sprite_x + bx as i32;
-                if screen_x < 0 || screen_x >= 240 {
+                if !(0..240).contains(&screen_x) {
                     continue;
                 }
                 let sx = screen_x as usize;
@@ -278,7 +278,7 @@ pub fn render_sprites(
                     let tile_addr = obj_char_base + tile_offset * 32 + in_tile_y * 4 + (in_tile_x / 2);
                     if tile_addr < vram.len() {
                         let byte = vram[tile_addr];
-                        let idx = if in_tile_x % 2 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
+                        let idx = if in_tile_x.is_multiple_of(2) { byte & 0x0F } else { (byte >> 4) & 0x0F };
                         (pal_num * 16 + (idx as usize), idx == 0)
                     } else {
                         (0, true)

@@ -78,7 +78,7 @@ pub fn render_text_bg(
             let tile_addr = char_base + tile_num * 32 + py * 4 + (px / 2);
             if tile_addr < vram.len() {
                 let byte = vram[tile_addr];
-                let idx = if px % 2 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
+                let idx = if px.is_multiple_of(2) { byte & 0x0F } else { (byte >> 4) & 0x0F };
                 (pal_num * 16 + (idx as usize), idx == 0)
             } else {
                 (0, true)
@@ -229,9 +229,9 @@ pub fn render_bitmap_bg(
                 }
             }
         }
-        5 => {
+        5
             // 160x128 15-bit color
-            if y < 128 {
+            if y < 128 => {
                 let base = if frame { 0xA000 } else { 0x0000 };
                 let row_offset = base + (y as usize) * 160 * 2;
                 for x in 0..160 {
@@ -248,7 +248,6 @@ pub fn render_bitmap_bg(
                     }
                 }
             }
-        }
         _ => {}
     }
 }

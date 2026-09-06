@@ -29,7 +29,7 @@ impl RewindManager {
     /// Records a save state snapshot at regular frame intervals during normal emulation.
     pub fn record_frame(&mut self, gba: &Gba) {
         self.frame_counter += 1;
-        if self.frame_counter % self.capture_interval == 0 {
+        if self.frame_counter.is_multiple_of(self.capture_interval) {
             let state = gba.save_state();
             if self.states.len() >= self.max_states {
                 self.states.pop_front();

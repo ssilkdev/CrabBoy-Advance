@@ -19,17 +19,14 @@ pub struct CheatsDialog {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 enum SearchSizeUi {
     U8,
+    #[default]
     U16,
     U32,
 }
 
-impl Default for SearchSizeUi {
-    fn default() -> Self {
-        Self::U16
-    }
-}
 
 impl CheatsDialog {
     pub fn new() -> Self {
@@ -117,14 +114,13 @@ impl CheatsDialog {
         ui.text_edit_multiline(&mut self.new_cheat_code);
 
         ui.horizontal(|ui| {
-            if ui.button("➕ Add Cheat").clicked() {
-                if !self.new_cheat_name.is_empty() && !self.new_cheat_code.is_empty() {
+            if ui.button("➕ Add Cheat").clicked()
+                && !self.new_cheat_name.is_empty() && !self.new_cheat_code.is_empty() {
                     gba.cheats.add_cheat(&self.new_cheat_name, &self.new_cheat_code);
                     *toast = Some(format!("Added cheat: {}", self.new_cheat_name));
                     self.new_cheat_name.clear();
                     self.new_cheat_code.clear();
                 }
-            }
 
             if ui.button("⚡ Max Money Preset (Gen 3 RPG)").clicked() {
                 gba.cheats.add_cheat("Max Money Preset", "0202402C:000F423F");

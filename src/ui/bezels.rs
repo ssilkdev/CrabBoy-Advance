@@ -3,7 +3,9 @@
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BezelMode {
+    #[default]
     None,
     GbaClassicIndigo,
     GbaClassicGlacier,
@@ -11,11 +13,6 @@ pub enum BezelMode {
     GameBoyPlayer,
 }
 
-impl Default for BezelMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 pub struct BezelRenderer {
     pub mode: BezelMode,

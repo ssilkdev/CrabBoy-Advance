@@ -45,8 +45,8 @@ impl DmaChannel {
             self.internal_count = if cnt == 0 { max_cnt } else { cnt };
         }
 
-        let start_immediate = self.enabled && ((val >> 12) & 3) == 0;
-        start_immediate
+        
+        self.enabled && ((val >> 12) & 3) == 0
     }
 }
 

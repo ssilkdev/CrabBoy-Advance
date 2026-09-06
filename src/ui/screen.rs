@@ -38,6 +38,12 @@ pub struct ScreenRenderer {
     image_buffer: ColorImage,
 }
 
+impl Default for ScreenRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScreenRenderer {
     pub fn new() -> Self {
         Self {

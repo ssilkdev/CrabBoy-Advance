@@ -118,8 +118,8 @@ impl Rtc {
         }
 
         // On SCK falling edge: write SIO bit from RTC to game pak
-        if old_sck && !sck {
-            if self.state == RtcState::TransferData && (self.dir_reg & 2) == 0 {
+        if old_sck && !sck
+            && self.state == RtcState::TransferData && (self.dir_reg & 2) == 0 {
                 let byte_idx = self.buf_bit_idx / 8;
                 let bit_idx = self.buf_bit_idx % 8;
                 if byte_idx < self.buffer.len() {
@@ -130,7 +130,6 @@ impl Rtc {
                 }
                 self.buf_bit_idx += 1;
             }
-        }
     }
 
     fn process_command(&mut self) {

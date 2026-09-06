@@ -37,6 +37,12 @@ pub struct AudioOutput {
     pub is_fast_forwarding: Arc<AtomicBool>,
 }
 
+impl Default for AudioOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioOutput {
     pub fn new() -> Self {
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(8192)));

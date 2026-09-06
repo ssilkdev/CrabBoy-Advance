@@ -421,7 +421,7 @@ impl eframe::App for GbaApp {
         self.gba.mmu.apu.audio_output.set_fast_forwarding(is_turbo || effective_speed > 1);
 
         // Poll Pokémon party periodically if companion is active
-        if self.pokemon_companion.is_open && self.emulated_frames % 30 == 0 {
+        if self.pokemon_companion.is_open && self.emulated_frames.is_multiple_of(30) {
             if let Some(ref cart) = self.gba.mmu.cartridge {
                 self.pokemon_companion.poll_party_memory(&self.gba.mmu, &cart.game_code);
             }
@@ -437,7 +437,7 @@ impl eframe::App for GbaApp {
 
         // Auto-hiding menu bar in Fullscreen mode (revealed when mouse cursor is near top)
         let show_menu_bar = !self.is_fullscreen || ctx.input(|i| {
-            i.pointer.hover_pos().map_or(false, |pos| pos.y < 35.0)
+            i.pointer.hover_pos().is_some_and(|pos| pos.y < 35.0)
         });
 
         if show_menu_bar {
@@ -1059,7 +1059,7 @@ impl eframe::App for GbaApp {
                 .open(&mut show_rtc)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    let has_rtc = self.gba.mmu.cartridge.as_ref().map_or(false, |c| c.has_rtc);
+                    let has_rtc = self.gba.mmu.cartridge.as_ref().is_some_and(|c| c.has_rtc);
                     if !has_rtc {
                         ui.label(RichText::new("The currently loaded ROM does not contain an RTC hardware chip.").color(Color32::YELLOW));
                         ui.label("RTC features are supported in cartridges with integrated Real-Time Clock hardware.");

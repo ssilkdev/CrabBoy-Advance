@@ -271,8 +271,8 @@ impl Ppu {
                     self.bg_y_internal[i] += self.bg_pd[i] as i32;
                 }
             }
-            3..=5 => {
-                if (self.dispcnt & (1 << 10)) != 0 && (self.layer_mask & (1 << 2)) != 0 {
+            3..=5
+                if (self.dispcnt & (1 << 10)) != 0 && (self.layer_mask & (1 << 2)) != 0 => {
                     render_bitmap_bg(
                         mode,
                         frame,
@@ -282,7 +282,6 @@ impl Ppu {
                         &mut bg_layer_bufs[2],
                     );
                 }
-            }
             _ => {}
         }
 

@@ -78,7 +78,7 @@ impl Cartridge {
     pub fn read8(&self, addr: u32) -> u8 {
         let region = (addr >> 24) & 0xFF;
         match region {
-            0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
+            0x08..=0x0D => {
                 // ROM waitstates
                 let rom_offset = (addr & 0x01FF_FFFF) as usize;
                 // Check if RTC or Sensor GPIO is addressed at 0x080000C4..0x080000C8

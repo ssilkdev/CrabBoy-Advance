@@ -71,7 +71,7 @@ impl GifRecorder {
         }
 
         self.frame_counter += 1;
-        if self.frame_counter % self.frame_skip != 0 {
+        if !self.frame_counter.is_multiple_of(self.frame_skip) {
             return;
         }
 

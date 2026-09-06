@@ -66,6 +66,12 @@ pub struct GamepadManager {
     pub fullscreen_pressed: bool,
 }
 
+impl Default for GamepadManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GamepadManager {
     pub fn new() -> Self {
         let gilrs = match Gilrs::new() {

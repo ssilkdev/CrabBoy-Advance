@@ -193,7 +193,7 @@ impl Gba {
         self.mmu.apu.flush_samples();
 
         // Periodically sync save file to disk (every 60 frames / 1 sec)
-        if self.frame_counter % 60 == 0 {
+        if self.frame_counter.is_multiple_of(60) {
             if let Some(ref mut cart) = self.mmu.cartridge {
                 cart.flash.sync_to_disk();
             }

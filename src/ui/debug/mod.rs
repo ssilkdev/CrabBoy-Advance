@@ -11,6 +11,7 @@ use memory::{show_memory_viewer, MemoryViewerState};
 use palette::show_palette_viewer;
 use ppu_inspector::show_ppu_inspector;
 
+#[derive(Default)]
 pub struct DebugWindows {
     pub show_cpu: bool,
     pub show_palette: bool,
@@ -19,17 +20,6 @@ pub struct DebugWindows {
     pub mem_state: MemoryViewerState,
 }
 
-impl Default for DebugWindows {
-    fn default() -> Self {
-        Self {
-            show_cpu: false,
-            show_palette: false,
-            show_memory: false,
-            show_ppu: false,
-            mem_state: MemoryViewerState::default(),
-        }
-    }
-}
 
 impl DebugWindows {
     pub fn show(&mut self, ctx: &egui::Context, gba: &mut Gba) {

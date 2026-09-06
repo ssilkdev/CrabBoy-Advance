@@ -96,11 +96,10 @@ impl CartridgeSensors {
                             data |= 1 << 1;
                         }
                     }
-                    SensorType::Rumble => {
-                        if self.rumble_active {
+                    SensorType::Rumble
+                        if self.rumble_active => {
                             data |= 1 << 3;
                         }
-                    }
                     _ => {}
                 }
                 data
@@ -113,33 +112,30 @@ impl CartridgeSensors {
 
     /// Intercepts writes to GPIO registers at 0x080000C4..C8
     pub fn write_gpio(&mut self, addr: u32, val: u8) {
-        match addr & 0xFF {
-            0xC4 => {
-                match self.sensor_type {
-                    SensorType::Solar => {
-                        let clk = (val & (1 << 0)) != 0;
-                        let rst = (val & (1 << 2)) != 0;
+        if addr & 0xFF == 0xC4 {
+            match self.sensor_type {
+                SensorType::Solar => {
+                    let clk = (val & (1 << 0)) != 0;
+                    let rst = (val & (1 << 2)) != 0;
 
-                        if rst {
-                            // Reset counter: initialize count based on sunlight level
-                            self.solar_counter = self.sunlight_level * 18;
-                        } else if clk && !self.solar_clock {
-                            // Rising edge of SCK: decrement / shift counter
-                            if self.solar_counter > 0 {
-                                self.solar_counter -= 1;
-                            }
+                    if rst {
+                        // Reset counter: initialize count based on sunlight level
+                        self.solar_counter = self.sunlight_level * 18;
+                    } else if clk && !self.solar_clock {
+                        // Rising edge of SCK: decrement / shift counter
+                        if self.solar_counter > 0 {
+                            self.solar_counter -= 1;
                         }
-                        self.solar_clock = clk;
-                        self.solar_reset = rst;
                     }
-                    SensorType::Rumble => {
-                        // Drill Dozer rumble bit is GPIO pin 3 (1 << 3)
-                        self.rumble_active = (val & (1 << 3)) != 0;
-                    }
-                    _ => {}
+                    self.solar_clock = clk;
+                    self.solar_reset = rst;
                 }
+                SensorType::Rumble => {
+                    // Drill Dozer rumble bit is GPIO pin 3 (1 << 3)
+                    self.rumble_active = (val & (1 << 3)) != 0;
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }

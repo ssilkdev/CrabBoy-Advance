@@ -125,17 +125,15 @@ impl Apu {
         let mut dma_req_b = false;
 
         // Check Timer overflows feeding DirectSound A & B
-        if timer_overflows[self.sound_a.timer_select] {
-            if self.sound_a.pop_sample() {
+        if timer_overflows[self.sound_a.timer_select]
+            && self.sound_a.pop_sample() {
                 dma_req_a = true;
             }
-        }
 
-        if timer_overflows[self.sound_b.timer_select] {
-            if self.sound_b.pop_sample() {
+        if timer_overflows[self.sound_b.timer_select]
+            && self.sound_b.pop_sample() {
                 dma_req_b = true;
             }
-        }
 
         // Host audio resampling
         self.sample_timer += cycles as f64;

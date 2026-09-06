@@ -48,7 +48,7 @@ pub fn save_bmp(path: &Path, width: usize, height: usize, rgba_pixels: &[u8]) ->
     data.extend_from_slice(&0u32.to_le_bytes()); // Important colors
 
     // Pixel data in BGRA order
-    for chunk in rgba_pixels.chunks_exact(4) {
+    for chunk in rgba_pixels.as_chunks::<4>().0 {
         let r = chunk[0];
         let g = chunk[1];
         let b = chunk[2];

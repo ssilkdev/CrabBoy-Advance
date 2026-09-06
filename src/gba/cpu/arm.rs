@@ -151,11 +151,10 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
             }
         }
 
-        if !p || w {
-            if !(l && rd == rn) {
+        if (!p || w)
+            && !(l && rd == rn) {
                 cpu.regs[rn] = eff_addr;
             }
-        }
 
         return if l { 3 } else { 2 };
     }
@@ -220,11 +219,10 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
             mmu.write16(target_addr, (val & 0xFFFF) as u16);
         }
 
-        if !p || w {
-            if !(l && rd == rn) {
+        if (!p || w)
+            && !(l && rd == rn) {
                 cpu.regs[rn] = eff_addr;
             }
-        }
 
         return 3;
     }
@@ -420,7 +418,7 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
             _ => 0,
         };
 
-        let is_test = opcode >= 0x8 && opcode <= 0xB;
+        let is_test = (0x8..=0xB).contains(&opcode);
         let mut branched = false;
         if !is_test {
             if rd == 15 {

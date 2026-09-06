@@ -138,8 +138,8 @@ impl Flash {
                             self.command = FlashCommand::None;
                         }
                     }
-                } else if self.command == FlashCommand::Erase {
-                    if val == 0x30 {
+                } else if self.command == FlashCommand::Erase
+                    && val == 0x30 {
                         // Erase 4KB sector
                         let sector_base = (self.current_bank * 0x10000) + (offset & !(SECTOR_SIZE - 1));
                         if sector_base + SECTOR_SIZE <= FLASH_SIZE {
@@ -148,7 +148,6 @@ impl Flash {
                         }
                         self.command = FlashCommand::None;
                     }
-                }
             }
         }
     }
