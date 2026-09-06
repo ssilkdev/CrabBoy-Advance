@@ -43,12 +43,24 @@ fn main() -> eframe::Result<()> {
         "CrabBoy Advance".to_string()
     };
 
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([760.0, 540.0])
+        .with_min_inner_size([480.0, 360.0])
+        .with_title(rom_title)
+        .with_drag_and_drop(true);
+
+    if let Ok(img) = image::load_from_memory(include_bytes!("../assets/icon_256.png")) {
+        let rgba = img.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        viewport = viewport.with_icon(eframe::egui::IconData {
+            rgba: rgba.into_raw(),
+            width,
+            height,
+        });
+    }
+
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 540.0])
-            .with_min_inner_size([480.0, 360.0])
-            .with_title(rom_title)
-            .with_drag_and_drop(true),
+        viewport,
         ..Default::default()
     };
 

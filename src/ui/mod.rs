@@ -90,6 +90,7 @@ pub struct GbaApp {
     show_controls_dialog: bool,
     show_save_manager_dialog: bool,
     show_rtc_dialog: bool,
+    pub show_about_dialog: bool,
     loaded_rom_name: String,
 }
 
@@ -157,6 +158,7 @@ impl GbaApp {
             show_controls_dialog: false,
             show_save_manager_dialog: false,
             show_rtc_dialog: false,
+            show_about_dialog: false,
             loaded_rom_name,
         }
     }
@@ -726,6 +728,11 @@ impl eframe::App for GbaApp {
                         }
                     });
                     ui.separator();
+                    if ui.button("ℹ About CrabBoy Advance...").clicked() {
+                        self.show_about_dialog = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     ui.label(RichText::new("CrabBoy Advance v0.1.0").weak().small());
                     ui.label(RichText::new("Cycle-Accurate 32-Bit GBA Engine").weak().small());
                     ui.label(RichText::new("Built with Rust & egui").weak().small());
@@ -1186,6 +1193,61 @@ impl eframe::App for GbaApp {
         self.audio_mixer_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.tas_dialog.show(ctx, &mut self.tas_engine, &mut self.gba, &mut dialog_toast);
         self.guide_dialog.show(ctx, &mut dialog_toast);
+
+        if self.show_about_dialog {
+            let mut close_about = false;
+            let mut open_guide = false;
+            let mut show_about = self.show_about_dialog;
+
+            egui::Window::new("About CrabBoy Advance")
+                .open(&mut show_about)
+                .resizable(false)
+                .collapsible(false)
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        ui.heading(RichText::new("🦀 CrabBoy Advance").size(20.0).strong().color(Color32::from_rgb(255, 110, 60)));
+                        ui.label(RichText::new("v0.1.0 • Cycle-Accurate 32-Bit GBA Engine").weak().small());
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+
+                        egui::Grid::new("about_features_grid").striped(true).show(ui, |ui| {
+                            ui.label("Core:"); ui.label("16.78 MHz ARM7TDMI with Waitstates & Pipelining"); ui.end_row();
+                            ui.label("Audio:"); ui.label("5.1 Surround Downmix & 6-Channel Sound Gym"); ui.end_row();
+                            ui.label("Video:"); ui.label("xBRZ HD, CRT Scanlines & GBA LCD Subpixel Shaders"); ui.end_row();
+                            ui.label("SIO Netplay:"); ui.label("Local UDP Loopback Trading & Union Room"); ui.end_row();
+                            ui.label("Companion:"); ui.label("Live Pokémon IV/EV & Shiny PID Telemetry"); ui.end_row();
+                            ui.label("Sensors:"); ui.label("Hardware RTC, Boktai Solar Sensor & 2-Axis Gyro"); ui.end_row();
+                            ui.label("Speedrun:"); ui.label("Deterministic TAS Engine (.ctas) & Frame Rewind"); ui.end_row();
+                        });
+
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("📖 Trainer's Strategy Guide (F1)").clicked() {
+                                open_guide = true;
+                                close_about = true;
+                            }
+                            if ui.button("Close").clicked() {
+                                close_about = true;
+                            }
+                        });
+                        ui.add_space(4.0);
+                    });
+                });
+
+            if close_about {
+                show_about = false;
+            }
+            if open_guide {
+                self.guide_dialog.is_open = true;
+            }
+            self.show_about_dialog = show_about;
+        }
 
         if let Some(msg) = dialog_toast {
             self.set_toast(msg);

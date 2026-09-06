@@ -26,6 +26,9 @@ gilrs = "0.11"
 xbrz = { package = "xbrz-rs", version = "0.1.0" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[build-dependencies]
+winres = "0.1"
+
 [profile.dev]
 opt-level = 2
 
