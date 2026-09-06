@@ -194,7 +194,7 @@ impl RamSearcher {
         Self::default()
     }
 
-    fn read_val_at(mmu: &mut Mmu, addr: u32, size: SearchSize) -> u32 {
+    fn read_val_at(mmu: &Mmu, addr: u32, size: SearchSize) -> u32 {
         match size {
             SearchSize::U8 => mmu.read8(addr) as u32,
             SearchSize::U16 => mmu.read16(addr & !1) as u32,
@@ -203,7 +203,7 @@ impl RamSearcher {
     }
 
     /// Performs the initial scan over EWRAM (`0x02000000`) and IWRAM (`0x03000000`)
-    pub fn initial_search(&mut self, mmu: &mut Mmu, target: Option<u32>) {
+    pub fn initial_search(&mut self, mmu: &Mmu, target: Option<u32>) {
         self.candidates.clear();
         self.previous_ewram.copy_from_slice(&mmu.ewram[..]);
         self.previous_iwram.copy_from_slice(&mmu.iwram[..]);
@@ -263,7 +263,7 @@ impl RamSearcher {
     }
 
     /// Refines existing candidates with a comparison rule
-    pub fn filter_search(&mut self, mmu: &mut Mmu, cmp: CompareType) {
+    pub fn filter_search(&mut self, mmu: &Mmu, cmp: CompareType) {
         if !self.has_searched {
             if let CompareType::Exact(val) = cmp {
                 self.initial_search(mmu, Some(val));

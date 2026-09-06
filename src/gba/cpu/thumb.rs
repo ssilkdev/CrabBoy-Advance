@@ -153,7 +153,7 @@ pub fn step_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
         } else {
             mmu.write32(addr, cpu.regs[rd]);
         }
-        return if l { 2 } else { 2 };
+        return 2;
     }
 
     // Format 10: Load/Store Halfword (LDRH, STRH Rd, [Rb, #imm])

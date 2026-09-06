@@ -98,7 +98,7 @@ impl ScreenRenderer {
                 apply_nvidia_adaptive_sharpening_image(&mut scaled_image, nvidia_sharpness);
             }
 
-            let tex_options = TextureOptions::LINEAR;
+            let tex_options = TextureOptions::NEAREST;
             let tex = self.texture.get_or_insert_with(|| {
                 ctx.load_texture("gba_screen", scaled_image.clone(), tex_options)
             });
@@ -168,8 +168,7 @@ impl ScreenRenderer {
             }
             _ => {
                 // Crisp / Nearest & Linear & NvidiaSharpen direct pixel copy
-                for i in 0..240 * 160 {
-                    let pixel = raw_fb[i];
+                for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(raw_fb.iter()) {
                     let r = (pixel & 0xFF) as u8;
                     let g = ((pixel >> 8) & 0xFF) as u8;
                     let b = ((pixel >> 16) & 0xFF) as u8;
@@ -180,7 +179,7 @@ impl ScreenRenderer {
                         (r, g, b)
                     };
 
-                    self.image_buffer.pixels[i] = Color32::from_rgb(final_r, final_g, final_b);
+                    *dst = Color32::from_rgb(final_r, final_g, final_b);
                 }
             }
         }

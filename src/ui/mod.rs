@@ -422,9 +422,8 @@ impl eframe::App for GbaApp {
 
         // Poll Pokémon party periodically if companion is active
         if self.pokemon_companion.is_open && self.emulated_frames.is_multiple_of(30) {
-            let game_code = self.gba.mmu.cartridge.as_ref().map(|c| c.game_code.clone());
-            if let Some(code) = game_code {
-                self.pokemon_companion.poll_party_memory(&mut self.gba.mmu, &code);
+            if let Some(ref cart) = self.gba.mmu.cartridge {
+                self.pokemon_companion.poll_party_memory(&self.gba.mmu, &cart.game_code);
             }
         }
 

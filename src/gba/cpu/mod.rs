@@ -272,11 +272,7 @@ impl Arm7Tdmi {
             return; // IRQ disabled
         }
         self.halted = false;
-        let return_pc = if self.is_thumb() {
-            self.regs[15].wrapping_add(4)
-        } else {
-            self.regs[15].wrapping_add(4)
-        };
+        let return_pc = self.regs[15].wrapping_add(4);
         let old_cpsr = self.cpsr;
         self.set_mode(CpuMode::Irq);
         self.spsr_irq = old_cpsr;

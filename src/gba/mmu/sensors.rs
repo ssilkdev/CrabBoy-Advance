@@ -55,9 +55,7 @@ impl CartridgeSensors {
     pub fn detect_from_cartridge(&mut self, game_code: &str, title: &str) {
         if game_code.starts_with("U3I") || game_code.starts_with("U32") || game_code.starts_with("U33") || title.contains("BOKTAI") {
             self.sensor_type = SensorType::Solar;
-        } else if game_code.starts_with("RZW") || title.contains("WARIOWARE T") {
-            self.sensor_type = SensorType::GyroTilt;
-        } else if game_code.starts_with("KYG") || title.contains("YOSHI") {
+        } else if game_code.starts_with("RZW") || title.contains("WARIOWARE T") || game_code.starts_with("KYG") || title.contains("YOSHI") {
             self.sensor_type = SensorType::GyroTilt;
         } else if game_code.starts_with("V49") || title.contains("DRILL") || title.contains("PINBALL") {
             self.sensor_type = SensorType::Rumble;

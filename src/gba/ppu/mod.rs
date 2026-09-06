@@ -119,11 +119,6 @@ impl Ppu {
         let in_hblank = self.cycle_in_scanline >= HDRAW_CYCLES;
 
         if !old_hblank && in_hblank {
-            // Render the current scanline at HBlank entry (cycle 960),
-            // before games can modify registers during HBlank
-            if self.vcount < 160 {
-                self.render_scanline(self.vcount as u32);
-            }
             self.dispstat |= 2;
             if (self.dispstat & (1 << 4)) != 0 {
                 irq_hblank = true;
@@ -136,6 +131,11 @@ impl Ppu {
         if self.cycle_in_scanline >= SCANLINE_CYCLES {
             self.cycle_in_scanline -= SCANLINE_CYCLES;
             self.dispstat &= !2; // Exit HBlank
+
+            // Render previous scanline if visible
+            if self.vcount < 160 {
+                self.render_scanline(self.vcount as u32);
+            }
 
             self.vcount += 1;
             if self.vcount == 160 {

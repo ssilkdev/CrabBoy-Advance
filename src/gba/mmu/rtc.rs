@@ -8,10 +8,12 @@ pub struct Rtc {
     pub time_offset_secs: i64,
     data_reg: u8,
     dir_reg: u8,
-    control_reg: u8,
+    gpio_control: u8,
+    rtc_control: u8,
     state: RtcState,
     command: u8,
     cmd_bits_received: u8,
+    bytes_to_transfer: usize,
     buffer: [u8; 7],
     buf_bit_idx: usize,
 }
@@ -36,10 +38,12 @@ impl Rtc {
             time_offset_secs: 0,
             data_reg: 0,
             dir_reg: 0,
-            control_reg: 0,
+            gpio_control: 0,
+            rtc_control: 0x40, // Bit 6 = 24-hour mode enabled, Power-off flag cleared
             state: RtcState::Idle,
             command: 0,
             cmd_bits_received: 0,
+            bytes_to_transfer: 0,
             buffer: [0; 7],
             buf_bit_idx: 0,
         }
@@ -49,7 +53,7 @@ impl Rtc {
         match addr & 0xFFFF {
             0x00C4 => self.data_reg,
             0x00C6 => self.dir_reg,
-            0x00C8 => self.control_reg,
+            0x00C8 => self.gpio_control,
             _ => 0,
         }
     }
@@ -65,7 +69,7 @@ impl Rtc {
                 self.dir_reg = val & 0x0F;
             }
             0x00C8 => {
-                self.control_reg = val & 1;
+                self.gpio_control = val & 1;
                 self.enabled = (val & 1) != 0;
             }
             _ => {}
@@ -81,10 +85,11 @@ impl Rtc {
         if !cs {
             self.state = RtcState::Idle;
             self.cmd_bits_received = 0;
+            self.buf_bit_idx = 0;
             return;
         }
 
-        // On SCK rising edge: read SIO
+        // On SCK rising edge: read SIO (LSB first)
         if !old_sck && sck {
             match self.state {
                 RtcState::Idle => {
@@ -93,14 +98,14 @@ impl Rtc {
                     self.cmd_bits_received = 1;
                 }
                 RtcState::Command => {
-                    self.command = (self.command << 1) | (if sio_in { 1 } else { 0 });
+                    self.command |= (if sio_in { 1 } else { 0 }) << self.cmd_bits_received;
                     self.cmd_bits_received += 1;
                     if self.cmd_bits_received == 8 {
                         self.process_command();
                     }
                 }
                 RtcState::TransferData => {
-                    // Write data bit from game pak to RTC
+                    // Write data bit from game pak to RTC (LSB first)
                     if (self.dir_reg & 2) != 0 {
                         let byte_idx = self.buf_bit_idx / 8;
                         let bit_idx = self.buf_bit_idx % 8;
@@ -112,41 +117,101 @@ impl Rtc {
                             }
                         }
                         self.buf_bit_idx += 1;
+                        if self.buf_bit_idx >= self.bytes_to_transfer * 8 {
+                            self.finish_write();
+                            self.state = RtcState::Idle;
+                        }
                     }
                 }
             }
         }
 
-        // On SCK falling edge: write SIO bit from RTC to game pak
+        // On SCK falling edge: write SIO bit from RTC to game pak (LSB first)
         if old_sck && !sck
             && self.state == RtcState::TransferData && (self.dir_reg & 2) == 0 {
                 let byte_idx = self.buf_bit_idx / 8;
                 let bit_idx = self.buf_bit_idx % 8;
-                if byte_idx < self.buffer.len() {
+                if byte_idx < self.bytes_to_transfer {
                     let bit = (self.buffer[byte_idx] >> bit_idx) & 1;
                     self.data_reg = (self.data_reg & !2) | (bit << 1);
                 } else {
                     self.data_reg &= !2;
                 }
                 self.buf_bit_idx += 1;
+                if self.buf_bit_idx >= self.bytes_to_transfer * 8 {
+                    self.state = RtcState::Idle;
+                }
             }
     }
 
     fn process_command(&mut self) {
-        // Bits: 0 1 1 0 [Cmd 3:0]
-        let is_read = (self.command & 1) != 0;
-        let reg_type = (self.command >> 1) & 0x07;
-
-        if is_read {
-            // Populate buffer with current time
-            self.load_current_time();
-            self.state = RtcState::TransferData;
-            self.buf_bit_idx = 0;
-        } else {
-            self.state = RtcState::TransferData;
-            self.buf_bit_idx = 0;
+        // Bits: [Read flag (1)] [Cmd (3)] [Magic: 0110 (4)]
+        let magic = self.command & 0x0F;
+        if magic != 0x06 {
+            self.state = RtcState::Idle;
+            return;
         }
-        let _ = reg_type;
+
+        let is_read = (self.command & 0x80) != 0;
+        let cmd = (self.command >> 4) & 0x07;
+
+        self.buf_bit_idx = 0;
+        self.state = RtcState::TransferData;
+
+        match cmd {
+            0 => {
+                // RTC_RESET
+                self.rtc_control = 0;
+                self.bytes_to_transfer = 0;
+                self.state = RtcState::Idle;
+            }
+            2 => {
+                // RTC_DATETIME (7 bytes)
+                self.bytes_to_transfer = 7;
+                if is_read {
+                    self.load_current_time();
+                } else {
+                    self.buffer = [0; 7];
+                }
+            }
+            3 => {
+                // RTC_FORCE_IRQ
+                self.bytes_to_transfer = 0;
+                self.state = RtcState::Idle;
+            }
+            4 => {
+                // RTC_CONTROL (1 byte)
+                self.bytes_to_transfer = 1;
+                if is_read {
+                    self.buffer[0] = self.rtc_control;
+                } else {
+                    self.buffer[0] = 0;
+                }
+            }
+            6 => {
+                // RTC_TIME (3 bytes: hours, minutes, seconds)
+                self.bytes_to_transfer = 3;
+                if is_read {
+                    self.load_current_time();
+                    self.buffer[0] = self.buffer[4];
+                    self.buffer[1] = self.buffer[5];
+                    self.buffer[2] = self.buffer[6];
+                } else {
+                    self.buffer = [0; 7];
+                }
+            }
+            _ => {
+                self.bytes_to_transfer = 0;
+                self.state = RtcState::Idle;
+            }
+        }
+    }
+
+    fn finish_write(&mut self) {
+        let cmd = (self.command >> 4) & 0x07;
+        if cmd == 4 {
+            self.rtc_control = self.buffer[0];
+        }
     }
 
     pub fn add_offset_secs(&mut self, secs: i64) {
@@ -211,11 +276,18 @@ impl Rtc {
         // GBA RTC year is 2-digit offset from 2000
         let rtc_year = (year - 2000).clamp(0, 99) as u8;
 
+        let bcd_hrs = if (self.rtc_control & 0x40) != 0 {
+            to_bcd(hrs)
+        } else {
+            let ampm = if hrs >= 12 { 0x80 } else { 0 };
+            to_bcd(hrs % 12) | ampm
+        };
+
         self.buffer[0] = to_bcd(rtc_year);
         self.buffer[1] = to_bcd(month);
         self.buffer[2] = to_bcd(day);
         self.buffer[3] = dow;
-        self.buffer[4] = to_bcd(hrs);
+        self.buffer[4] = bcd_hrs;
         self.buffer[5] = to_bcd(mins);
         self.buffer[6] = to_bcd(secs);
     }

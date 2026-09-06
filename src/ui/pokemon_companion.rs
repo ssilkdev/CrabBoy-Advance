@@ -61,7 +61,7 @@ impl PokemonCompanion {
         }
     }
 
-    pub fn poll_party_memory(&mut self, mmu: &mut Mmu, game_code: &str) {
+    pub fn poll_party_memory(&mut self, mmu: &Mmu, game_code: &str) {
         self.party.clear();
 
         // Check if game is a compatible Gen 3 RPG cartridge: BPE, BPR, AXV, AXP, BPG
@@ -101,8 +101,8 @@ impl PokemonCompanion {
         for slot in 0..count {
             let addr = party_base + (slot as u32) * 100;
             let mut raw = [0u8; 100];
-            for i in 0..100 {
-                raw[i] = mmu.read8(addr + i as u32);
+            for (i, byte) in raw.iter_mut().enumerate() {
+                *byte = mmu.read8(addr + i as u32);
             }
 
             if let Some(pkmn) = Self::decrypt_pokemon(&raw) {

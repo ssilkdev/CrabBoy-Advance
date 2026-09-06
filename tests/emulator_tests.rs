@@ -220,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unnecessary_min_or_max)]
     fn test_integer_auto_scale_calculation() {
         // Test 1440p monitor (2560x1440) -> 1440 / 160 = 9x scale
         let scale_1440p = (2560u32 / 240).min(1440 / 160);
@@ -395,8 +396,8 @@ mod tests {
         let mut rtc = Rtc::new();
         let (y0, m0, d0, h0, min0, _, dow0) = rtc.get_datetime_components();
         assert!(y0 >= 2026);
-        assert!(m0 >= 1 && m0 <= 12);
-        assert!(d0 >= 1 && d0 <= 31);
+        assert!((1..=12).contains(&m0));
+        assert!((1..=31).contains(&d0));
         assert!(h0 <= 23 && min0 <= 59);
 
         // Advance 24 hours (1 full day)
@@ -463,7 +464,7 @@ mod tests {
         mmu.write16(0x02002000, 42);
         let mut searcher = RamSearcher::new();
         searcher.search_size = SearchSize::U16;
-        searcher.initial_search(&mut mmu, Some(42));
+        searcher.initial_search(&mmu, Some(42));
         assert!(searcher.candidates.iter().any(|c| c.address == 0x02002000));
     }
 
