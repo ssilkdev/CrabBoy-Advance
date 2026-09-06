@@ -118,14 +118,17 @@ impl Ppu {
         let old_hblank = (self.dispstat & 2) != 0;
         let in_hblank = self.cycle_in_scanline >= HDRAW_CYCLES;
 
-        if !old_hblank && in_hblank {
-            self.dispstat |= 2;
-            if (self.dispstat & (1 << 4)) != 0 {
-                irq_hblank = true;
-            }
-            if self.vcount < 160 {
+        if self.vcount < 160 {
+            if !old_hblank && in_hblank {
+                self.dispstat |= 2;
+                if (self.dispstat & (1 << 4)) != 0 {
+                    irq_hblank = true;
+                }
                 dma_hblank = true;
             }
+        } else {
+            // During VBlank (lines 160..227), HBlank flag is not set on GBA
+            self.dispstat &= !2;
         }
 
         if self.cycle_in_scanline >= SCANLINE_CYCLES {
@@ -146,10 +149,13 @@ impl Ppu {
                     irq_vblank = true;
                 }
                 dma_vblank = true;
+            } else if self.vcount == 227 {
+                // On scanline 227, VBlank flag in DISPSTAT is cleared according to GBA specs
+                self.dispstat &= !1;
             } else if self.vcount >= TOTAL_SCANLINES as u16 {
                 // New frame
                 self.vcount = 0;
-                self.dispstat &= !1; // Exit VBlank
+                self.dispstat &= !1; // Ensure VBlank cleared
                 // Reload internal affine coordinates at start of frame
                 self.bg_x_internal = self.bg_x;
                 self.bg_y_internal = self.bg_y;

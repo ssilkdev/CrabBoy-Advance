@@ -78,6 +78,7 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
                         if s {
                             let spsr = cpu.get_spsr();
                             cpu.set_cpsr(spsr);
+                            cpu.in_irq = false;
                             if (spsr & FLAG_T) != 0 {
                                 cpu.regs[15] = val & !1;
                             } else {
@@ -289,14 +290,16 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
         return 1;
     }
 
-    if (instr & 0x0DBF_F000) == 0x0129_F000 {
-        // MSR
+    let is_msr_i = (instr & (1 << 25)) != 0;
+    if (instr & 0x0D60_F000) == 0x0120_F000 && (is_msr_i || (instr & 0x0FF0) == 0) {
+        // MSR (Status Register Access)
         let r = (instr & (1 << 22)) != 0;
-        let i = (instr & (1 << 25)) != 0;
-        let mask_flags = (instr & (1 << 19)) != 0;
         let mask_ctrl = (instr & (1 << 16)) != 0;
+        let mask_ext = (instr & (1 << 17)) != 0;
+        let mask_status = (instr & (1 << 18)) != 0;
+        let mask_flags = (instr & (1 << 19)) != 0;
 
-        let val = if i {
+        let val = if is_msr_i {
             let imm = instr & 0xFF;
             let rot = ((instr >> 8) & 0xF) * 2;
             imm.rotate_right(rot)
@@ -305,10 +308,19 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
         };
 
         let mut mask = 0u32;
-        if mask_flags { mask |= 0xF000_0000; }
-        // Only allow control field modification in privileged modes (not User)
-        if mask_ctrl && cpu.get_mode() != super::CpuMode::User {
-            mask |= 0x0000_00DF; // 0xDF = 0xFF with bit 5 (T-bit) masked out; T must not be changed via MSR
+        if mask_flags {
+            mask |= 0xF000_0000;
+        }
+        if cpu.get_mode() != super::CpuMode::User {
+            if mask_status {
+                mask |= 0x00FF_0000;
+            }
+            if mask_ext {
+                mask |= 0x0000_FF00;
+            }
+            if mask_ctrl {
+                mask |= 0x0000_00DF; // Bit 5 (T-bit) masked out; T must not be changed via MSR
+            }
         }
 
         if r {
@@ -425,6 +437,7 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
                 if s {
                     let spsr = cpu.get_spsr();
                     cpu.set_cpsr(spsr);
+                    cpu.in_irq = false;
                     if (spsr & FLAG_T) != 0 {
                         cpu.regs[15] = res & !1;
                     } else {

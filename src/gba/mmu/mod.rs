@@ -43,6 +43,7 @@ pub struct Mmu {
     pub flight_recorder: FlightRecorder,
     pub current_pc: u32,
     pub current_cycles: u64,
+    pub intr_wait_mask: Option<u16>,
 }
 
 impl Default for Mmu {
@@ -93,6 +94,7 @@ impl Mmu {
             flight_recorder: FlightRecorder::new(),
             current_pc: 0,
             current_cycles: 0,
+            intr_wait_mask: None,
         }
     }
 
@@ -280,6 +282,10 @@ impl Mmu {
             0x00A => self.ppu.bgcnt[1],
             0x00C => self.ppu.bgcnt[2],
             0x00E => self.ppu.bgcnt[3],
+            0x048 => self.ppu.winin,
+            0x04A => self.ppu.winout,
+            0x050 => self.ppu.bldcnt,
+            0x052 => self.ppu.bldalpha,
             0x060..=0x0A6 => self.apu.read_reg16(addr),
             0x0B0 => self.dma.channels[0].sad as u16,
             0x0B2 => (self.dma.channels[0].sad >> 16) as u16,
@@ -597,6 +603,9 @@ impl Mmu {
 
     pub fn request_interrupt(&mut self, irq_bit: u16) {
         self.if_reg |= 1 << irq_bit;
+        // Mirror into BIOS Interrupt Flags in IWRAM at 0x03007FF8
+        let cur = self.read16(0x0300_7FF8);
+        self.write16(0x0300_7FF8, cur | (1 << irq_bit));
     }
 
     pub fn has_pending_irq(&self) -> bool {
@@ -615,14 +624,14 @@ impl Mmu {
             let mut writes_16: Vec<(u32, u16)> = Vec::new();
             let mut writes_32: Vec<(u32, u32)> = Vec::new();
 
-            {
+            let pending_wait = {
                 let read_8 = |addr: u32| -> u8 { self.read8(addr) };
                 let mut write_8 = |addr: u32, val: u8| { writes_8.push((addr, val)); };
                 let mut write_16 = |addr: u32, val: u16| { writes_16.push((addr, val)); };
                 let mut write_32 = |addr: u32, val: u32| { writes_32.push((addr, val)); };
 
-                bios::execute_hle_swi(swi_num, cpu, &read_8, &mut write_8, &mut write_16, &mut write_32);
-            }
+                bios::execute_hle_swi(swi_num, cpu, &read_8, &mut write_8, &mut write_16, &mut write_32)
+            };
 
             for (addr, val) in writes_8 {
                 self.write8(addr, val);
@@ -633,6 +642,8 @@ impl Mmu {
             for (addr, val) in writes_32 {
                 self.write32(addr, val);
             }
+
+            self.intr_wait_mask = pending_wait;
         } else {
             cpu.trigger_swi(comment);
         }

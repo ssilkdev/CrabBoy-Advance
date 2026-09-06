@@ -74,6 +74,7 @@ impl Gba {
         self.mmu.ime = false;
         self.mmu.ie = 0;
         self.mmu.if_reg = 0;
+        self.mmu.intr_wait_mask = None;
         self.diagnostics.reset();
     }
 
@@ -141,6 +142,20 @@ impl Gba {
         // On GBA, HALT is only broken when (IE & IF) != 0
         if self.cpu.halted && (self.mmu.ie & self.mmu.if_reg) != 0 {
             self.cpu.halted = false;
+        }
+
+        // If waiting in IntrWait / VBlankIntrWait and not servicing an IRQ, check if target interrupt occurred
+        if let Some(mask) = self.mmu.intr_wait_mask {
+            if !self.cpu.in_irq {
+                let flags = self.mmu.read16(0x0300_7FF8);
+                if (flags & mask) != 0 {
+                    self.mmu.write16(0x0300_7FF8, flags & !mask);
+                    self.mmu.intr_wait_mask = None;
+                    self.cpu.halted = false;
+                } else {
+                    self.cpu.halted = true;
+                }
+            }
         }
 
         // Step APU

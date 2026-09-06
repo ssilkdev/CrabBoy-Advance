@@ -3,7 +3,7 @@
 
 use super::super::cpu::Arm7Tdmi;
 
-pub fn execute_hle_swi(swi_number: u8, cpu: &mut Arm7Tdmi, read_mem8: &impl Fn(u32) -> u8, write_mem8: &mut impl FnMut(u32, u8), write_mem16: &mut impl FnMut(u32, u16), write_mem32: &mut impl FnMut(u32, u32)) {
+pub fn execute_hle_swi(swi_number: u8, cpu: &mut Arm7Tdmi, read_mem8: &impl Fn(u32) -> u8, write_mem8: &mut impl FnMut(u32, u8), write_mem16: &mut impl FnMut(u32, u16), write_mem32: &mut impl FnMut(u32, u32)) -> Option<u16> {
     match swi_number {
         0x01 => {
             // RegisterRamReset
@@ -48,8 +48,30 @@ pub fn execute_hle_swi(swi_number: u8, cpu: &mut Arm7Tdmi, read_mem8: &impl Fn(u
             cpu.halted = true;
         }
         0x04 | 0x05 => {
-            // IntrWait / VBlankIntrWait
-            cpu.halted = true;
+            // IntrWait (SWI 0x04) / VBlankIntrWait (SWI 0x05)
+            let (discard, wait_mask) = if swi_number == 0x05 {
+                (true, 1u16)
+            } else {
+                (cpu.regs[0] != 0, cpu.regs[1] as u16)
+            };
+
+            let low = read_mem8(0x0300_7FF8) as u16;
+            let high = read_mem8(0x0300_7FF9) as u16;
+            let mut flags = low | (high << 8);
+
+            if discard {
+                flags &= !wait_mask;
+                write_mem16(0x0300_7FF8, flags);
+            }
+
+            if (flags & wait_mask) != 0 {
+                write_mem16(0x0300_7FF8, flags & !wait_mask);
+                cpu.halted = false;
+                return None;
+            } else {
+                cpu.halted = true;
+                return Some(wait_mask);
+            }
         }
         0x06 => {
             // Div(num, den) -> R0 = num / den, R1 = num % den, R3 = abs(num / den)
@@ -424,4 +446,5 @@ pub fn execute_hle_swi(swi_number: u8, cpu: &mut Arm7Tdmi, read_mem8: &impl Fn(u
             );
         }
     }
+    None
 }

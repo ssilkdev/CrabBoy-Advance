@@ -1051,6 +1051,201 @@ mod tests {
             OverallHealthGrade::Pass | OverallHealthGrade::Warning | OverallHealthGrade::Critical
         ));
     }
+
+    #[test]
+    fn test_arm_msr_instruction_decoding() {
+        use gba_simulator::gba::cpu::arm::step_arm;
+        use gba_simulator::gba::cpu::{Arm7Tdmi, CpuMode, FLAG_C, FLAG_N, FLAG_V, FLAG_Z};
+        use gba_simulator::gba::mmu::Mmu;
+
+        let mut cpu = Arm7Tdmi::new();
+        let mut mmu = Mmu::new();
+
+        // 1. msr cpsr_c, r3 (control only) where r3 = 0x1F (System mode)
+        // Opcode: 0xE121F003
+        // cond = E, I = 0, R = 0, field = 0001 (c), Rd = F, Rm = 3
+        cpu.set_mode(CpuMode::Supervisor);
+        assert_eq!(cpu.get_mode(), CpuMode::Supervisor);
+        cpu.regs[3] = 0x0000_001F; // System mode
+        mmu.write32(0x0300_0000, 0xE121_F003); // msr cpsr_c, r3
+        cpu.regs[15] = 0x0300_0000;
+        step_arm(&mut cpu, &mut mmu);
+        assert_eq!(cpu.get_mode(), CpuMode::System, "msr cpsr_c must switch CPU mode to System");
+
+        // 2. msr cpsr_c, r2 where r2 switches to IRQ mode (0x12)
+        cpu.regs[2] = 0x0000_0012; // IRQ mode
+        mmu.write32(0x0300_0004, 0xE121_F002); // msr cpsr_c, r2
+        cpu.regs[15] = 0x0300_0004;
+        step_arm(&mut cpu, &mut mmu);
+        assert_eq!(cpu.get_mode(), CpuMode::Irq, "msr cpsr_c must switch CPU mode to IRQ");
+
+        // 3. msr cpsr_f, r1 (flags only) where r1 = 0xF000_0000 (sets N, Z, C, V)
+        // Opcode: 0xE128F001
+        // cond = E, I = 0, R = 0, field = 1000 (f), Rd = F, Rm = 1
+        cpu.regs[1] = 0xF000_0000;
+        mmu.write32(0x0300_0008, 0xE128_F001); // msr cpsr_f, r1
+        cpu.regs[15] = 0x0300_0008;
+        step_arm(&mut cpu, &mut mmu);
+        assert!(cpu.get_flag(FLAG_N));
+        assert!(cpu.get_flag(FLAG_Z));
+        assert!(cpu.get_flag(FLAG_C));
+        assert!(cpu.get_flag(FLAG_V));
+        assert_eq!(cpu.get_mode(), CpuMode::Irq, "msr cpsr_f must NOT change mode");
+
+        // 4. msr cpsr_c, #0x1F (immediate mode)
+        // Opcode: 0xE321F01F
+        // cond = E, I = 1, R = 0, field = 0001 (c), Rd = F, imm8 = 0x1F
+        mmu.write32(0x0300_000C, 0xE321_F01F);
+        cpu.regs[15] = 0x0300_000C;
+        step_arm(&mut cpu, &mut mmu);
+        assert_eq!(cpu.get_mode(), CpuMode::System, "immediate msr cpsr_c must switch mode to System");
+    }
+
+    #[test]
+    fn test_swi_intr_wait_and_vblank_wait() {
+        use gba_simulator::gba::Gba;
+
+        let mut gba = Gba::new();
+
+        // 1. Initially IWRAM BIOS flag at 0x0300_7FF8 is 0
+        assert_eq!(gba.mmu.read16(0x0300_7FF8), 0);
+
+        // 2. Call VBlankIntrWait (SWI 0x05) from ARM code at 0x0300_0000
+        // SWI 0x05 ARM instruction: 0xEF05_0000
+        gba.mmu.write32(0x0300_0000, 0xEF05_0000);
+        gba.cpu.regs[15] = 0x0300_0000;
+        gba.step_instruction();
+
+        // CPU must now be halted with intr_wait_mask = Some(1)
+        assert!(gba.cpu.halted);
+        assert_eq!(gba.mmu.intr_wait_mask, Some(1));
+
+        // 3. Fire non-matching interrupt (e.g. HBlank = bit 1)
+        gba.mmu.request_interrupt(1);
+        gba.mmu.ime = true;
+        gba.mmu.ie = 0x0002; // HBlank enabled
+
+        // Step while HBlank is pending: CPU should unhalt, take IRQ, run IRQ code
+        gba.step_instruction();
+        assert!(gba.cpu.in_irq);
+
+        // Complete the 6 BIOS IRQ dispatcher instructions to return from IRQ
+        // Setup dummy user handler at [0x03007FFC] returning immediately via bx lr (0xE12FFF1E)
+        gba.mmu.write32(0x0300_7FFC, 0x0300_1000);
+        gba.mmu.write32(0x0300_1000, 0xE12F_FF1E); // bx lr
+
+        for _ in 0..10 {
+            gba.step_instruction();
+            if !gba.cpu.in_irq {
+                break;
+            }
+        }
+        assert!(!gba.cpu.in_irq);
+
+        // Because VBlank was NOT fired, CPU must return to HALT!
+        assert!(gba.cpu.halted, "CPU must remain halted because VBlank (bit 0) has not occurred");
+        assert_eq!(gba.mmu.intr_wait_mask, Some(1));
+
+        // 4. Now fire VBlank interrupt (bit 0)
+        gba.mmu.request_interrupt(0);
+        gba.mmu.ie |= 0x0001; // Enable VBlank
+
+        // Step to trigger IRQ
+        gba.step_instruction();
+        assert!(gba.cpu.in_irq);
+
+        // Run until IRQ finishes
+        for _ in 0..10 {
+            gba.step_instruction();
+            if !gba.cpu.in_irq {
+                break;
+            }
+        }
+        assert!(!gba.cpu.in_irq);
+
+        // Now VBlank condition was satisfied: CPU is unhalted and intr_wait_mask cleared!
+        assert!(!gba.cpu.halted, "CPU must unhalt when VBlank condition is satisfied");
+        assert_eq!(gba.mmu.intr_wait_mask, None);
+    }
+
+    #[test]
+    fn test_ppu_hblank_masking_during_vblank() {
+        use gba_simulator::gba::ppu::Ppu;
+
+        let mut ppu = Ppu::new();
+        ppu.dispstat = 1 << 4; // Enable HBlank IRQ
+
+        // Step to active line (e.g. scanline 50) and test HBlank
+        ppu.vcount = 50;
+        ppu.cycle_in_scanline = 0;
+        let (_, irq_hblank, _, _, dma_hblank) = ppu.step(1000); // Past cycle 960 (HBlank)
+        assert!(irq_hblank, "HBlank IRQ must fire on active scanlines (vcount < 160)");
+        assert!(dma_hblank, "HBlank DMA must fire on active scanlines");
+        assert_eq!(ppu.dispstat & 2, 2, "HBlank flag must be set during active scanlines");
+
+        // Step during VBlank (e.g. scanline 180)
+        ppu.vcount = 180;
+        ppu.dispstat |= 1; // In VBlank
+        ppu.cycle_in_scanline = 0;
+        let (_, irq_hblank, _, _, dma_hblank) = ppu.step(1000);
+        assert!(!irq_hblank, "HBlank IRQ must NOT fire during VBlank (vcount >= 160)");
+        assert!(!dma_hblank, "HBlank DMA must NOT fire during VBlank");
+        assert_eq!(ppu.dispstat & 2, 0, "HBlank flag must NOT be set during VBlank");
+
+        // Verify scanline 227 clears VBlank flag
+        ppu.vcount = 226;
+        ppu.cycle_in_scanline = 1230;
+        ppu.step(10); // Transitions to vcount = 227
+        assert_eq!(ppu.vcount, 227);
+        assert_eq!(ppu.dispstat & 1, 0, "VBlank flag must be cleared on scanline 227");
+    }
+
+    #[test]
+    fn test_mmu_window_and_blend_io_reads() {
+        use gba_simulator::gba::mmu::Mmu;
+
+        let mut mmu = Mmu::new();
+
+        // Write to WININ (0x048) and read back
+        mmu.write16(0x0400_0048, 0x3F1F);
+        assert_eq!(mmu.read16(0x0400_0048), 0x3F1F);
+
+        // Write to WINOUT (0x04A) and read back
+        mmu.write16(0x0400_004A, 0x1F2E);
+        assert_eq!(mmu.read16(0x0400_004A), 0x1F2E);
+
+        // Write to BLDCNT (0x050) and read back
+        mmu.write16(0x0400_0050, 0x0148);
+        assert_eq!(mmu.read16(0x0400_0050), 0x0148);
+
+        // Write to BLDALPHA (0x052) and read back
+        mmu.write16(0x0400_0052, 0x0810);
+        assert_eq!(mmu.read16(0x0400_0052), 0x0810);
+    }
+
+    #[test]
+    fn test_audio_linter_directsound_not_stuck_note() {
+        use gba_simulator::gba::apu::Apu;
+        use gba_simulator::gba::diagnostics::{AudioLinter, HealthGrade};
+
+        let mut apu = Apu::new();
+        let mut linter = AudioLinter::new();
+
+        // DirectSound active with continuous playback
+        apu.sound_a.left_enable = true;
+        apu.sound_a.right_enable = true;
+        apu.sound_a.volume = 0.5;
+
+        // Simulate 300 frames of continuous DirectSound playback
+        for _ in 0..300 {
+            linter.on_frame(&apu);
+            linter.process_samples(&[0.1, -0.1, 0.2, -0.2]);
+        }
+
+        let report = linter.evaluate_health();
+        assert_eq!(report.grade, HealthGrade::Pass, "DirectSound continuous streaming must not be flagged as stuck note");
+        assert!(report.stuck_notes_detected.is_empty());
+    }
 }
 
 

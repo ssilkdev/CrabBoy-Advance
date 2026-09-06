@@ -201,7 +201,8 @@ impl AudioLinter {
 
         for (idx, t) in self.channel_telemetry.iter().enumerate() {
             // Stuck note: active continuously for > 180 frames (~3 seconds) with zero envelope or frequency change
-            if t.consecutive_static_frames > 180 {
+            // Only applies to PSG tone channels (idx >= 2); DirectSound channels play streaming PCM
+            if idx >= 2 && t.consecutive_static_frames > 180 {
                 grade = HealthGrade::Critical;
                 let msg = format!("{}: Stuck Note Anomaly! Continuous static playback for {} frames (freq: {}, vol: {}).", ch_names[idx], t.consecutive_static_frames, t.last_freq, t.last_vol);
                 stuck_notes.push(msg.clone());

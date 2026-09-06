@@ -71,6 +71,8 @@ pub struct Arm7Tdmi {
     pub irq_pending: bool,
     /// Master interrupt cycle counter
     pub cycles: u64,
+    /// Whether CPU is currently executing an IRQ handler
+    pub in_irq: bool,
 }
 
 impl Default for Arm7Tdmi {
@@ -106,6 +108,7 @@ impl Arm7Tdmi {
             halted: false,
             irq_pending: false,
             cycles: 0,
+            in_irq: false,
         };
         cpu.regs[13] = 0x03007F00;
         cpu
@@ -272,6 +275,7 @@ impl Arm7Tdmi {
             return; // IRQ disabled
         }
         self.halted = false;
+        self.in_irq = true;
         let return_pc = self.regs[15].wrapping_add(4);
         let old_cpsr = self.cpsr;
         self.set_mode(CpuMode::Irq);
