@@ -1,6 +1,8 @@
 # 🦀 CrabBoy Advance
 
-Created fully with AI using Google Antigravity with Gemini Flash 3.8 Flash and Claude Opus 4.6. 
+Created fully with AI using Google Antigravity with Gemini Flash 3.8 Flash and Claude Opus 4.6.
+
+A cycle-accurate, high-performance Game Boy Advance (GBA) emulator written in pure Rust with 5.1 Surround & 3D Spatial Audio, xBRZ / NVIDIA Image Sharpening, Live Rewind, Cheat Engine, Link Cable SIO Networking, Hardware Sensor Emulation, and a modern Windows 11 Fluent dark UI.
 
 ---
 
