@@ -653,13 +653,13 @@ mod tests {
     fn test_updater_state_transitions() {
         use gba_simulator::ui::updater::{is_newer, parse_version, UpdateManager, UpdateStatus};
 
-        assert_eq!(parse_version("0.2.0"), Some((0, 2, 0)));
-        assert_eq!(parse_version("v0.3.0"), Some((0, 3, 0)));
+        assert_eq!(parse_version("0.3.0"), Some((0, 3, 0)));
+        assert_eq!(parse_version("v0.4.0"), Some((0, 4, 0)));
         assert_eq!(parse_version("v1.0.0"), Some((1, 0, 0)));
-        assert!(is_newer("v0.3.0", "0.2.0"));
-        assert!(is_newer("v0.2.1", "0.2.0"));
-        assert!(!is_newer("v0.2.0", "0.2.0"));
-        assert!(!is_newer("v0.1.0", "0.2.0"));
+        assert!(is_newer("v0.4.0", "0.3.0"));
+        assert!(is_newer("v0.3.1", "0.3.0"));
+        assert!(!is_newer("v0.3.0", "0.3.0"));
+        assert!(!is_newer("v0.2.0", "0.3.0"));
 
         let updater = UpdateManager::new();
         assert_eq!(*updater.status.lock().unwrap(), UpdateStatus::Idle);

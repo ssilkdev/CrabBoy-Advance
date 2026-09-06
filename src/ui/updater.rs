@@ -427,12 +427,12 @@ mod tests {
 
     #[test]
     fn test_is_newer() {
-        assert!(is_newer("v0.2.1", "0.2.0"));
-        assert!(is_newer("v0.3.0", "0.2.0"));
-        assert!(is_newer("v1.0.0", "0.2.0"));
-        assert!(!is_newer("v0.2.0", "0.2.0"));
-        assert!(!is_newer("v0.1.9", "0.2.0"));
-        assert!(!is_newer("0.2.0", "0.2.0"));
+        assert!(is_newer("v0.3.1", "0.3.0"));
+        assert!(is_newer("v0.4.0", "0.3.0"));
+        assert!(is_newer("v1.0.0", "0.3.0"));
+        assert!(!is_newer("v0.3.0", "0.3.0"));
+        assert!(!is_newer("v0.2.0", "0.3.0"));
+        assert!(!is_newer("0.3.0", "0.3.0"));
     }
 
     #[test]

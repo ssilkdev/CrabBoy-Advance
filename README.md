@@ -38,6 +38,7 @@ A cycle-accurate, high-performance Game Boy Advance (GBA) emulator written in pu
   - **TAS Engine**: Frame-accurate macro recording, `.tas` script export/import, and single-frame stepping (`F6`, `.` / `N`).
   - **Embedded Strategy Guide & Manual**: 8-page illustrated Pokémon field guide baked into the binary with interactive chapter navigation, zoom, and PDF export (`F1`).
   - **Mascot Logo & Windows PE Executable Icon**: Custom Rust crab mascot and multi-resolution Windows PE resource icon (`assets/icon.ico`).
+  - **Auto-Updater & GitHub Release Checker**: Asynchronous startup update detection with one-click in-place executable download and restart (`Help ➔ Check for Updates` or top menu `Update` tab).
   - **Memory Hex Editor & PPU Inspector**: Live byte delta heatmap highlighting, watchpoints, and 128-sprite OAM gallery.
 
 ---
