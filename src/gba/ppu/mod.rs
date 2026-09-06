@@ -1,4 +1,5 @@
 //! GBA Picture Processing Unit (PPU)
+#![allow(clippy::needless_range_loop)]
 
 pub mod bg;
 pub mod blend;

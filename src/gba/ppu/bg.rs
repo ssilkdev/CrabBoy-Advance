@@ -1,4 +1,6 @@
 //! GBA PPU Background Layers Rendering (Modes 0 to 5)
+#![allow(clippy::needless_range_loop)]
+// Note: range loops used here are idiomatic for pixel rendering where the index
 
 use super::blend::Pixel;
 

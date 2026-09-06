@@ -154,7 +154,7 @@ impl AudioOutput {
 
                             let surround_l = ((diff_l * 0.5 + delayed_l * 0.5) * width).clamp(-1.0, 1.0);
                             let surround_r = ((diff_r * 0.5 + delayed_r * 0.5) * width).clamp(-1.0, 1.0);
-                            let center = ((left + right) * 0.7071).clamp(-1.0, 1.0);
+                            let center = ((left + right) * std::f32::consts::FRAC_1_SQRT_2).clamp(-1.0, 1.0);
 
                             // 3. Headphone 3D Spatializer (Bauer Crossfeed & Sub-Bass Reinforcement)
                             cross_l += cross_alpha * (right - cross_l);
