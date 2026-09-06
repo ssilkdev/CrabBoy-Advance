@@ -155,6 +155,60 @@ impl Default for Channel1 {
 }
 
 impl Channel1 {
+    pub fn trigger(&mut self) {
+        self.active = true;
+        if self.length_counter == 0 {
+            self.length_counter = 64;
+        }
+        self.timer = (2048 - self.frequency as i32) * 16;
+        self.envelope.trigger();
+        self.sweep.trigger(self.frequency, &mut self.active);
+
+        // Channel disabled if DAC is powered off (initial volume == 0 && direction is dec)
+        if self.envelope.initial_volume == 0 && !self.envelope.direction_inc {
+            self.active = false;
+        }
+    }
+
+    pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            self.sweep.shift = val & 0x07;
+            self.sweep.decrease = (val & 0x08) != 0;
+            self.sweep.period = (val >> 4) & 0x07;
+            self.cnt_l = (self.cnt_l & 0xFF00) | (val as u16);
+        }
+    }
+
+    pub fn write_cnt_h_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            let len = (val & 0x3F) as u16;
+            self.length_counter = 64 - len;
+            self.duty = ((val >> 6) & 0x03) as usize;
+            self.cnt_h = (self.cnt_h & 0xFF00) | (val as u16);
+        } else {
+            self.envelope.period = val & 0x07;
+            self.envelope.direction_inc = (val & 0x08) != 0;
+            self.envelope.initial_volume = (val >> 4) & 0x0F;
+            self.cnt_h = (self.cnt_h & 0x00FF) | ((val as u16) << 8);
+        }
+    }
+
+    pub fn write_cnt_x_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            // Low byte (NR13): lower 8 bits of frequency. DOES NOT TRIGGER!
+            self.frequency = (self.frequency & 0x0700) | (val as u16);
+            self.cnt_x = (self.cnt_x & 0xFF00) | (val as u16);
+        } else {
+            // High byte (NR14): upper 3 bits of frequency, length enable, trigger
+            self.frequency = (self.frequency & 0x00FF) | (((val & 0x07) as u16) << 8);
+            self.length_enabled = (val & 0x40) != 0;
+            self.cnt_x = (self.cnt_x & 0x00FF) | (((val & 0x47) as u16) << 8);
+            if (val & 0x80) != 0 {
+                self.trigger();
+            }
+        }
+    }
+
     pub fn write_cnt_l(&mut self, val: u16) {
         self.cnt_l = val;
         self.sweep.shift = (val & 0x07) as u8;
@@ -174,24 +228,13 @@ impl Channel1 {
     }
 
     pub fn write_cnt_x(&mut self, val: u16) {
-        self.cnt_x = val;
-        self.frequency = (self.frequency & 0x0700) | (val & 0x07FF);
+        self.frequency = val & 0x07FF;
         self.length_enabled = (val & 0x4000) != 0;
+        self.cnt_x = val & 0x47FF;
 
         // Trigger
         if (val & 0x8000) != 0 {
-            self.active = true;
-            if self.length_counter == 0 {
-                self.length_counter = 64;
-            }
-            self.timer = (2048 - self.frequency as i32) * 16;
-            self.envelope.trigger();
-            self.sweep.trigger(self.frequency, &mut self.active);
-
-            // Channel disabled if DAC is powered off (initial volume == 0 && direction is dec)
-            if self.envelope.initial_volume == 0 && !self.envelope.direction_inc {
-                self.active = false;
-            }
+            self.trigger();
         }
     }
 
@@ -271,6 +314,49 @@ impl Default for Channel2 {
 }
 
 impl Channel2 {
+    pub fn trigger(&mut self) {
+        self.active = true;
+        if self.length_counter == 0 {
+            self.length_counter = 64;
+        }
+        self.timer = (2048 - self.frequency as i32) * 16;
+        self.envelope.trigger();
+
+        if self.envelope.initial_volume == 0 && !self.envelope.direction_inc {
+            self.active = false;
+        }
+    }
+
+    pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            let len = (val & 0x3F) as u16;
+            self.length_counter = 64 - len;
+            self.duty = ((val >> 6) & 0x03) as usize;
+            self.cnt_l = (self.cnt_l & 0xFF00) | (val as u16);
+        } else {
+            self.envelope.period = val & 0x07;
+            self.envelope.direction_inc = (val & 0x08) != 0;
+            self.envelope.initial_volume = (val >> 4) & 0x0F;
+            self.cnt_l = (self.cnt_l & 0x00FF) | ((val as u16) << 8);
+        }
+    }
+
+    pub fn write_cnt_h_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            // NR23: Frequency low 8 bits (DOES NOT TRIGGER!)
+            self.frequency = (self.frequency & 0x0700) | (val as u16);
+            self.cnt_h = (self.cnt_h & 0xFF00) | (val as u16);
+        } else {
+            // NR24: Frequency high 3 bits, length enable, trigger
+            self.frequency = (self.frequency & 0x00FF) | (((val & 0x07) as u16) << 8);
+            self.length_enabled = (val & 0x40) != 0;
+            self.cnt_h = (self.cnt_h & 0x00FF) | (((val & 0x47) as u16) << 8);
+            if (val & 0x80) != 0 {
+                self.trigger();
+            }
+        }
+    }
+
     pub fn write_cnt_l(&mut self, val: u16) {
         self.cnt_l = val;
         let len = (val & 0x3F) as u16;
@@ -283,22 +369,13 @@ impl Channel2 {
     }
 
     pub fn write_cnt_h(&mut self, val: u16) {
-        self.cnt_h = val;
         self.frequency = val & 0x07FF;
         self.length_enabled = (val & 0x4000) != 0;
+        self.cnt_h = val & 0x47FF;
 
         // Trigger
         if (val & 0x8000) != 0 {
-            self.active = true;
-            if self.length_counter == 0 {
-                self.length_counter = 64;
-            }
-            self.timer = (2048 - self.frequency as i32) * 16;
-            self.envelope.trigger();
-
-            if self.envelope.initial_volume == 0 && !self.envelope.direction_inc {
-                self.active = false;
-            }
+            self.trigger();
         }
     }
 
@@ -382,6 +459,54 @@ impl Default for Channel3 {
 }
 
 impl Channel3 {
+    pub fn trigger(&mut self) {
+        self.active = self.master_enable;
+        if self.length_counter == 0 {
+            self.length_counter = 256;
+        }
+        self.timer = (2048 - self.frequency as i32) * 8;
+        self.sample_index = 0;
+    }
+
+    pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            self.two_banks = (val & 0x20) != 0;
+            self.bank = ((val >> 6) & 1) as usize;
+            self.master_enable = (val & 0x80) != 0;
+            if !self.master_enable {
+                self.active = false;
+            }
+            self.cnt_l = (self.cnt_l & 0xFF00) | (val as u16);
+        }
+    }
+
+    pub fn write_cnt_h_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            self.length_counter = 256 - (val as u16);
+            self.cnt_h = (self.cnt_h & 0xFF00) | (val as u16);
+        } else {
+            self.volume_code = ((val >> 5) & 0x03) as u8;
+            self.force_75 = (val & 0x80) != 0;
+            self.cnt_h = (self.cnt_h & 0x00FF) | ((val as u16) << 8);
+        }
+    }
+
+    pub fn write_cnt_x_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            // NR33: Frequency low 8 bits (DOES NOT TRIGGER!)
+            self.frequency = (self.frequency & 0x0700) | (val as u16);
+            self.cnt_x = (self.cnt_x & 0xFF00) | (val as u16);
+        } else {
+            // NR34: Frequency high 3 bits, length enable, trigger
+            self.frequency = (self.frequency & 0x00FF) | (((val & 0x07) as u16) << 8);
+            self.length_enabled = (val & 0x40) != 0;
+            self.cnt_x = (self.cnt_x & 0x00FF) | (((val & 0x47) as u16) << 8);
+            if (val & 0x80) != 0 {
+                self.trigger();
+            }
+        }
+    }
+
     pub fn write_cnt_l(&mut self, val: u16) {
         self.cnt_l = val;
         self.two_banks = (val & 0x0020) != 0;
@@ -401,18 +526,13 @@ impl Channel3 {
     }
 
     pub fn write_cnt_x(&mut self, val: u16) {
-        self.cnt_x = val;
         self.frequency = val & 0x07FF;
         self.length_enabled = (val & 0x4000) != 0;
+        self.cnt_x = val & 0x47FF;
 
         // Trigger
         if (val & 0x8000) != 0 {
-            self.active = self.master_enable;
-            if self.length_counter == 0 {
-                self.length_counter = 256;
-            }
-            self.timer = (2048 - self.frequency as i32) * 8;
-            self.sample_index = 0;
+            self.trigger();
         }
     }
 
@@ -507,6 +627,50 @@ impl Default for Channel4 {
 }
 
 impl Channel4 {
+    pub fn trigger(&mut self) {
+        self.active = true;
+        self.lfsr = 0x7FFF;
+        if self.length_counter == 0 {
+            self.length_counter = 64;
+        }
+        self.timer = self.calc_period();
+        self.envelope.trigger();
+
+        if self.envelope.initial_volume == 0 && !self.envelope.direction_inc {
+            self.active = false;
+        }
+    }
+
+    pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            let len = (val & 0x3F) as u16;
+            self.length_counter = 64 - len;
+            self.cnt_l = (self.cnt_l & 0xFF00) | (val as u16);
+        } else {
+            self.envelope.period = val & 0x07;
+            self.envelope.direction_inc = (val & 0x08) != 0;
+            self.envelope.initial_volume = (val >> 4) & 0x0F;
+            self.cnt_l = (self.cnt_l & 0x00FF) | ((val as u16) << 8);
+        }
+    }
+
+    pub fn write_cnt_h_byte(&mut self, byte_idx: u8, val: u8) {
+        if byte_idx == 0 {
+            // NR43: ratio, width, shift clock (DOES NOT TRIGGER!)
+            self.ratio = val & 0x07;
+            self.width_7bit = (val & 0x08) != 0;
+            self.shift_clock = (val >> 4) & 0x0F;
+            self.cnt_h = (self.cnt_h & 0xFF00) | (val as u16);
+        } else {
+            // NR44: length enable, trigger
+            self.length_enabled = (val & 0x40) != 0;
+            self.cnt_h = (self.cnt_h & 0x00FF) | (((val & 0x40) as u16) << 8);
+            if (val & 0x80) != 0 {
+                self.trigger();
+            }
+        }
+    }
+
     pub fn write_cnt_l(&mut self, val: u16) {
         self.cnt_l = val;
         let len = (val & 0x3F) as u16;
@@ -518,25 +682,15 @@ impl Channel4 {
     }
 
     pub fn write_cnt_h(&mut self, val: u16) {
-        self.cnt_h = val;
         self.ratio = (val & 0x07) as u8;
         self.width_7bit = (val & 0x08) != 0;
         self.shift_clock = ((val >> 4) & 0x0F) as u8;
         self.length_enabled = (val & 0x4000) != 0;
+        self.cnt_h = val & 0x40FF;
 
         // Trigger
         if (val & 0x8000) != 0 {
-            self.active = true;
-            self.lfsr = 0x7FFF;
-            if self.length_counter == 0 {
-                self.length_counter = 64;
-            }
-            self.timer = self.calc_period();
-            self.envelope.trigger();
-
-            if self.envelope.initial_volume == 0 && !self.envelope.direction_inc {
-                self.active = false;
-            }
+            self.trigger();
         }
     }
 

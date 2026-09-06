@@ -77,6 +77,10 @@ pub struct Apu {
     dc_y_r: f32,
     lp_l: f32,
     lp_r: f32,
+
+    // Real-time Oscilloscope Waveform Ring Buffer
+    pub scope_buffer: [f32; 512],
+    pub scope_idx: usize,
 }
 
 impl Default for Apu {
@@ -111,25 +115,27 @@ impl Apu {
             dc_y_r: 0.0,
             lp_l: 0.0,
             lp_r: 0.0,
+            scope_buffer: [0.0; 512],
+            scope_idx: 0,
         }
     }
 
     pub fn read_reg16(&self, addr: u32) -> u16 {
         match addr & 0x3FE {
-            0x060 => self.dmg.ch1.cnt_l,
-            0x062 => self.dmg.ch1.cnt_h,
-            0x064 => self.dmg.ch1.cnt_x,
-            0x068 => self.dmg.ch2.cnt_l,
-            0x06C => self.dmg.ch2.cnt_h,
-            0x070 => self.dmg.ch3.cnt_l,
-            0x072 => self.dmg.ch3.cnt_h,
-            0x074 => self.dmg.ch3.cnt_x,
-            0x078 => self.dmg.ch4.cnt_l,
-            0x07C => self.dmg.ch4.cnt_h,
-            0x080 => self.soundcnt_l,
-            0x082 => self.soundcnt_h,
+            0x060 => self.dmg.ch1.cnt_l & 0x007F,
+            0x062 => self.dmg.ch1.cnt_h & 0xFFC0,
+            0x064 => if self.dmg.ch1.length_enabled { 0x4000 } else { 0 },
+            0x068 => self.dmg.ch2.cnt_l & 0xFFC0,
+            0x06C => if self.dmg.ch2.length_enabled { 0x4000 } else { 0 },
+            0x070 => self.dmg.ch3.cnt_l & 0x00E0,
+            0x072 => self.dmg.ch3.cnt_h & 0xE000,
+            0x074 => if self.dmg.ch3.length_enabled { 0x4000 } else { 0 },
+            0x078 => self.dmg.ch4.cnt_l & 0xFF00,
+            0x07C => (self.dmg.ch4.cnt_h & 0x00FF) | if self.dmg.ch4.length_enabled { 0x4000 } else { 0 },
+            0x080 => self.soundcnt_l & 0xFF77,
+            0x082 => self.soundcnt_h & 0x770F,
             0x084 => (self.soundcnt_x & 0x0080) | self.dmg.soundcnt_x_bits(),
-            0x088 => self.soundbias,
+            0x088 => self.soundbias & 0xC3FE,
             0x090..=0x09E => {
                 let off = (addr & 0x0E) as usize;
                 let lo = self.dmg.ch3.read_wave_ram(off) as u16;
@@ -137,6 +143,72 @@ impl Apu {
                 lo | (hi << 8)
             }
             _ => 0,
+        }
+    }
+
+    pub fn read_reg8(&self, addr: u32) -> u8 {
+        let off = addr & 0x3FF;
+        match off {
+            0x090..=0x09F => self.dmg.ch3.read_wave_ram((off & 0x0F) as usize),
+            _ => {
+                let val16 = self.read_reg16(off & !1);
+                if (off & 1) != 0 {
+                    (val16 >> 8) as u8
+                } else {
+                    (val16 & 0xFF) as u8
+                }
+            }
+        }
+    }
+
+    pub fn write_reg8(&mut self, addr: u32, val: u8) {
+        let off = addr & 0x3FF;
+        match off {
+            0x060 => self.dmg.ch1.write_cnt_l_byte(0, val),
+            0x061 => self.dmg.ch1.write_cnt_l_byte(1, val),
+            0x062 => self.dmg.ch1.write_cnt_h_byte(0, val),
+            0x063 => self.dmg.ch1.write_cnt_h_byte(1, val),
+            0x064 => self.dmg.ch1.write_cnt_x_byte(0, val),
+            0x065 => self.dmg.ch1.write_cnt_x_byte(1, val),
+            0x068 => self.dmg.ch2.write_cnt_l_byte(0, val),
+            0x069 => self.dmg.ch2.write_cnt_l_byte(1, val),
+            0x06C => self.dmg.ch2.write_cnt_h_byte(0, val),
+            0x06D => self.dmg.ch2.write_cnt_h_byte(1, val),
+            0x070 => self.dmg.ch3.write_cnt_l_byte(0, val),
+            0x071 => self.dmg.ch3.write_cnt_l_byte(1, val),
+            0x072 => self.dmg.ch3.write_cnt_h_byte(0, val),
+            0x073 => self.dmg.ch3.write_cnt_h_byte(1, val),
+            0x074 => self.dmg.ch3.write_cnt_x_byte(0, val),
+            0x075 => self.dmg.ch3.write_cnt_x_byte(1, val),
+            0x078 => self.dmg.ch4.write_cnt_l_byte(0, val),
+            0x079 => self.dmg.ch4.write_cnt_l_byte(1, val),
+            0x07C => self.dmg.ch4.write_cnt_h_byte(0, val),
+            0x07D => self.dmg.ch4.write_cnt_h_byte(1, val),
+            0x080 => self.soundcnt_l = (self.soundcnt_l & 0xFF00) | (val as u16),
+            0x081 => self.soundcnt_l = (self.soundcnt_l & 0x00FF) | ((val as u16) << 8),
+            0x082 => {
+                let new_val = (self.soundcnt_h & 0xFF00) | (val as u16);
+                self.write_soundcnt_h(new_val);
+            }
+            0x083 => {
+                let new_val = (self.soundcnt_h & 0x00FF) | ((val as u16) << 8);
+                self.write_soundcnt_h(new_val);
+            }
+            0x084 => {
+                self.write_reg16(0x084, val as u16);
+            }
+            0x088 => self.soundbias = (self.soundbias & 0xFF00) | (val as u16),
+            0x089 => self.soundbias = (self.soundbias & 0x00FF) | ((val as u16) << 8),
+            0x090..=0x09F => {
+                self.dmg.ch3.write_wave_ram((off & 0x0F) as usize, val);
+            }
+            0x0A0..=0x0A3 => {
+                self.sound_a.push_byte(val);
+            }
+            0x0A4..=0x0A7 => {
+                self.sound_b.push_byte(val);
+            }
+            _ => {}
         }
     }
 
@@ -353,6 +425,10 @@ impl Apu {
 
         self.sample_batch.push(final_left);
         self.sample_batch.push(final_right);
+
+        // Update real-time oscilloscope buffer
+        self.scope_buffer[self.scope_idx] = (final_left + final_right) * 0.5;
+        self.scope_idx = (self.scope_idx + 1) % 512;
 
         if self.sample_batch.len() >= 512 {
             self.flush_samples();

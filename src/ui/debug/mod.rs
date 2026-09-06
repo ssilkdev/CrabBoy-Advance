@@ -1,11 +1,13 @@
 //! Debug Tools Integration
 
+pub mod audio_inspector;
 pub mod disasm;
 pub mod memory;
 pub mod palette;
 pub mod ppu_inspector;
 
 use crate::gba::Gba;
+use audio_inspector::show_audio_inspector;
 use disasm::show_cpu_inspector;
 use memory::{show_memory_viewer, MemoryViewerState};
 use palette::show_palette_viewer;
@@ -17,12 +19,22 @@ pub struct DebugWindows {
     pub show_palette: bool,
     pub show_memory: bool,
     pub show_ppu: bool,
+    pub show_audio: bool,
     pub mem_state: MemoryViewerState,
 }
 
-
 impl DebugWindows {
     pub fn show(&mut self, ctx: &egui::Context, gba: &mut Gba) {
+        if self.show_audio {
+            egui::Window::new("APU Live Audio Inspector & Oscilloscope")
+                .open(&mut self.show_audio)
+                .resizable(true)
+                .default_width(580.0)
+                .show(ctx, |ui| {
+                    show_audio_inspector(ui, gba);
+                });
+        }
+
         if self.show_cpu {
             egui::Window::new("CPU & Disassembly")
                 .open(&mut self.show_cpu)

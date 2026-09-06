@@ -810,6 +810,51 @@ mod tests {
         // Ensure audio output buffer has received valid, finite, non-clipped samples
         assert!(apu.audio_output.buffer_len() > 0);
     }
+
+    #[test]
+    fn test_channel1_byte_access_and_trigger_isolation() {
+        use gba_simulator::gba::Gba;
+
+        let mut gba = Gba::new();
+
+        // 1. Enable master sound in SOUNDCNT_X
+        gba.mmu.write16(0x0400_0084, 0x0080);
+        assert_eq!(gba.mmu.read16(0x0400_0084) & 0x80, 0x80);
+
+        // 2. Configure Channel 1:
+        // Volume 15, envelope decrease step 1, length = 32
+        gba.mmu.write16(0x0400_0062, 0xF1A0);
+        // Frequency = 1000, trigger = 1 (bit 15), length enable = 1 (bit 14)
+        gba.mmu.write16(0x0400_0064, 0xC3E8);
+
+        // Verify Channel 1 is active and volume is 15
+        assert!(gba.mmu.apu.dmg.ch1.active);
+        assert_eq!(gba.mmu.apu.dmg.ch1.envelope.volume, 15);
+
+        // 3. Verify SOUND1CNT_X read masks out trigger bit 15:
+        let val16 = gba.mmu.read16(0x0400_0064);
+        assert_eq!(val16 & 0x8000, 0, "Trigger bit 15 must be write-only and read back as 0");
+        assert_eq!(val16 & 0x4000, 0x4000, "Length flag bit 14 must be readable");
+
+        // Step envelope down once
+        gba.mmu.apu.dmg.ch1.step_envelope();
+        assert_eq!(gba.mmu.apu.dmg.ch1.envelope.volume, 14);
+
+        // 4. Perform 8-bit write to 0x0400_0064 (NR13 - frequency low byte) as done by m4a sound driver
+        gba.mmu.write8(0x0400_0064, 0x50);
+
+        // Verify frequency low byte was updated, BUT channel was NOT re-triggered:
+        assert_eq!(gba.mmu.apu.dmg.ch1.frequency & 0xFF, 0x50);
+        assert_eq!(gba.mmu.apu.dmg.ch1.envelope.volume, 14, "Volume must NOT reset to initial volume on NR13 write");
+
+        // 5. Perform 8-bit write to 0x0400_0065 (NR14) without trigger bit (bit 7 = 0)
+        gba.mmu.write8(0x0400_0065, 0x42); // length enable = 1, freq hi = 2, trigger = 0
+        assert_eq!(gba.mmu.apu.dmg.ch1.envelope.volume, 14, "Volume must NOT reset when trigger bit 7 is not set");
+
+        // 6. Perform 8-bit write to 0x0400_0065 with trigger bit (bit 7 = 1)
+        gba.mmu.write8(0x0400_0065, 0xC2); // trigger = 1
+        assert_eq!(gba.mmu.apu.dmg.ch1.envelope.volume, 15, "Volume must reset to initial volume when trigger bit 7 is set");
+    }
 }
 
 

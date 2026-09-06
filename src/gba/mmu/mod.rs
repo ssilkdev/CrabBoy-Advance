@@ -249,12 +249,17 @@ impl Mmu {
 
     fn read_io8(&self, addr: u32) -> u8 {
         let off = addr & 0x3FF;
-        let is_high = (off & 1) != 0;
-        let val16 = self.read_io16(off & !1);
-        if is_high {
-            (val16 >> 8) as u8
-        } else {
-            (val16 & 0xFF) as u8
+        match off {
+            0x060..=0x0A7 => self.apu.read_reg8(off),
+            _ => {
+                let is_high = (off & 1) != 0;
+                let val16 = self.read_io16(off & !1);
+                if is_high {
+                    (val16 >> 8) as u8
+                } else {
+                    (val16 & 0xFF) as u8
+                }
+            }
         }
     }
 
@@ -267,7 +272,7 @@ impl Mmu {
             0x00A => self.ppu.bgcnt[1],
             0x00C => self.ppu.bgcnt[2],
             0x00E => self.ppu.bgcnt[3],
-            0x060..=0x09E => self.apu.read_reg16(addr),
+            0x060..=0x0A6 => self.apu.read_reg16(addr),
             0x0B0 => self.dma.channels[0].sad as u16,
             0x0B2 => (self.dma.channels[0].sad >> 16) as u16,
             0x0B4 => self.dma.channels[0].dad as u16,
@@ -318,17 +323,8 @@ impl Mmu {
     fn write_io8(&mut self, addr: u32, val: u8) {
         let off = addr & 0x3FF;
         match off {
-            0x090..=0x09F => {
-                // Channel 3 Wave RAM
-                self.apu.dmg.ch3.write_wave_ram((off & 0x0F) as usize, val);
-            }
-            0x0A0..=0x0A3 => {
-                // DirectSound FIFO A
-                self.apu.sound_a.push_byte(val);
-            }
-            0x0A4..=0x0A7 => {
-                // DirectSound FIFO B
-                self.apu.sound_b.push_byte(val);
+            0x060..=0x0A7 => {
+                self.apu.write_reg8(off, val);
             }
             0x208 => self.ime = (val & 1) != 0,
             0x300 => self.post_flg = val,
