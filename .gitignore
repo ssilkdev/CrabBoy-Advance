@@ -1,0 +1,38 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# ROM files & Firmware / BIOS dumps
+*.gba
+*.gbc
+*.gb
+*.bin
+*.bios
+/ROMs/
+
+# Battery save files, save states & SRAM
+*.sav
+*.state
+/saves/
+
+# Gameplay captures, recordings & media
+*.bmp
+*.gif
+/recordings/
+/screenshots/
+
+# Reference manuals, PDFs & documents
+*.pdf
+*.doc
+*.docx
+/mba-source/
+/casper/
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
