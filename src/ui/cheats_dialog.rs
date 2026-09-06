@@ -166,13 +166,13 @@ impl CheatsDialog {
 
             if ui.button("🔎 First Exact Scan").clicked() {
                 if let Some(target) = parsed_target {
-                    gba.cheats.ram_searcher.initial_search(&gba.mmu, Some(target));
+                    gba.cheats.ram_searcher.initial_search(&mut gba.mmu, Some(target));
                     *toast = Some(format!("Found {} candidates", gba.cheats.ram_searcher.candidates.len()));
                 }
             }
 
             if ui.button("🌐 Unknown Initial Value").clicked() {
-                gba.cheats.ram_searcher.initial_search(&gba.mmu, None);
+                gba.cheats.ram_searcher.initial_search(&mut gba.mmu, None);
                 *toast = Some(format!("Indexed {} candidates", gba.cheats.ram_searcher.candidates.len()));
             }
         });
@@ -186,20 +186,20 @@ impl CheatsDialog {
 
             if ui.button("= Equal Target").clicked() {
                 if let Some(t) = parsed_target {
-                    gba.cheats.ram_searcher.filter_search(&gba.mmu, CompareType::Exact(t));
+                    gba.cheats.ram_searcher.filter_search(&mut gba.mmu, CompareType::Exact(t));
                 }
             }
             if ui.button("== Unchanged").clicked() {
-                gba.cheats.ram_searcher.filter_search(&gba.mmu, CompareType::Unchanged);
+                gba.cheats.ram_searcher.filter_search(&mut gba.mmu, CompareType::Unchanged);
             }
             if ui.button("!= Changed").clicked() {
-                gba.cheats.ram_searcher.filter_search(&gba.mmu, CompareType::Changed);
+                gba.cheats.ram_searcher.filter_search(&mut gba.mmu, CompareType::Changed);
             }
             if ui.button("> Greater").clicked() {
-                gba.cheats.ram_searcher.filter_search(&gba.mmu, CompareType::GreaterThanPrevious);
+                gba.cheats.ram_searcher.filter_search(&mut gba.mmu, CompareType::GreaterThanPrevious);
             }
             if ui.button("< Less").clicked() {
-                gba.cheats.ram_searcher.filter_search(&gba.mmu, CompareType::LessThanPrevious);
+                gba.cheats.ram_searcher.filter_search(&mut gba.mmu, CompareType::LessThanPrevious);
             }
             if ui.button("🔄 Reset").clicked() {
                 gba.cheats.ram_searcher.candidates.clear();

@@ -4,7 +4,7 @@ use crate::gba::cpu::{Arm7Tdmi, FLAG_C, FLAG_N, FLAG_T, FLAG_V, FLAG_Z};
 use crate::gba::mmu::Mmu;
 use egui::{Color32, RichText, Ui};
 
-pub fn show_cpu_inspector(ui: &mut Ui, cpu: &Arm7Tdmi, mmu: &Mmu) {
+pub fn show_cpu_inspector(ui: &mut Ui, cpu: &Arm7Tdmi, mmu: &mut Mmu) {
     ui.heading("CPU Registers (ARM7TDMI)");
     ui.separator();
 

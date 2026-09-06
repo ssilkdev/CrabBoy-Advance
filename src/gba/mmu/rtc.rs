@@ -182,12 +182,12 @@ impl Rtc {
         let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
         let mdays: [i64; 12] = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         let mut month = 0u8;
-        for m in 0..12 {
-            if total_days < mdays[m] {
+        for (m, &days) in mdays.iter().enumerate() {
+            if total_days < days {
                 month = m as u8 + 1;
                 break;
             }
-            total_days -= mdays[m];
+            total_days -= days;
         }
         if month == 0 { month = 12; }
         let day = total_days as u8 + 1;
@@ -209,7 +209,7 @@ impl Rtc {
         };
 
         // GBA RTC year is 2-digit offset from 2000
-        let rtc_year = ((year - 2000).max(0).min(99)) as u8;
+        let rtc_year = (year - 2000).clamp(0, 99) as u8;
 
         self.buffer[0] = to_bcd(rtc_year);
         self.buffer[1] = to_bcd(month);

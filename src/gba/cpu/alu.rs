@@ -21,6 +21,7 @@ impl ShiftType {
 }
 
 /// Computes barrel shift with carry out for immediate and register shifts
+#[inline]
 pub fn barrel_shift(shift_type: ShiftType, value: u32, shift_amount: u32, carry_in: bool, immediate: bool) -> (u32, bool) {
     match shift_type {
         ShiftType::Lsl => {
@@ -96,6 +97,7 @@ pub fn barrel_shift(shift_type: ShiftType, value: u32, shift_amount: u32, carry_
     }
 }
 
+#[inline]
 pub fn add_with_carry(a: u32, b: u32, carry_in: bool) -> (u32, bool, bool) {
     let c_in = carry_in as u64;
     let sum = (a as u64) + (b as u64) + c_in;
@@ -106,6 +108,7 @@ pub fn add_with_carry(a: u32, b: u32, carry_in: bool) -> (u32, bool, bool) {
     (res, carry_out, overflow)
 }
 
+#[inline]
 pub fn sub_with_borrow(a: u32, b: u32, carry_in: bool) -> (u32, bool, bool) {
     // In ARM, SUB carry flag is NOT-borrow: carry = 1 if no borrow occurred (a >= b + !c_in)
     add_with_carry(a, !b, carry_in)

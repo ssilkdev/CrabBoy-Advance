@@ -463,7 +463,7 @@ mod tests {
         mmu.write16(0x02002000, 42);
         let mut searcher = RamSearcher::new();
         searcher.search_size = SearchSize::U16;
-        searcher.initial_search(&mmu, Some(42));
+        searcher.initial_search(&mut mmu, Some(42));
         assert!(searcher.candidates.iter().any(|c| c.address == 0x02002000));
     }
 

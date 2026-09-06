@@ -212,6 +212,7 @@ impl Arm7Tdmi {
         }
     }
 
+    #[inline]
     pub fn set_spsr(&mut self, val: u32) {
         match self.get_mode() {
             CpuMode::Fiq => self.spsr_fiq = val,

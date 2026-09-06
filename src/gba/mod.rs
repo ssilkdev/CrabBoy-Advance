@@ -214,6 +214,27 @@ impl Gba {
         data.extend_from_slice(&self.cpu.cycles.to_le_bytes());
         data.push(self.cpu.halted as u8);
 
+        for r in self.cpu.r8_usr { data.extend_from_slice(&r.to_le_bytes()); }
+        for r in self.cpu.r8_fiq { data.extend_from_slice(&r.to_le_bytes()); }
+        data.extend_from_slice(&self.cpu.r13_usr.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r14_usr.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r13_fiq.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r14_fiq.to_le_bytes());
+        data.extend_from_slice(&self.cpu.spsr_fiq.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r13_irq.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r14_irq.to_le_bytes());
+        data.extend_from_slice(&self.cpu.spsr_irq.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r13_svc.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r14_svc.to_le_bytes());
+        data.extend_from_slice(&self.cpu.spsr_svc.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r13_abt.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r14_abt.to_le_bytes());
+        data.extend_from_slice(&self.cpu.spsr_abt.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r13_und.to_le_bytes());
+        data.extend_from_slice(&self.cpu.r14_und.to_le_bytes());
+        data.extend_from_slice(&self.cpu.spsr_und.to_le_bytes());
+        data.push(self.cpu.irq_pending as u8);
+
         // Memory
         data.extend_from_slice(&self.mmu.ewram[..]);
         data.extend_from_slice(&self.mmu.iwram[..]);
@@ -226,7 +247,7 @@ impl Gba {
     }
 
     pub fn load_state(&mut self, data: &[u8]) -> bool {
-        let min_len = 16 * 4 + 4 + 8 + 1 + 256 * 1024 + 32 * 1024 + 96 * 1024 + 1024 + 1024 + 1024;
+        let min_len = 16 * 4 + 4 + 8 + 1 + 109 + 256 * 1024 + 32 * 1024 + 96 * 1024 + 1024 + 1024 + 1024;
         if data.len() < min_len {
             return false;
         }
@@ -247,6 +268,41 @@ impl Gba {
         offset += 8;
 
         self.cpu.halted = data[offset] != 0;
+        offset += 1;
+
+        for i in 0..5 {
+            let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+            self.cpu.r8_usr[i] = u32::from_le_bytes(bytes);
+            offset += 4;
+        }
+        for i in 0..5 {
+            let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+            self.cpu.r8_fiq[i] = u32::from_le_bytes(bytes);
+            offset += 4;
+        }
+        let mut read_u32 = || {
+            let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+            offset += 4;
+            u32::from_le_bytes(bytes)
+        };
+        self.cpu.r13_usr = read_u32();
+        self.cpu.r14_usr = read_u32();
+        self.cpu.r13_fiq = read_u32();
+        self.cpu.r14_fiq = read_u32();
+        self.cpu.spsr_fiq = read_u32();
+        self.cpu.r13_irq = read_u32();
+        self.cpu.r14_irq = read_u32();
+        self.cpu.spsr_irq = read_u32();
+        self.cpu.r13_svc = read_u32();
+        self.cpu.r14_svc = read_u32();
+        self.cpu.spsr_svc = read_u32();
+        self.cpu.r13_abt = read_u32();
+        self.cpu.r14_abt = read_u32();
+        self.cpu.spsr_abt = read_u32();
+        self.cpu.r13_und = read_u32();
+        self.cpu.r14_und = read_u32();
+        self.cpu.spsr_und = read_u32();
+        self.cpu.irq_pending = data[offset] != 0;
         offset += 1;
 
         self.mmu.ewram.copy_from_slice(&data[offset..offset + 256 * 1024]);

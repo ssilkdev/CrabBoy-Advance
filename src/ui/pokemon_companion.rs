@@ -61,7 +61,7 @@ impl PokemonCompanion {
         }
     }
 
-    pub fn poll_party_memory(&mut self, mmu: &Mmu, game_code: &str) {
+    pub fn poll_party_memory(&mut self, mmu: &mut Mmu, game_code: &str) {
         self.party.clear();
 
         // Check if game is a compatible Gen 3 RPG cartridge: BPE, BPR, AXV, AXP, BPG

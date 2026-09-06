@@ -2,6 +2,7 @@
 
 use super::blend::Pixel;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_text_bg(
     bg_idx: u8,
     y: u32,
@@ -103,6 +104,7 @@ pub fn render_text_bg(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_affine_bg(
     bg_idx: u8,
     _y: u32,

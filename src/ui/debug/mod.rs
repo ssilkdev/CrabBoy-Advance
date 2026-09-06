@@ -29,7 +29,7 @@ impl DebugWindows {
                 .resizable(true)
                 .default_width(450.0)
                 .show(ctx, |ui| {
-                    show_cpu_inspector(ui, &gba.cpu, &gba.mmu);
+                    show_cpu_inspector(ui, &gba.cpu, &mut gba.mmu);
                 });
         }
 

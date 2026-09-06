@@ -68,8 +68,8 @@ impl Mmu {
 
         Self {
             bios,
-            ewram: Box::new([0; 256 * 1024]),
-            iwram: Box::new([0; 32 * 1024]),
+            ewram: vec![0u8; 256 * 1024].into_boxed_slice().try_into().unwrap(),
+            iwram: vec![0u8; 32 * 1024].into_boxed_slice().try_into().unwrap(),
             io_regs: Box::new([0; 1024]),
             cartridge: None,
             ppu: Ppu::new(),
@@ -135,34 +135,101 @@ impl Mmu {
     }
 
     #[inline(always)]
-    pub fn read16(&self, addr: u32) -> u16 {
-        let aligned = addr & !1;
-        let b0 = self.read8(aligned) as u16;
-        let b1 = self.read8(aligned + 1) as u16;
-        let val = b0 | (b1 << 8);
-
-        if (addr & 1) != 0 {
-            // Unaligned 16-bit read rotates right by 8
-            val.rotate_right(8)
-        } else {
-            val
+    pub fn read16(&mut self, addr: u32) -> u16 {
+        let addr = addr & !1; // Force halfword alignment
+        self.last_read = addr;
+        match (addr >> 24) & 0xFF {
+            0x00 => {
+                let off = (addr & 0x3FFF) as usize;
+                if off + 1 < self.bios.len() {
+                    u16::from_le_bytes([self.bios[off], self.bios[off+1]])
+                } else { 0 }
+            }
+            0x02 => {
+                let off = (addr & 0x3_FFFF) as usize;
+                u16::from_le_bytes([self.ewram[off], self.ewram[off+1]])
+            }
+            0x03 => {
+                let off = (addr & 0x7FFF) as usize;
+                u16::from_le_bytes([self.iwram[off], self.iwram[off+1]])
+            }
+            0x04 => self.read_io16(addr),
+            0x05 => {
+                let off = (addr & 0x3FF) as usize;
+                u16::from_le_bytes([self.ppu.palette_ram[off], self.ppu.palette_ram[off+1]])
+            }
+            0x06 => {
+                let mut off = (addr & 0x1_FFFF) as usize;
+                if off >= 0x18000 { off -= 0x8000; }
+                u16::from_le_bytes([self.ppu.vram[off], self.ppu.vram[off+1]])
+            }
+            0x07 => {
+                let off = (addr & 0x3FF) as usize;
+                u16::from_le_bytes([self.ppu.oam[off], self.ppu.oam[off+1]])
+            }
+            0x08..=0x0D => {
+                if let Some(ref cart) = self.cartridge {
+                    let rom_addr = (addr & 0x01FF_FFFF) as usize;
+                    if rom_addr + 1 < cart.rom.len() {
+                        u16::from_le_bytes([cart.rom[rom_addr], cart.rom[rom_addr+1]])
+                    } else { 0 }
+                } else { 0 }
+            }
+            0x0E..=0x0F => {
+                let val = self.read8(addr);
+                (val as u16) | ((val as u16) << 8)
+            }
+            _ => 0,
         }
     }
 
     #[inline(always)]
-    pub fn read32(&self, addr: u32) -> u32 {
-        let aligned = addr & !3;
-        let b0 = self.read8(aligned) as u32;
-        let b1 = self.read8(aligned + 1) as u32;
-        let b2 = self.read8(aligned + 2) as u32;
-        let b3 = self.read8(aligned + 3) as u32;
-        let val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-
-        let unaligned_offset = (addr & 3) * 8;
-        if unaligned_offset != 0 {
-            val.rotate_right(unaligned_offset)
-        } else {
-            val
+    pub fn read32(&mut self, addr: u32) -> u32 {
+        let addr = addr & !3; // Force word alignment
+        self.last_read = addr;
+        match (addr >> 24) & 0xFF {
+            0x00 => {
+                let off = (addr & 0x3FFF) as usize;
+                if off + 3 < self.bios.len() {
+                    u32::from_le_bytes([self.bios[off], self.bios[off+1], self.bios[off+2], self.bios[off+3]])
+                } else { 0 }
+            }
+            0x02 => {
+                let off = (addr & 0x3_FFFF) as usize;
+                u32::from_le_bytes([self.ewram[off], self.ewram[off+1], self.ewram[off+2], self.ewram[off+3]])
+            }
+            0x03 => {
+                let off = (addr & 0x7FFF) as usize;
+                u32::from_le_bytes([self.iwram[off], self.iwram[off+1], self.iwram[off+2], self.iwram[off+3]])
+            }
+            0x04 => self.read_io32(addr),
+            0x05 => {
+                let off = (addr & 0x3FF) as usize;
+                u32::from_le_bytes([self.ppu.palette_ram[off], self.ppu.palette_ram[off+1], self.ppu.palette_ram[off+2], self.ppu.palette_ram[off+3]])
+            }
+            0x06 => {
+                let mut off = (addr & 0x1_FFFF) as usize;
+                if off >= 0x18000 { off -= 0x8000; }
+                u32::from_le_bytes([self.ppu.vram[off], self.ppu.vram[off+1], self.ppu.vram[off+2], self.ppu.vram[off+3]])
+            }
+            0x07 => {
+                let off = (addr & 0x3FF) as usize;
+                u32::from_le_bytes([self.ppu.oam[off], self.ppu.oam[off+1], self.ppu.oam[off+2], self.ppu.oam[off+3]])
+            }
+            0x08..=0x0D => {
+                if let Some(ref cart) = self.cartridge {
+                    let rom_addr = (addr & 0x01FF_FFFF) as usize;
+                    if rom_addr + 3 < cart.rom.len() {
+                        u32::from_le_bytes([cart.rom[rom_addr], cart.rom[rom_addr+1], cart.rom[rom_addr+2], cart.rom[rom_addr+3]])
+                    } else { 0 }
+                } else { 0 }
+            }
+            0x0E..=0x0F => {
+                // SRAM/Flash reads are 8-bit only, replicate byte across word
+                let val = self.read8(addr);
+                (val as u32) * 0x01010101
+            }
+            _ => 0,
         }
     }
 
@@ -212,39 +279,72 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write16(&mut self, addr: u32, val: u16) {
-        let aligned = addr & !1;
-        match (aligned >> 24) & 0xFF {
-            0x04 => self.write_io16(aligned, val),
+        let addr = addr & !1;
+        let bytes = val.to_le_bytes();
+        match (addr >> 24) & 0xFF {
+            0x02 => {
+                let off = (addr & 0x3_FFFF) as usize;
+                self.ewram[off] = bytes[0];
+                self.ewram[off+1] = bytes[1];
+            }
+            0x03 => {
+                let off = (addr & 0x7FFF) as usize;
+                self.iwram[off] = bytes[0];
+                self.iwram[off+1] = bytes[1];
+            }
+            0x04 => self.write_io16(addr, val),
             0x05 => {
-                let off = (aligned & 0x3FE) as usize;
-                self.ppu.palette_ram[off] = (val & 0xFF) as u8;
-                self.ppu.palette_ram[off + 1] = (val >> 8) as u8;
+                let off = (addr & 0x3FF) as usize;
+                self.ppu.palette_ram[off] = bytes[0];
+                self.ppu.palette_ram[off+1] = bytes[1];
             }
             0x06 => {
-                let mut off = (aligned & 0x1_FFFE) as usize;
-                if off >= 0x18000 {
-                    off -= 0x8000;
-                }
-                self.ppu.vram[off] = (val & 0xFF) as u8;
-                self.ppu.vram[off + 1] = (val >> 8) as u8;
+                let mut off = (addr & 0x1_FFFF) as usize;
+                if off >= 0x18000 { off -= 0x8000; }
+                self.ppu.vram[off] = bytes[0];
+                self.ppu.vram[off+1] = bytes[1];
             }
             0x07 => {
-                let off = (aligned & 0x3FE) as usize;
-                self.ppu.oam[off] = (val & 0xFF) as u8;
-                self.ppu.oam[off + 1] = (val >> 8) as u8;
+                let off = (addr & 0x3FF) as usize;
+                self.ppu.oam[off] = bytes[0];
+                self.ppu.oam[off+1] = bytes[1];
             }
-            _ => {
-                self.write8(aligned, (val & 0xFF) as u8);
-                self.write8(aligned + 1, (val >> 8) as u8);
-            }
+            _ => {}
         }
     }
 
     #[inline(always)]
     pub fn write32(&mut self, addr: u32, val: u32) {
-        let aligned = addr & !3;
-        self.write16(aligned, (val & 0xFFFF) as u16);
-        self.write16(aligned + 2, (val >> 16) as u16);
+        let addr = addr & !3;
+        let bytes = val.to_le_bytes();
+        match (addr >> 24) & 0xFF {
+            0x02 => {
+                let off = (addr & 0x3_FFFF) as usize;
+                self.ewram[off..off+4].copy_from_slice(&bytes);
+            }
+            0x03 => {
+                let off = (addr & 0x7FFF) as usize;
+                self.iwram[off..off+4].copy_from_slice(&bytes);
+            }
+            0x04 => {
+                self.write_io16(addr, val as u16);
+                self.write_io16(addr + 2, (val >> 16) as u16);
+            }
+            0x05 => {
+                let off = (addr & 0x3FF) as usize;
+                self.ppu.palette_ram[off..off+4].copy_from_slice(&bytes);
+            }
+            0x06 => {
+                let mut off = (addr & 0x1_FFFF) as usize;
+                if off >= 0x18000 { off -= 0x8000; }
+                self.ppu.vram[off..off+4].copy_from_slice(&bytes);
+            }
+            0x07 => {
+                let off = (addr & 0x3FF) as usize;
+                self.ppu.oam[off..off+4].copy_from_slice(&bytes);
+            }
+            _ => {}
+        }
     }
 
     fn read_io8(&self, addr: u32) -> u8 {
@@ -316,6 +416,12 @@ impl Mmu {
                 (self.io_regs[off] as u16) | ((self.io_regs[off + 1] as u16) << 8)
             }
         }
+    }
+
+    fn read_io32(&mut self, addr: u32) -> u32 {
+        let lo = self.read_io16(addr) as u32;
+        let hi = self.read_io16(addr + 2) as u32;
+        lo | (hi << 16)
     }
 
     fn write_io8(&mut self, addr: u32, val: u8) {

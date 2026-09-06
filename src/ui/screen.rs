@@ -56,6 +56,7 @@ impl ScreenRenderer {
         &self.image_buffer
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_framebuffer(
         &mut self,
         ctx: &egui::Context,
