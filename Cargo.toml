@@ -1,6 +1,6 @@
 [package]
 name = "crabboy-advance"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "CrabBoy Advance: Cycle-accurate Game Boy Advance emulator in Rust with 5.1 Spatial Audio, xBRZ/NIS upscaling, TAS Engine, and Hardware Sensors"
 license = "MIT"

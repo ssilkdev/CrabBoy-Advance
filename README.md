@@ -36,6 +36,8 @@ A cycle-accurate, high-performance Game Boy Advance (GBA) emulator written in pu
   - **Pure-Rust Animated GIF Recorder**: Lossless GIF89a gameplay video recorder with Netscape loop extension (`Ctrl+F12`).
   - **Retro GBA Shell Bezels**: Classic Indigo, Glacier Blue, GBA SP Flame Red, and Game Boy Player overlays with interactive button indicators.
   - **TAS Engine**: Frame-accurate macro recording, `.tas` script export/import, and single-frame stepping (`F6`, `.` / `N`).
+  - **Embedded Strategy Guide & Manual**: 8-page illustrated Pokémon field guide baked into the binary with interactive chapter navigation, zoom, and PDF export (`F1`).
+  - **Mascot Logo & Windows PE Executable Icon**: Custom Rust crab mascot and multi-resolution Windows PE resource icon (`assets/icon.ico`).
   - **Memory Hex Editor & PPU Inspector**: Live byte delta heatmap highlighting, watchpoints, and 128-sprite OAM gallery.
 
 ---
@@ -60,6 +62,7 @@ A cycle-accurate, high-performance Game Boy Advance (GBA) emulator written in pu
 | **P** | Pause / Resume Emulation |
 | **F** | Single Frame Step (when paused) |
 | **Ctrl + R** | Reset Emulation |
+| **F1** | Open Illustrated Trainer's Strategy Guide & Manual |
 | **F5** | Quick Save State |
 | **F8** | Quick Load State |
 
