@@ -855,7 +855,204 @@ mod tests {
         gba.mmu.write8(0x0400_0065, 0xC2); // trigger = 1
         assert_eq!(gba.mmu.apu.dmg.ch1.envelope.volume, 15, "Volume must reset to initial volume when trigger bit 7 is set");
     }
+
+    #[test]
+    fn test_flight_recorder_tracing_and_ring_buffer() {
+        use gba_simulator::gba::diagnostics::{FlightRecorder, FLIGHT_RECORDER_CAPACITY};
+
+        let mut recorder = FlightRecorder::new();
+        assert_eq!(recorder.total_events, 0);
+
+        // Record several distinct events
+        recorder.record(100, 0x0800_0100, 0x0400_0000, 0x0080, 16, true);
+        recorder.record(250, 0x0800_0104, 0x0400_0064, 0xC3E8, 16, true);
+        recorder.record(500, 0x0800_0108, 0x0400_0084, 0x0080, 8, true);
+
+        let events = recorder.recent_events(10);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].reg_name, "DISPCNT");
+        assert_eq!(events[1].reg_name, "SOUND1CNT_X");
+        assert_eq!(events[2].reg_name, "SOUNDCNT_X");
+        assert_eq!(events[1].val, 0xC3E8);
+
+        // Fill beyond buffer capacity (512 entries) to test ring buffer wrapping
+        for i in 0..600 {
+            recorder.record(1000 + i, 0x0800_1000, 0x0400_0006, i as u32, 16, false);
+        }
+
+        assert_eq!(recorder.total_events, 603);
+        let recent = recorder.recent_events(FLIGHT_RECORDER_CAPACITY);
+        assert_eq!(recent.len(), FLIGHT_RECORDER_CAPACITY);
+        // Check latest event in chronological order
+        assert_eq!(recent.last().unwrap().val, 599);
+
+        // Test clear
+        recorder.clear();
+        assert_eq!(recorder.total_events, 0);
+        assert!(recorder.recent_events(10).is_empty());
+    }
+
+    #[test]
+    fn test_audio_linter_heuristics() {
+        use gba_simulator::gba::diagnostics::{AudioLinter, HealthGrade};
+
+        let mut linter = AudioLinter::new();
+
+        // 1. Process clean, DC-balanced audio samples
+        let mut clean_samples = Vec::new();
+        for i in 0..1000 {
+            let phase = (i as f32) * 0.1;
+            clean_samples.push(phase.sin() * 0.5);
+        }
+        linter.process_samples(&clean_samples);
+
+        let report = linter.evaluate_health();
+        assert_eq!(report.grade, HealthGrade::Pass);
+        assert_eq!(report.clipping_samples, 0);
+        assert!(report.dc_bias.abs() < 0.05);
+
+        // 2. Introduce severe digital clipping
+        let clipping_samples = vec![1.0f32; 500];
+        linter.process_samples(&clipping_samples);
+        let report = linter.evaluate_health();
+        assert!(report.clipping_samples > 0);
+        assert!(report.anomalies.iter().any(|a| a.contains("Clipping")));
+
+        // 3. Test excessive rapid re-trigger detection
+        for _ in 0..40 {
+            linter.record_trigger(2); // Channel 1 (SQ1)
+        }
+        let report = linter.evaluate_health();
+        assert!(report.anomalies.iter().any(|a| a.contains("Excessive Re-trigger Loop")));
+    }
+
+    #[test]
+    fn test_video_linter_heuristics() {
+        use gba_simulator::gba::diagnostics::{VideoHealthGrade, VideoLinter};
+        use gba_simulator::gba::ppu::Ppu;
+
+        let mut linter = VideoLinter::new();
+        let mut ppu = Ppu::new();
+
+        // Fill framebuffer with test pattern
+        for (i, p) in ppu.framebuffer.iter_mut().enumerate() {
+            *p = 0xFF00_0000 | (i as u32 & 0x00FF_FFFF);
+        }
+
+        linter.on_frame(&ppu);
+        let report = linter.evaluate_health();
+        assert_eq!(report.grade, VideoHealthGrade::Pass);
+        assert_ne!(report.latest_frame_crc32, 0);
+        assert!(report.average_brightness > 0.0);
+
+        // Simulate identical frozen frame for 250 frames
+        for _ in 0..250 {
+            linter.on_frame(&ppu);
+        }
+        let report = linter.evaluate_health();
+        assert_eq!(report.grade, VideoHealthGrade::Critical);
+        assert!(report.anomalies.iter().any(|a| a.contains("Visual Screen Freeze")));
+
+        // Simulate black screen hang
+        ppu.framebuffer.fill(0xFF00_0000); // Fully black (alpha = 255, RGB = 0)
+        let mut black_linter = VideoLinter::new();
+        for _ in 0..200 {
+            black_linter.on_frame(&ppu);
+        }
+        let report = black_linter.evaluate_health();
+        assert_eq!(report.grade, VideoHealthGrade::Critical);
+        assert!(report.anomalies.iter().any(|a| a.contains("Black Screen Hang")));
+    }
+
+    #[test]
+    fn test_diagnostic_report_json_and_summary() {
+        use gba_simulator::gba::diagnostics::{
+            AudioHealthReport, DiagnosticReport, HealthGrade, OverallHealthGrade, SystemInfo,
+            VideoHealthGrade, VideoHealthReport,
+        };
+
+        let sys_info = SystemInfo {
+            rom_title: "TEST GAME".to_string(),
+            rom_game_code: "AGBE".to_string(),
+            frames_executed: 600,
+            cycles_executed: 168_537_600,
+        };
+
+        let audio_report = AudioHealthReport {
+            grade: HealthGrade::Pass,
+            total_samples: 44100,
+            peak_amplitude: 0.65,
+            dc_bias: 0.001,
+            clipping_samples: 0,
+            clipping_rate: 0.0,
+            silence_ratio: 0.05,
+            channel_triggers: [10, 5, 20, 15, 8, 12],
+            channel_duty_percentage: [0.5; 6],
+            stuck_notes_detected: Vec::new(),
+            anomalies: Vec::new(),
+        };
+
+        let video_report = VideoHealthReport {
+            grade: VideoHealthGrade::Pass,
+            frames_monitored: 600,
+            latest_frame_crc32: 0xA1B2_C3D4,
+            average_brightness: 0.45,
+            frozen_frame_count: 0,
+            active_sprites: 12,
+            visible_layers_mask: 0x1F,
+            anomalies: Vec::new(),
+        };
+
+        let report = DiagnosticReport::new(sys_info, audio_report, video_report, Vec::new());
+        assert_eq!(report.overall_grade, OverallHealthGrade::Pass);
+
+        // Verify JSON serialization
+        let json_str = report.to_json().expect("Serialization must succeed");
+        assert!(json_str.contains("TEST GAME"));
+        assert!(json_str.contains("A1B2C3D4") || json_str.contains("2712847316"));
+
+        // Verify roundtrip deserialization
+        let deserialized: DiagnosticReport =
+            serde_json::from_str(&json_str).expect("Deserialization must succeed");
+        assert_eq!(deserialized.system_info.rom_title, "TEST GAME");
+        assert_eq!(deserialized.overall_grade, OverallHealthGrade::Pass);
+
+        // Verify CLI summary text
+        let summary = report.format_cli_summary();
+        assert!(summary.contains("CRABBOY ADVANCE DIAGNOSTIC REPORT"));
+        assert!(summary.contains("TEST GAME"));
+        assert!(summary.contains("AUDIO SUBSYSTEM HEALTH"));
+        assert!(summary.contains("VIDEO SUBSYSTEM HEALTH"));
+    }
+
+    #[test]
+    fn test_gba_headless_run_diagnostics() {
+        use gba_simulator::gba::diagnostics::OverallHealthGrade;
+
+        let mut gba = Gba::new();
+
+        // Write synthetic instructions in IWRAM: infinite loop
+        // b . (0xEAFF_FFFE)
+        gba.mmu.write32(0x0300_0000, 0xEAFF_FFFE);
+        gba.cpu.regs[15] = 0x0300_0000;
+
+        // Perform some IO writes to populate flight recorder
+        gba.mmu.write16(0x0400_0000, 0x0080); // DISPCNT
+        gba.mmu.write16(0x0400_0084, 0x0080); // SOUNDCNT_X
+
+        // Run diagnostics headlessly for 30 frames
+        let report = gba.run_diagnostics(30);
+
+        assert_eq!(report.system_info.frames_executed, 30);
+        assert!(report.system_info.cycles_executed > 0);
+        assert!(report.recent_io_events.len() >= 2);
+        assert!(matches!(
+            report.overall_grade,
+            OverallHealthGrade::Pass | OverallHealthGrade::Warning | OverallHealthGrade::Critical
+        ));
+    }
 }
+
 
 
 

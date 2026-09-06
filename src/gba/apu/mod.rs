@@ -15,6 +15,7 @@ pub struct DirectSoundChannel {
     pub left_enable: bool,
     pub right_enable: bool,
     pub timer_select: usize,
+    pub trigger_count: u64,
 }
 
 impl Default for DirectSoundChannel {
@@ -32,12 +33,14 @@ impl DirectSoundChannel {
             left_enable: false,
             right_enable: false,
             timer_select: 0,
+            trigger_count: 0,
         }
     }
 
     pub fn reset(&mut self) {
         self.fifo.clear();
         self.current_sample = 0;
+        self.trigger_count += 1;
     }
 
     pub fn push_byte(&mut self, val: u8) {
@@ -81,6 +84,9 @@ pub struct Apu {
     // Real-time Oscilloscope Waveform Ring Buffer
     pub scope_buffer: [f32; 512],
     pub scope_idx: usize,
+
+    // Audio samples awaiting diagnostic analysis
+    pub pending_diagnostic_samples: Vec<f32>,
 }
 
 impl Default for Apu {
@@ -117,6 +123,7 @@ impl Apu {
             lp_r: 0.0,
             scope_buffer: [0.0; 512],
             scope_idx: 0,
+            pending_diagnostic_samples: Vec::with_capacity(2048),
         }
     }
 
@@ -441,6 +448,7 @@ impl Apu {
             return;
         }
 
+        self.pending_diagnostic_samples.extend_from_slice(&self.sample_batch);
         self.audio_output.push_sample_batch(&self.sample_batch);
         self.sample_batch.clear();
 

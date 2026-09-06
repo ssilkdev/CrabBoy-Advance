@@ -133,6 +133,7 @@ pub struct Channel1 {
     pub active: bool,
     pub envelope: Envelope,
     pub sweep: Sweep,
+    pub trigger_count: u64,
 }
 
 impl Default for Channel1 {
@@ -150,12 +151,14 @@ impl Default for Channel1 {
             active: false,
             envelope: Envelope::default(),
             sweep: Sweep::default(),
+            trigger_count: 0,
         }
     }
 }
 
 impl Channel1 {
     pub fn trigger(&mut self) {
+        self.trigger_count += 1;
         self.active = true;
         if self.length_counter == 0 {
             self.length_counter = 64;
@@ -294,6 +297,7 @@ pub struct Channel2 {
     pub length_enabled: bool,
     pub active: bool,
     pub envelope: Envelope,
+    pub trigger_count: u64,
 }
 
 impl Default for Channel2 {
@@ -309,12 +313,14 @@ impl Default for Channel2 {
             length_enabled: false,
             active: false,
             envelope: Envelope::default(),
+            trigger_count: 0,
         }
     }
 }
 
 impl Channel2 {
     pub fn trigger(&mut self) {
+        self.trigger_count += 1;
         self.active = true;
         if self.length_counter == 0 {
             self.length_counter = 64;
@@ -434,6 +440,7 @@ pub struct Channel3 {
     pub length_counter: u16,
     pub length_enabled: bool,
     pub active: bool,
+    pub trigger_count: u64,
 }
 
 impl Default for Channel3 {
@@ -454,12 +461,14 @@ impl Default for Channel3 {
             length_counter: 0,
             length_enabled: false,
             active: false,
+            trigger_count: 0,
         }
     }
 }
 
 impl Channel3 {
     pub fn trigger(&mut self) {
+        self.trigger_count += 1;
         self.active = self.master_enable;
         if self.length_counter == 0 {
             self.length_counter = 256;
@@ -606,6 +615,7 @@ pub struct Channel4 {
     pub length_enabled: bool,
     pub active: bool,
     pub envelope: Envelope,
+    pub trigger_count: u64,
 }
 
 impl Default for Channel4 {
@@ -622,12 +632,14 @@ impl Default for Channel4 {
             length_enabled: false,
             active: false,
             envelope: Envelope::default(),
+            trigger_count: 0,
         }
     }
 }
 
 impl Channel4 {
     pub fn trigger(&mut self) {
+        self.trigger_count += 1;
         self.active = true;
         self.lfsr = 0x7FFF;
         if self.length_counter == 0 {

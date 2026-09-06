@@ -3,6 +3,7 @@
 pub mod apu;
 pub mod cheats;
 pub mod cpu;
+pub mod diagnostics;
 pub mod dma;
 pub mod keypad;
 pub mod mmu;
@@ -11,6 +12,7 @@ pub mod timer;
 
 use cheats::CheatManager;
 use cpu::{arm::step_arm, thumb::step_thumb, Arm7Tdmi, CpuMode};
+use diagnostics::{DiagnosticReport, SystemDiagnostics};
 use mmu::{cartridge::Cartridge, Mmu};
 pub use ppu::{Ppu, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::path::Path;
@@ -21,6 +23,7 @@ pub struct Gba {
     pub cpu: Arm7Tdmi,
     pub mmu: Mmu,
     pub cheats: CheatManager,
+    pub diagnostics: SystemDiagnostics,
     pub is_running: bool,
     pub frame_counter: u64,
 }
@@ -37,6 +40,7 @@ impl Gba {
             cpu: Arm7Tdmi::new(),
             mmu: Mmu::new(),
             cheats: CheatManager::new(),
+            diagnostics: SystemDiagnostics::new(),
             is_running: true,
             frame_counter: 0,
         }
@@ -70,6 +74,7 @@ impl Gba {
         self.mmu.ime = false;
         self.mmu.ie = 0;
         self.mmu.if_reg = 0;
+        self.diagnostics.reset();
     }
 
     /// Step a single instruction and advance peripherals
@@ -78,6 +83,10 @@ impl Gba {
         if self.mmu.has_pending_irq() && !self.cpu.get_flag(cpu::FLAG_I) {
             self.cpu.trigger_irq();
         }
+
+        // Synchronize PC and cycles to MMU for flight recording
+        self.mmu.current_pc = self.cpu.regs[15];
+        self.mmu.current_cycles = self.cpu.cycles;
 
         // Execute instruction
         let cycles = if self.cpu.halted {
@@ -189,8 +198,13 @@ impl Gba {
         // Apply active cheats on VBlank
         self.cheats.apply(&mut self.mmu);
 
-        // Flush frame audio samples
+        // Flush frame audio samples and feed diagnostic linter
         self.mmu.apu.flush_samples();
+        if !self.mmu.apu.pending_diagnostic_samples.is_empty() {
+            self.diagnostics.process_audio_samples(&self.mmu.apu.pending_diagnostic_samples);
+            self.mmu.apu.pending_diagnostic_samples.clear();
+        }
+        self.diagnostics.on_frame(&self.mmu.ppu, &self.mmu.apu);
 
         // Periodically sync save file to disk (every 60 frames / 1 sec)
         if self.frame_counter.is_multiple_of(60) {
@@ -198,6 +212,33 @@ impl Gba {
                 cart.flash.sync_to_disk();
             }
         }
+    }
+
+    /// Run emulation for N frames headlessly and generate an authoritative DiagnosticReport
+    pub fn run_diagnostics(&mut self, frames: u64) -> DiagnosticReport {
+        for _ in 0..frames {
+            self.run_frame();
+        }
+        self.diagnostics.generate_report(&self.mmu, self.frame_counter, self.cpu.cycles)
+    }
+
+    /// Dump current framebuffer as PNG
+    pub fn dump_frame_png<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+        let mut raw_bytes = Vec::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT * 4);
+        for &pixel in self.mmu.ppu.framebuffer.iter() {
+            raw_bytes.push((pixel & 0xFF) as u8);         // R
+            raw_bytes.push(((pixel >> 8) & 0xFF) as u8);  // G
+            raw_bytes.push(((pixel >> 16) & 0xFF) as u8); // B
+            raw_bytes.push(((pixel >> 24) & 0xFF) as u8); // A
+        }
+        image::save_buffer(
+            path,
+            &raw_bytes,
+            SCREEN_WIDTH as u32,
+            SCREEN_HEIGHT as u32,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     pub fn get_framebuffer(&self) -> &[u32; SCREEN_WIDTH * SCREEN_HEIGHT] {

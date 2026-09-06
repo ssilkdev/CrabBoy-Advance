@@ -1,6 +1,7 @@
 //! Debug Tools Integration
 
 pub mod audio_inspector;
+pub mod diagnostics_hub;
 pub mod disasm;
 pub mod memory;
 pub mod palette;
@@ -8,6 +9,7 @@ pub mod ppu_inspector;
 
 use crate::gba::Gba;
 use audio_inspector::show_audio_inspector;
+use diagnostics_hub::{show_diagnostics_hub, DiagnosticsHubState};
 use disasm::show_cpu_inspector;
 use memory::{show_memory_viewer, MemoryViewerState};
 use palette::show_palette_viewer;
@@ -20,7 +22,9 @@ pub struct DebugWindows {
     pub show_memory: bool,
     pub show_ppu: bool,
     pub show_audio: bool,
+    pub show_diagnostics: bool,
     pub mem_state: MemoryViewerState,
+    pub diagnostics_state: DiagnosticsHubState,
 }
 
 impl DebugWindows {
@@ -72,6 +76,17 @@ impl DebugWindows {
                 .default_width(550.0)
                 .show(ctx, |ui| {
                     show_ppu_inspector(ui, gba);
+                });
+        }
+
+        if self.show_diagnostics {
+            let state = &mut self.diagnostics_state;
+            egui::Window::new("🔬 System Diagnostics Hub")
+                .open(&mut self.show_diagnostics)
+                .resizable(true)
+                .default_width(650.0)
+                .show(ctx, |ui| {
+                    show_diagnostics_hub(ui, gba, state);
                 });
         }
     }

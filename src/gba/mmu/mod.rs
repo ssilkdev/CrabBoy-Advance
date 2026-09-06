@@ -13,6 +13,7 @@ use super::dma::DmaController;
 use super::keypad::Keypad;
 use super::ppu::Ppu;
 use super::timer::TimerController;
+use crate::gba::diagnostics::FlightRecorder;
 use cartridge::Cartridge;
 use sio::Sio;
 
@@ -38,6 +39,10 @@ pub struct Mmu {
     pub haltcnt: u8,
 
     pub last_read: u32,
+
+    pub flight_recorder: FlightRecorder,
+    pub current_pc: u32,
+    pub current_cycles: u64,
 }
 
 impl Default for Mmu {
@@ -85,6 +90,9 @@ impl Mmu {
             post_flg: 0,
             haltcnt: 0,
             last_read: 0,
+            flight_recorder: FlightRecorder::new(),
+            current_pc: 0,
+            current_cycles: 0,
         }
     }
 
@@ -324,11 +332,21 @@ impl Mmu {
         let off = addr & 0x3FF;
         match off {
             0x060..=0x0A7 => {
+                self.flight_recorder.record(self.current_cycles, self.current_pc, addr, val as u32, 8, true);
                 self.apu.write_reg8(off, val);
             }
-            0x208 => self.ime = (val & 1) != 0,
-            0x300 => self.post_flg = val,
-            0x301 => self.haltcnt = val,
+            0x208 => {
+                self.flight_recorder.record(self.current_cycles, self.current_pc, addr, val as u32, 8, true);
+                self.ime = (val & 1) != 0;
+            }
+            0x300 => {
+                self.flight_recorder.record(self.current_cycles, self.current_pc, addr, val as u32, 8, true);
+                self.post_flg = val;
+            }
+            0x301 => {
+                self.flight_recorder.record(self.current_cycles, self.current_pc, addr, val as u32, 8, true);
+                self.haltcnt = val;
+            }
             _ => {
                 let aligned = off & !1;
                 let cur = self.read_io16(aligned);
@@ -343,6 +361,7 @@ impl Mmu {
     }
 
     fn write_io16(&mut self, addr: u32, val: u16) {
+        self.flight_recorder.record(self.current_cycles, self.current_pc, addr, val as u32, 16, true);
         match addr & 0x3FE {
             0x000 => self.ppu.dispcnt = val,
             0x004 => {

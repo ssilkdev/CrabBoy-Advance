@@ -366,6 +366,9 @@ impl eframe::App for GbaApp {
             if i.key_pressed(egui::Key::F7) {
                 self.debug_windows.show_audio = !self.debug_windows.show_audio;
             }
+            if i.key_pressed(egui::Key::F8) {
+                self.debug_windows.show_diagnostics = !self.debug_windows.show_diagnostics;
+            }
             if (i.key_pressed(egui::Key::N) || i.key_pressed(egui::Key::Period)) && self.is_paused {
                 self.gba.run_frame();
             }
@@ -826,6 +829,7 @@ impl eframe::App for GbaApp {
                 });
 
                 ui.menu_button("Debug Tools", |ui| {
+                    ui.checkbox(&mut self.debug_windows.show_diagnostics, "🔬 System Diagnostics Hub (F8)");
                     ui.checkbox(&mut self.debug_windows.show_audio, "APU Audio Inspector & Oscilloscope (F7)");
                     ui.checkbox(&mut self.debug_windows.show_ppu, "PPU Layers & OAM Inspector (F6)");
                     ui.checkbox(&mut self.debug_windows.show_memory, "Memory Hex Viewer & Watchpoints (Ctrl+M)");
