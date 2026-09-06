@@ -16,6 +16,8 @@ pub mod screenshot;
 pub mod sensors_dialog;
 pub mod tas;
 pub mod tas_dialog;
+pub mod updater;
+pub mod updater_dialog;
 
 use audio_mixer_dialog::AudioMixerDialog;
 use bezels::{BezelMode, BezelRenderer};
@@ -27,6 +29,8 @@ use pokemon_companion::PokemonCompanion;
 use sensors_dialog::SensorsDialog;
 use tas::{TasEngine, TasMode};
 use tas_dialog::TasDialog;
+use updater::UpdateManager;
+use updater_dialog::UpdaterDialog;
 
 use crate::gba::apu::SurroundMode;
 use crate::gba::keypad::Key;
@@ -61,6 +65,8 @@ pub struct GbaApp {
     pub tas_engine: TasEngine,
     pub tas_dialog: TasDialog,
     pub guide_dialog: GuideDialog,
+    pub updater: UpdateManager,
+    pub updater_dialog: UpdaterDialog,
 
     // Settings
     pub display_filter: DisplayFilter,
@@ -117,6 +123,13 @@ impl GbaApp {
             }
         }
 
+        // Clean up any lingering backup executable from previous updates
+        UpdateManager::cleanup_old_exe();
+
+        // Launch asynchronous, non-blocking check for updates on startup
+        let updater = UpdateManager::new();
+        updater.check_for_updates_async();
+
         Self {
             gba,
             screen_renderer: ScreenRenderer::new(),
@@ -135,6 +148,8 @@ impl GbaApp {
             tas_engine: TasEngine::new(),
             tas_dialog: TasDialog::new(),
             guide_dialog: GuideDialog::new(),
+            updater,
+            updater_dialog: UpdaterDialog::new(),
             display_filter: DisplayFilter::Crisp,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -732,10 +747,79 @@ impl eframe::App for GbaApp {
                         self.show_about_dialog = true;
                         ui.close_menu();
                     }
+                    if ui.button("🔄 Check for Updates...").clicked() {
+                        self.updater_dialog.is_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
-                    ui.label(RichText::new("CrabBoy Advance v0.1.0").weak().small());
+                    ui.label(RichText::new(format!("CrabBoy Advance v{}", env!("CARGO_PKG_VERSION"))).weak().small());
                     ui.label(RichText::new("Cycle-Accurate 32-Bit GBA Engine").weak().small());
                     ui.label(RichText::new("Built with Rust & egui").weak().small());
+                });
+
+                // Software Update Menu Tab
+                let update_status_peek = {
+                    let lock = self.updater.status.lock().unwrap();
+                    lock.clone()
+                };
+                let has_update = matches!(
+                    update_status_peek,
+                    updater::UpdateStatus::UpdateAvailable { .. }
+                        | updater::UpdateStatus::DownloadedReadyToRestart { .. }
+                );
+
+                let update_label = if has_update {
+                    RichText::new("🔄 Update (New!)")
+                        .color(Color32::from_rgb(255, 200, 60))
+                        .strong()
+                } else {
+                    RichText::new("🔄 Update")
+                };
+
+                ui.menu_button(update_label, |ui| {
+                    if ui.button("🔄 Open Software Update Center...").clicked() {
+                        self.updater_dialog.is_open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("🔍 Check for Updates Now").clicked() {
+                        self.updater.check_for_updates_async();
+                        self.set_toast("Checking GitHub for updates...");
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    match &update_status_peek {
+                        updater::UpdateStatus::Idle => {
+                            ui.label(RichText::new("Status: Not checked yet").weak().small());
+                        }
+                        updater::UpdateStatus::Checking => {
+                            ui.label(RichText::new("Status: Checking GitHub...").color(Color32::LIGHT_BLUE).small());
+                        }
+                        updater::UpdateStatus::UpToDate { version, .. } => {
+                            ui.label(RichText::new(format!("Status: Up to date (v{})", version)).color(Color32::LIGHT_GREEN).small());
+                        }
+                        updater::UpdateStatus::UpdateAvailable { latest, .. } => {
+                            ui.label(RichText::new(format!("🎉 New version available: v{}", latest.version)).color(Color32::from_rgb(255, 200, 60)).strong().small());
+                            if ui.button(RichText::new("📥 Update Now...").strong().color(Color32::WHITE)).clicked() {
+                                self.updater_dialog.is_open = true;
+                                ui.close_menu();
+                            }
+                        }
+                        updater::UpdateStatus::Downloading { progress, .. } => {
+                            ui.label(RichText::new(format!("Status: Downloading ({:.0}%)", progress * 100.0)).color(Color32::LIGHT_BLUE).small());
+                        }
+                        updater::UpdateStatus::DownloadedReadyToRestart { latest, .. } => {
+                            ui.label(RichText::new(format!("✨ Ready to restart (v{})", latest.version)).color(Color32::LIGHT_GREEN).strong().small());
+                            if ui.button(RichText::new("🔄 Restart CrabBoy Advance").strong().color(Color32::WHITE)).clicked() {
+                                if let Err(e) = self.updater.restart_and_apply() {
+                                    self.set_toast(format!("Restart error: {}", e));
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                        updater::UpdateStatus::Failed(_) => {
+                            ui.label(RichText::new("Status: Check failed (Offline)").color(Color32::LIGHT_RED).small());
+                        }
+                    }
                 });
 
                 ui.menu_button("Debug Tools", |ui| {
@@ -748,6 +832,15 @@ impl eframe::App for GbaApp {
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if has_update {
+                        let btn = egui::Button::new(
+                            RichText::new("🎉 New Update Available!").color(Color32::BLACK).strong()
+                        ).fill(Color32::from_rgb(255, 200, 60));
+                        if ui.add(btn).clicked() {
+                            self.updater_dialog.is_open = true;
+                        }
+                    }
+
                     if self.show_fps {
                         let fps_color = if self.fps >= 55.0 { Color32::GREEN } else { Color32::YELLOW };
                         ui.label(RichText::new(format!("{:.1} FPS", self.fps)).color(fps_color).monospace());
@@ -1193,6 +1286,7 @@ impl eframe::App for GbaApp {
         self.audio_mixer_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.tas_dialog.show(ctx, &mut self.tas_engine, &mut self.gba, &mut dialog_toast);
         self.guide_dialog.show(ctx, &mut dialog_toast);
+        self.updater_dialog.show(ctx, &self.updater, &mut dialog_toast);
 
         if self.show_about_dialog {
             let mut close_about = false;
@@ -1208,7 +1302,7 @@ impl eframe::App for GbaApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(4.0);
                         ui.heading(RichText::new("🦀 CrabBoy Advance").size(20.0).strong().color(Color32::from_rgb(255, 110, 60)));
-                        ui.label(RichText::new("v0.1.0 • Cycle-Accurate 32-Bit GBA Engine").weak().small());
+                        ui.label(RichText::new(format!("v{} • Cycle-Accurate 32-Bit GBA Engine", env!("CARGO_PKG_VERSION"))).weak().small());
                         ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(6.0);
