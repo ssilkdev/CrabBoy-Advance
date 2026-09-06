@@ -1246,6 +1246,142 @@ mod tests {
         assert_eq!(report.grade, HealthGrade::Pass, "DirectSound continuous streaming must not be flagged as stuck note");
         assert!(report.stuck_notes_detected.is_empty());
     }
+
+    #[test]
+    fn test_diorama_frame_data_extraction() {
+        use gba_simulator::gba::Gba;
+
+        let mut gba = Gba::new();
+
+        // Enable BG0, BG1, and OBJ in DISPCNT (bits 8, 9, 12)
+        // DISPCNT = (1 << 8) | (1 << 9) | (1 << 12)
+        gba.mmu.ppu.dispcnt = (1 << 8) | (1 << 9) | (1 << 12);
+        gba.mmu.ppu.bgcnt[0] = 1; // Priority 1
+        gba.mmu.ppu.bgcnt[1] = 2; // Priority 2
+        gba.mmu.ppu.bghofs[0] = 32;
+        gba.mmu.ppu.bgvofs[0] = 16;
+
+        // Set backdrop color in palette RAM
+        gba.mmu.ppu.palette_ram[0] = 0x1F; // Red
+        gba.mmu.ppu.palette_ram[1] = 0x00;
+
+        // Enable diorama extraction
+        gba.set_diorama_enabled(true);
+        assert!(gba.mmu.ppu.diorama_enabled);
+
+        // Run a frame to trigger VBlank extraction
+        gba.run_frame();
+
+        let diorama = gba.get_diorama_data();
+        assert!(diorama.bg_layers[0].enabled);
+        assert!(diorama.bg_layers[1].enabled);
+        assert!(!diorama.bg_layers[2].enabled);
+        assert_eq!(diorama.bg_layers[0].priority, 1);
+        assert_eq!(diorama.bg_layers[1].priority, 2);
+        assert_eq!(diorama.bg_layers[0].scroll_x, 32);
+        assert_eq!(diorama.bg_layers[0].scroll_y, 16);
+
+        // Check backdrop color
+        assert_eq!(diorama.backdrop_color[0], 255); // Red extracted from BGR555 0x001F
+        assert_eq!(diorama.backdrop_color[3], 255); // Opaque alpha
+    }
+
+    #[test]
+    fn test_diorama_toggle_preserves_classic_2d() {
+        use gba_simulator::gba::Gba;
+
+        let mut gba_classic = Gba::new();
+        gba_classic.mmu.ppu.dispcnt = 0x0100; // BG0 enabled
+        gba_classic.run_frame();
+        let fb_classic = *gba_classic.get_framebuffer();
+
+        let mut gba_diorama = Gba::new();
+        gba_diorama.mmu.ppu.dispcnt = 0x0100;
+        gba_diorama.set_diorama_enabled(true);
+        gba_diorama.run_frame();
+        let fb_diorama = *gba_diorama.get_framebuffer();
+
+        // 2D composite framebuffer must be completely identical regardless of diorama mode
+        assert_eq!(fb_classic, fb_diorama, "Diorama mode must never alter standard 2D framebuffer output");
+    }
+
+    #[test]
+    fn test_orbit_camera_transforms() {
+        use gba_simulator::ui::diorama_renderer::OrbitCamera;
+        use eframe::egui::Pos2;
+
+        let mut cam = OrbitCamera::new();
+        assert!((cam.yaw - OrbitCamera::DEFAULT_YAW).abs() < 1e-4);
+        assert!((cam.pitch - OrbitCamera::DEFAULT_PITCH).abs() < 1e-4);
+        assert_eq!(cam.distance, OrbitCamera::DEFAULT_DISTANCE);
+
+        // Test rotation and pitch clamping
+        cam.rotate(100.0, 500.0);
+        assert!(cam.pitch <= 1.35 && cam.pitch >= -1.35, "Pitch must remain clamped");
+
+        // Test zoom clamping
+        cam.zoom(100.0);
+        assert_eq!(cam.distance, 120.0, "Zoom in must clamp at 120.0");
+        cam.zoom(-100.0);
+        assert_eq!(cam.distance, 750.0, "Zoom out must clamp at 750.0");
+
+        // Test reset
+        cam.reset();
+        assert!((cam.yaw - OrbitCamera::DEFAULT_YAW).abs() < 1e-4);
+        assert!((cam.pitch - OrbitCamera::DEFAULT_PITCH).abs() < 1e-4);
+        assert_eq!(cam.distance, OrbitCamera::DEFAULT_DISTANCE);
+
+        // Test orthographic center mapping when facing directly
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        let center = Pos2::new(300.0, 200.0);
+        let (proj, cam_z) = cam.project_point(0.0, 0.0, 20.0, center, 1.0);
+        assert!((proj.x - center.x).abs() < 1e-3);
+        assert!((proj.y - center.y).abs() < 1e-3);
+        assert!((cam_z - cam.distance).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_diorama_z_depth_sorting() {
+        use gba_simulator::gba::ppu::diorama::Sprite3D;
+
+        let s1 = Sprite3D {
+            id: 0,
+            x: 10,
+            y: 20,
+            width: 16,
+            height: 16,
+            priority: 2,
+            is_affine: false,
+            is_semi_transparent: false,
+            pixels: vec![0xFFFFFFFF; 256],
+        };
+
+        let s2 = Sprite3D {
+            id: 1,
+            x: 10,
+            y: 20,
+            width: 16,
+            height: 16,
+            priority: 2,
+            is_affine: false,
+            is_semi_transparent: false,
+            pixels: vec![0xFFFFFFFF; 256],
+        };
+
+        // Micro-offset check: s1 and s2 have same (x, y, priority) but different id
+        let calc_z = |s: &Sprite3D| -> f32 {
+            let prio_offset = (3 - s.priority) as f32 * 3.5;
+            let y_offset = (s.y as f32 / 160.0) * 1.5;
+            let id_offset = (s.id as f32) * 0.02;
+            30.0 + prio_offset + y_offset + id_offset
+        };
+
+        let z1 = calc_z(&s1);
+        let z2 = calc_z(&s2);
+        assert!(z2 > z1, "Sprite with higher ID must have distinct micro-offset to prevent Z-fighting");
+        assert!((z2 - z1 - 0.02).abs() < 1e-4);
+    }
 }
 
 

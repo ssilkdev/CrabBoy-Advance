@@ -260,6 +260,14 @@ impl Gba {
         &self.mmu.ppu.framebuffer
     }
 
+    pub fn set_diorama_enabled(&mut self, enabled: bool) {
+        self.mmu.ppu.diorama_enabled = enabled;
+    }
+
+    pub fn get_diorama_data(&self) -> &ppu::DioramaFrameData {
+        self.mmu.ppu.get_diorama_data()
+    }
+
     pub fn save_state(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(512 * 1024);
         // CPU regs
