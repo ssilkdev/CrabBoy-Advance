@@ -1248,190 +1248,93 @@ mod tests {
     }
 
     #[test]
-    fn test_diorama_frame_data_extraction() {
-        use gba_simulator::gba::Gba;
+    fn test_aspect_ratio_definitions_and_ratios() {
+        use gba_simulator::ui::screen::AspectRatio;
 
-        let mut gba = Gba::new();
+        assert_eq!(AspectRatio::Native.ratio(), Some(1.5));
+        assert!((AspectRatio::ClassicTv.ratio().unwrap() - (4.0 / 3.0)).abs() < 1e-4);
+        assert_eq!(AspectRatio::Square.ratio(), Some(1.0));
+        assert!((AspectRatio::GameBoyOriginal.ratio().unwrap() - (10.0 / 9.0)).abs() < 1e-4);
+        assert!((AspectRatio::Widescreen16_9.ratio().unwrap() - (16.0 / 9.0)).abs() < 1e-4);
+        assert!((AspectRatio::Widescreen16_10.ratio().unwrap() - (16.0 / 10.0)).abs() < 1e-4);
+        assert!((AspectRatio::Ultrawide21_9.ratio().unwrap() - (21.0 / 9.0)).abs() < 1e-4);
+        assert_eq!(AspectRatio::Stretch.ratio(), None);
 
-        // Enable BG0, BG1, and OBJ in DISPCNT (bits 8, 9, 12)
-        // DISPCNT = (1 << 8) | (1 << 9) | (1 << 12)
-        gba.mmu.ppu.dispcnt = (1 << 8) | (1 << 9) | (1 << 12);
-        gba.mmu.ppu.bgcnt[0] = 1; // Priority 1
-        gba.mmu.ppu.bgcnt[1] = 2; // Priority 2
-        gba.mmu.ppu.bghofs[0] = 32;
-        gba.mmu.ppu.bgvofs[0] = 16;
-
-        // Set backdrop color in palette RAM
-        gba.mmu.ppu.palette_ram[0] = 0x1F; // Red
-        gba.mmu.ppu.palette_ram[1] = 0x00;
-
-        // Enable diorama extraction
-        gba.set_diorama_enabled(true);
-        assert!(gba.mmu.ppu.diorama_enabled);
-
-        // Run a frame to trigger VBlank extraction
-        gba.run_frame();
-
-        let diorama = gba.get_diorama_data();
-        assert!(diorama.bg_layers[0].enabled);
-        assert!(diorama.bg_layers[1].enabled);
-        assert!(!diorama.bg_layers[2].enabled);
-        assert_eq!(diorama.bg_layers[0].priority, 1);
-        assert_eq!(diorama.bg_layers[1].priority, 2);
-        assert_eq!(diorama.bg_layers[0].scroll_x, 32);
-        assert_eq!(diorama.bg_layers[0].scroll_y, 16);
-
-        // Check backdrop color
-        assert_eq!(diorama.backdrop_color[0], 255); // Red extracted from BGR555 0x001F
-        assert_eq!(diorama.backdrop_color[3], 255); // Opaque alpha
+        // Check badge texts and display names
+        assert_eq!(AspectRatio::Native.badge_text(), "[3:2]");
+        assert_eq!(AspectRatio::ClassicTv.badge_text(), "[4:3]");
+        assert_eq!(AspectRatio::Square.badge_text(), "[1:1]");
+        assert_eq!(AspectRatio::Widescreen16_9.badge_text(), "[16:9]");
+        assert_eq!(AspectRatio::Stretch.badge_text(), "[STRETCH]");
     }
 
     #[test]
-    fn test_diorama_toggle_preserves_classic_2d() {
-        use gba_simulator::gba::Gba;
+    fn test_aspect_ratio_cycling() {
+        use gba_simulator::ui::screen::AspectRatio;
 
-        let mut gba_classic = Gba::new();
-        gba_classic.mmu.ppu.dispcnt = 0x0100; // BG0 enabled
-        gba_classic.run_frame();
-        let fb_classic = *gba_classic.get_framebuffer();
+        let mut ar = AspectRatio::Native;
+        let expected_sequence = [
+            AspectRatio::ClassicTv,
+            AspectRatio::Square,
+            AspectRatio::GameBoyOriginal,
+            AspectRatio::Widescreen16_9,
+            AspectRatio::Widescreen16_10,
+            AspectRatio::Ultrawide21_9,
+            AspectRatio::Stretch,
+            AspectRatio::Native, // wraps around
+        ];
 
-        let mut gba_diorama = Gba::new();
-        gba_diorama.mmu.ppu.dispcnt = 0x0100;
-        gba_diorama.set_diorama_enabled(true);
-        gba_diorama.run_frame();
-        let fb_diorama = *gba_diorama.get_framebuffer();
-
-        // 2D composite framebuffer must be completely identical regardless of diorama mode
-        assert_eq!(fb_classic, fb_diorama, "Diorama mode must never alter standard 2D framebuffer output");
-    }
-
-    #[test]
-    fn test_orbit_camera_transforms() {
-        use gba_simulator::ui::diorama_renderer::OrbitCamera;
-        use eframe::egui::Pos2;
-
-        let mut cam = OrbitCamera::new();
-        assert!((cam.yaw - OrbitCamera::DEFAULT_YAW).abs() < 1e-4);
-        assert!((cam.pitch - OrbitCamera::DEFAULT_PITCH).abs() < 1e-4);
-        assert_eq!(cam.distance, OrbitCamera::DEFAULT_DISTANCE);
-
-        // Test rotation and pitch clamping
-        cam.rotate(100.0, 500.0);
-        assert!(cam.pitch <= 1.35 && cam.pitch >= -1.35, "Pitch must remain clamped");
-
-        // Test zoom clamping
-        cam.zoom(100.0);
-        assert_eq!(cam.distance, 120.0, "Zoom in must clamp at 120.0");
-        cam.zoom(-100.0);
-        assert_eq!(cam.distance, 750.0, "Zoom out must clamp at 750.0");
-
-        // Test reset
-        cam.reset();
-        assert!((cam.yaw - OrbitCamera::DEFAULT_YAW).abs() < 1e-4);
-        assert!((cam.pitch - OrbitCamera::DEFAULT_PITCH).abs() < 1e-4);
-        assert_eq!(cam.distance, OrbitCamera::DEFAULT_DISTANCE);
-
-        // Test orthographic center mapping when facing directly
-        cam.yaw = 0.0;
-        cam.pitch = 0.0;
-        let center = Pos2::new(300.0, 200.0);
-        let (proj, cam_z) = cam.project_point(0.0, 0.0, 20.0, center, 1.0);
-        assert!((proj.x - center.x).abs() < 1e-3);
-        assert!((proj.y - center.y).abs() < 1e-3);
-        assert!((cam_z - cam.distance).abs() < 1e-3);
-
-        // Test depth ordering: higher Z (foreground) is closer to camera -> smaller cam_z
-        let (_proj_front, cam_z_front) = cam.project_point(0.0, 0.0, 60.0, center, 1.0);
-        let (_proj_back, cam_z_back) = cam.project_point(0.0, 0.0, 0.0, center, 1.0);
-        assert!(
-            cam_z_front < cam_z_back,
-            "Foreground layers (higher Z) must be closer to camera than background layers"
-        );
-        assert!((cam_z_front - (cam.distance - 40.0)).abs() < 1e-3);
-        assert!((cam_z_back - (cam.distance + 20.0)).abs() < 1e-3);
-    }
-
-    #[test]
-    fn test_diorama_window_masking() {
-        use gba_simulator::gba::ppu::diorama::DioramaFrameData;
-        use gba_simulator::gba::ppu::blend::Pixel;
-        use gba_simulator::gba::ppu::SCREEN_WIDTH;
-
-        let mut data = DioramaFrameData::new();
-        let bg_bufs = [[Pixel {
-            color: 0x03E0, // Green
-            layer: 0,
-            priority: 0,
-            is_transparent: false,
-            is_obj_alpha: false,
-        }; SCREEN_WIDTH]; 4];
-
-        let obj_buf = [Pixel {
-            color: 0x7C00, // Red
-            layer: 4,
-            priority: 0,
-            is_transparent: false,
-            is_obj_alpha: false,
-        }; SCREEN_WIDTH];
-
-        // Mask out first 50 pixels for BG0, and enable all elsewhere
-        let mut win_masks = [0x3Fu8; SCREEN_WIDTH];
-        for x in 0..50 {
-            win_masks[x] &= !1; // Disable BG0
-        }
-
-        data.record_scanline(0, &bg_bufs, &obj_buf, &win_masks);
-
-        // Pixel 0..50 for BG0 must be 0 (masked out)
-        for x in 0..50 {
-            assert_eq!(data.bg_layers[0].pixels[x], 0, "Pixel {} should be masked out", x);
-        }
-        // Pixel 50..240 for BG0 must be non-zero
-        for x in 50..SCREEN_WIDTH {
-            assert_ne!(data.bg_layers[0].pixels[x], 0, "Pixel {} should be visible", x);
+        for &expected in &expected_sequence {
+            ar = ar.cycle();
+            assert_eq!(ar, expected);
         }
     }
 
     #[test]
-    fn test_diorama_z_depth_sorting() {
-        use gba_simulator::gba::ppu::diorama::Sprite3D;
+    fn test_aspect_ratio_target_size_calculations() {
+        use gba_simulator::ui::screen::{AspectRatio, ScaleMode};
+        use eframe::egui::Vec2;
 
-        let s1 = Sprite3D {
-            id: 0,
-            x: 10,
-            y: 20,
-            width: 16,
-            height: 16,
-            priority: 2,
-            is_affine: false,
-            is_semi_transparent: false,
-            pixels: vec![0xFFFFFFFF; 256],
-        };
+        let window = Vec2::new(1920.0, 1080.0);
 
-        let s2 = Sprite3D {
-            id: 1,
-            x: 10,
-            y: 20,
-            width: 16,
-            height: 16,
-            priority: 2,
-            is_affine: false,
-            is_semi_transparent: false,
-            pixels: vec![0xFFFFFFFF; 256],
-        };
+        // 1. Fit mode with Native 3:2: height = 1080, width = 1080 * 1.5 = 1620
+        let sz_native = AspectRatio::Native.calculate_target_size(window, ScaleMode::Fit);
+        assert_eq!(sz_native.y, 1080.0);
+        assert_eq!(sz_native.x, 1620.0);
 
-        // Micro-offset check: s1 and s2 have same (x, y, priority) but different id
-        let calc_z = |s: &Sprite3D| -> f32 {
-            let prio_offset = (3 - s.priority) as f32 * 3.5;
-            let y_offset = (s.y as f32 / 160.0) * 1.5;
-            let id_offset = (s.id as f32) * 0.02;
-            30.0 + prio_offset + y_offset + id_offset
-        };
+        // 2. Fit mode with Classic TV 4:3: height = 1080, width = 1080 * (4/3) = 1440
+        let sz_4_3 = AspectRatio::ClassicTv.calculate_target_size(window, ScaleMode::Fit);
+        assert_eq!(sz_4_3.y, 1080.0);
+        assert_eq!(sz_4_3.x, 1440.0);
 
-        let z1 = calc_z(&s1);
-        let z2 = calc_z(&s2);
-        assert!(z2 > z1, "Sprite with higher ID must have distinct micro-offset to prevent Z-fighting");
-        assert!((z2 - z1 - 0.02).abs() < 1e-4);
+        // 3. Fit mode with Square 1:1: height = 1080, width = 1080
+        let sz_square = AspectRatio::Square.calculate_target_size(window, ScaleMode::Fit);
+        assert_eq!(sz_square.y, 1080.0);
+        assert_eq!(sz_square.x, 1080.0);
+
+        // 4. Fit mode with 16:9: exact fit to 1920x1080 window
+        let sz_16_9 = AspectRatio::Widescreen16_9.calculate_target_size(window, ScaleMode::Fit);
+        assert_eq!(sz_16_9.y, 1080.0);
+        assert_eq!(sz_16_9.x, 1920.0);
+
+        // 5. Fit mode with Stretch: fills available window
+        let sz_stretch = AspectRatio::Stretch.calculate_target_size(window, ScaleMode::Fit);
+        assert_eq!(sz_stretch, window);
+
+        // 6. Scale2x with Native: 240 * 2 = 480, 160 * 2 = 320
+        let sz_2x_native = AspectRatio::Native.calculate_target_size(window, ScaleMode::Scale2x);
+        assert_eq!(sz_2x_native.x, 480.0);
+        assert_eq!(sz_2x_native.y, 320.0);
+
+        // 7. Scale2x with 4:3: height = 320, width = 320 * (4/3) = 426.666...
+        let sz_2x_43 = AspectRatio::ClassicTv.calculate_target_size(window, ScaleMode::Scale2x);
+        assert_eq!(sz_2x_43.y, 320.0);
+        assert!((sz_2x_43.x - (320.0 * 4.0 / 3.0)).abs() < 1e-3);
+
+        // 8. IntegerAuto with Native on 1920x1080: max scale is floor(1080 / 160) = 6 -> 1440x960
+        let sz_auto_native = AspectRatio::Native.calculate_target_size(window, ScaleMode::IntegerAuto);
+        assert_eq!(sz_auto_native.y, 960.0);
+        assert_eq!(sz_auto_native.x, 1440.0);
     }
 }
 

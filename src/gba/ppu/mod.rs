@@ -3,12 +3,10 @@
 
 pub mod bg;
 pub mod blend;
-pub mod diorama;
 pub mod obj;
 
 use bg::{render_affine_bg, render_bitmap_bg, render_text_bg};
 use blend::{apply_color_effects, bgr555_to_rgb888, Pixel};
-pub use diorama::{DioramaFrameData, Layer3D, Sprite3D};
 use obj::render_sprites;
 
 pub const SCREEN_WIDTH: usize = 240;
@@ -62,11 +60,6 @@ pub struct Ppu {
 
     // Front/back RGBA8888 framebuffers (240x160)
     pub framebuffer: Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]>,
-
-    // 2.5D Diorama Mode Data
-    pub diorama_enabled: bool,
-    pub diorama_data: DioramaFrameData,
-    staging_diorama_data: DioramaFrameData,
 }
 
 impl Default for Ppu {
@@ -108,9 +101,6 @@ impl Ppu {
             frame_ready: false,
             layer_mask: 0x1F,
             framebuffer: Box::new([0xFF00_0000; SCREEN_WIDTH * SCREEN_HEIGHT]),
-            diorama_enabled: false,
-            diorama_data: DioramaFrameData::new(),
-            staging_diorama_data: DioramaFrameData::new(),
         }
     }
 
@@ -155,24 +145,6 @@ impl Ppu {
                 // Entering VBlank
                 self.dispstat |= 1;
                 self.frame_ready = true;
-
-                if self.diorama_enabled {
-                    self.staging_diorama_data.finalize_frame(
-                        self.dispcnt,
-                        &self.bgcnt,
-                        &self.bghofs,
-                        &self.bgvofs,
-                        self.win0h,
-                        self.win0v,
-                        self.win1h,
-                        self.win1v,
-                        &self.palette_ram[..],
-                        &self.oam[..],
-                        &self.vram[..],
-                    );
-                    std::mem::swap(&mut self.diorama_data, &mut self.staging_diorama_data);
-                    self.staging_diorama_data.clear();
-                }
 
                 if (self.dispstat & (1 << 3)) != 0 {
                     irq_vblank = true;
@@ -372,11 +344,6 @@ impl Ppu {
             }
         }
 
-        // Record isolated layer buffers for 2.5D diorama mode if enabled
-        if self.diorama_enabled {
-            self.staging_diorama_data.record_scanline(y, &bg_layer_bufs, &obj_buf, &win_masks);
-        }
-
         let eva = self.bldalpha & 0x1F;
         let evb = (self.bldalpha >> 8) & 0x1F;
         let evy = self.bldy & 0x1F;
@@ -428,10 +395,5 @@ impl Ppu {
             // Format: 0xFF_AA_BB_GG_RR in little-endian (or RGBA 0xFF_BB_GG_RR)
             self.framebuffer[row_offset + x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
         }
-    }
-
-    /// Access the latest completed 2.5D diorama frame data.
-    pub fn get_diorama_data(&self) -> &DioramaFrameData {
-        &self.diorama_data
     }
 }

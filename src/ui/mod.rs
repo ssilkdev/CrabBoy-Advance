@@ -5,7 +5,6 @@ pub mod bezels;
 pub mod cheats_dialog;
 pub mod controls;
 pub mod debug;
-pub mod diorama_renderer;
 pub mod gif_recorder;
 pub mod guide_dialog;
 pub mod link_dialog;
@@ -23,7 +22,6 @@ pub mod updater_dialog;
 use audio_mixer_dialog::AudioMixerDialog;
 use bezels::{BezelMode, BezelRenderer};
 use cheats_dialog::CheatsDialog;
-use diorama_renderer::DioramaRenderer;
 use gif_recorder::GifRecorder;
 use guide_dialog::GuideDialog;
 use link_dialog::LinkDialog;
@@ -36,12 +34,12 @@ use updater_dialog::UpdaterDialog;
 
 use crate::gba::apu::SurroundMode;
 use crate::gba::keypad::Key;
-use crate::gba::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::gba::Gba;
 use controls::{handle_input, GamepadManager, KeyBindings};
 use debug::DebugWindows;
 use rewind::RewindManager;
 use save_manager::SaveStateManager;
-use screen::{DisplayFilter, ScaleMode, ScreenRenderer};
+use screen::{AspectRatio, DisplayFilter, ScaleMode, ScreenRenderer};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::path::{Path, PathBuf};
@@ -78,7 +76,7 @@ pub struct GbaApp {
     pub color_correction: bool,
     pub ultrawide_ambient_glow: bool,
     pub scale_mode: ScaleMode,
-    pub lock_aspect_ratio: bool,
+    pub aspect_ratio: AspectRatio,
     pub speed_multiplier: u32,
     pub is_paused: bool,
     pub is_fullscreen: bool,
@@ -92,11 +90,6 @@ pub struct GbaApp {
     fps_timer: Instant,
     last_frame_instant: Instant,
     frame_accumulator: Duration,
-
-    // 2.5D / 3D Diorama Mode (Inspired by 3Dsen)
-    pub diorama_renderer: DioramaRenderer,
-    pub diorama_mode: bool,
-    pub show_diorama_controls: bool,
 
     // UI state
     toast_message: Option<(String, Instant)>,
@@ -164,7 +157,7 @@ impl GbaApp {
             color_correction: false,
             ultrawide_ambient_glow: true,
             scale_mode: ScaleMode::Scale3x,
-            lock_aspect_ratio: true,
+            aspect_ratio: AspectRatio::Native,
             speed_multiplier: 1,
             is_paused: false,
             is_fullscreen: false,
@@ -181,9 +174,6 @@ impl GbaApp {
             show_save_manager_dialog: false,
             show_rtc_dialog: false,
             show_about_dialog: false,
-            diorama_renderer: DioramaRenderer::new(),
-            diorama_mode: false,
-            show_diorama_controls: false,
             loaded_rom_name,
         }
     }
@@ -380,25 +370,13 @@ impl eframe::App for GbaApp {
                 self.debug_windows.show_diagnostics = !self.debug_windows.show_diagnostics;
             }
             if i.key_pressed(egui::Key::F3) {
-                self.diorama_mode = !self.diorama_mode;
-                self.gba.set_diorama_enabled(self.diorama_mode);
-                self.set_toast(if self.diorama_mode {
-                    "🎥 2.5D Diorama Mode Enabled (F3)"
-                } else {
-                    "📺 Classic 2D Mode Enabled (F3)"
-                });
-            }
-            if self.diorama_mode && i.key_pressed(egui::Key::R) && !i.modifiers.ctrl {
-                self.diorama_renderer.camera.reset();
-                self.set_toast("Reset 3D Diorama Camera (R)");
+                self.aspect_ratio = self.aspect_ratio.cycle();
+                self.set_toast(format!("📐 Aspect Ratio: {}", self.aspect_ratio.display_name()));
             }
             if (i.key_pressed(egui::Key::N) || i.key_pressed(egui::Key::Period)) && self.is_paused {
                 self.gba.run_frame();
             }
         });
-
-        // Keep PPU diorama accumulation pipeline in sync with UI mode
-        self.gba.set_diorama_enabled(self.diorama_mode);
 
         // Snapshot / override keypad inputs for TAS
         let keys_pressed_array = [
@@ -644,22 +622,14 @@ impl eframe::App for GbaApp {
                     ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::GbaSpFlameRed, "GBA SP (Flame Red)");
                     ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::GameBoyPlayer, "Game Boy Player (GameCube)");
                     ui.separator();
-                    ui.checkbox(&mut self.lock_aspect_ratio, "Lock Aspect Ratio (3:2)");
-                    ui.checkbox(&mut self.screenshot_enhanced, "Screenshot: Capture Enhanced (xBRZ/NIS) vs Raw 1x");
+                    ui.label("📐 Aspect Ratio (F3 to cycle):");
+                    for &ar in &AspectRatio::ALL {
+                        if ui.radio_value(&mut self.aspect_ratio, ar, ar.display_name()).clicked() {
+                            self.set_toast(format!("📐 Aspect Ratio: {}", ar.display_name()));
+                        }
+                    }
                     ui.separator();
-                    ui.label("🎥 2.5D / 3D Diorama Mode (3Dsen Style):");
-                    if ui.checkbox(&mut self.diorama_mode, "Enable 3D Diorama Mode (F3)").changed() {
-                        self.gba.set_diorama_enabled(self.diorama_mode);
-                        self.set_toast(if self.diorama_mode { "🎥 2.5D Diorama Mode Enabled (F3)" } else { "📺 Classic 2D Mode Enabled (F3)" });
-                    }
-                    if ui.button("3D Diorama Settings & Perspective...").clicked() {
-                        self.show_diorama_controls = true;
-                        ui.close_menu();
-                    }
-                    if self.diorama_mode && ui.button("Reset 3D Camera (R)").clicked() {
-                        self.diorama_renderer.camera.reset();
-                        ui.close_menu();
-                    }
+                    ui.checkbox(&mut self.screenshot_enhanced, "Screenshot: Capture Enhanced (xBRZ/NIS) vs Raw 1x");
                 });
 
                 ui.menu_button("Audio", |ui| {
@@ -896,8 +866,16 @@ impl eframe::App for GbaApp {
                     if is_turbo {
                         ui.label(RichText::new("[TURBO 4X]").color(Color32::from_rgb(255, 100, 100)).strong());
                     }
-                    if self.diorama_mode {
-                        ui.label(RichText::new("[3D DIORAMA]").color(Color32::from_rgb(80, 200, 255)).strong());
+                    let ar_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(self.aspect_ratio.badge_text())
+                                .color(Color32::from_rgb(100, 200, 255))
+                                .strong()
+                        ).frame(false)
+                    ).on_hover_text(format!("Aspect Ratio: {} (Click or press F3 to cycle)", self.aspect_ratio.display_name()));
+                    if ar_btn.clicked() {
+                        self.aspect_ratio = self.aspect_ratio.cycle();
+                        self.set_toast(format!("📐 Aspect Ratio: {}", self.aspect_ratio.display_name()));
                     }
 
                     // Gamepad connection status badge
@@ -975,172 +953,12 @@ impl eframe::App for GbaApp {
                 });
         }
 
-        // 2.5D / 3D Diorama Settings Floating Window
-        if self.show_diorama_controls {
-            egui::Window::new("🎥 2.5D / 3D Diorama Settings")
-                .open(&mut self.show_diorama_controls)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.heading("🎥 3D Camera & Perspective");
-                    ui.separator();
-                    ui.add(egui::Slider::new(&mut self.diorama_renderer.camera.yaw, -std::f32::consts::PI..=std::f32::consts::PI).text("Camera Yaw"));
-                    ui.add(egui::Slider::new(&mut self.diorama_renderer.camera.pitch, -1.35..=1.35).text("Camera Pitch"));
-                    ui.add(egui::Slider::new(&mut self.diorama_renderer.camera.distance, 120.0..=750.0).text("Camera Zoom"));
-                    if ui.button("↺ Reset Camera to Default (R)").clicked() {
-                        self.diorama_renderer.camera.reset();
-                    }
-
-                    ui.add_space(8.0);
-                    ui.heading("📦 Layer Depths & Extrusions");
-                    ui.separator();
-                    ui.add(egui::Slider::new(&mut self.diorama_renderer.layer_depth_separation, 5.0..=45.0).text("Layer 3D Depth Spacing"));
-                    ui.add(egui::Slider::new(&mut self.diorama_renderer.sprite_depth_elevation, 5.0..=50.0).text("Sprite 3D Pop-Out"));
-                    ui.add(egui::Slider::new(&mut self.diorama_renderer.voxel_relief_strength, 0.0..=1.0).text("Voxel Tile Relief"));
-
-                    ui.add_space(8.0);
-                    ui.heading("✨ Aesthetics & Effects");
-                    ui.separator();
-                    ui.checkbox(&mut self.diorama_renderer.show_layer_shadows, "Layer & Sprite Drop Shadows");
-                    ui.checkbox(&mut self.diorama_renderer.show_diorama_grid, "Diorama Pedestal Floor");
-                });
-        }
-
         // Central Panel (GBA LCD Viewport)
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 15, 18)))
             .show(ctx, |ui| {
                 let available_size = ui.available_size();
-
-                // 2.5D / 3D Diorama Mode Viewport
-                if self.diorama_mode {
-                    let (viewport_rect, response) = ui.allocate_exact_size(available_size, Sense::drag());
-
-                    if response.dragged() {
-                        let delta = response.drag_delta();
-                        if ui.input(|i| i.modifiers.shift) {
-                            self.diorama_renderer.camera.pan(delta.x, delta.y);
-                        } else {
-                            self.diorama_renderer.camera.rotate(delta.x, delta.y);
-                        }
-                    }
-
-                    let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
-                    if scroll_delta.abs() > 0.1 {
-                        self.diorama_renderer.camera.zoom(scroll_delta * 0.04);
-                    }
-
-                    self.diorama_renderer.render(
-                        ui,
-                        ctx,
-                        viewport_rect,
-                        self.gba.get_diorama_data(),
-                    );
-
-                    // Floating HUD overlay in top-left of diorama viewport
-                    let hud_rect = Rect::from_min_size(
-                        viewport_rect.min + Vec2::new(14.0, 14.0),
-                        Vec2::new(280.0, 56.0),
-                    );
-                    ui.painter().rect_filled(
-                        hud_rect,
-                        6.0_f32,
-                        Color32::from_rgba_unmultiplied(18, 20, 26, 215),
-                    );
-                    ui.painter().rect_stroke(
-                        hud_rect,
-                        6.0_f32,
-                        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(80, 200, 255, 90)),
-                        egui::StrokeKind::Outside,
-                    );
-                    ui.painter().text(
-                        hud_rect.min + Vec2::new(10.0, 8.0),
-                        egui::Align2::LEFT_TOP,
-                        "🎥 2.5D Diorama Mode Active (F3)",
-                        egui::FontId::proportional(12.5),
-                        Color32::from_rgb(100, 220, 255),
-                    );
-                    ui.painter().text(
-                        hud_rect.min + Vec2::new(10.0, 26.0),
-                        egui::Align2::LEFT_TOP,
-                        "Drag mouse to orbit | Scroll to zoom | R to reset",
-                        egui::FontId::proportional(10.5),
-                        Color32::from_rgb(180, 190, 210),
-                    );
-                    ui.painter().text(
-                        hud_rect.min + Vec2::new(10.0, 40.0),
-                        egui::Align2::LEFT_TOP,
-                        format!(
-                            "Yaw: {:.1}°  Pitch: {:.1}°  Zoom: {:.0}",
-                            self.diorama_renderer.camera.yaw.to_degrees(),
-                            self.diorama_renderer.camera.pitch.to_degrees(),
-                            self.diorama_renderer.camera.distance
-                        ),
-                        egui::FontId::monospace(10.0),
-                        Color32::from_rgb(140, 210, 140),
-                    );
-
-                    // Toast Notification Overlay
-                    if let Some((ref msg, time)) = self.toast_message {
-                        if time.elapsed().as_secs_f32() < 3.0 {
-                            let toast_rect = Rect::from_min_size(
-                                viewport_rect.min + Vec2::new(14.0, 80.0),
-                                Vec2::new(280.0, 32.0),
-                            );
-                            ui.painter().rect_filled(
-                                toast_rect,
-                                6.0_f32,
-                                Color32::from_rgba_unmultiplied(20, 22, 28, 220),
-                            );
-                            ui.painter().rect_stroke(
-                                toast_rect,
-                                6.0_f32,
-                                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 40)),
-                                egui::StrokeKind::Outside,
-                            );
-                            ui.painter().text(
-                                toast_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                msg,
-                                egui::FontId::proportional(13.0),
-                                Color32::WHITE,
-                            );
-                        }
-                    }
-                    return;
-                }
-
-                let gba_aspect = (SCREEN_WIDTH as f32) / (SCREEN_HEIGHT as f32);
-
-                let target_size = match self.scale_mode {
-                    ScaleMode::Scale1x => Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32),
-                    ScaleMode::Scale2x => Vec2::new(SCREEN_WIDTH as f32 * 2.0, SCREEN_HEIGHT as f32 * 2.0),
-                    ScaleMode::Scale3x => Vec2::new(SCREEN_WIDTH as f32 * 3.0, SCREEN_HEIGHT as f32 * 3.0),
-                    ScaleMode::Scale4x => Vec2::new(SCREEN_WIDTH as f32 * 4.0, SCREEN_HEIGHT as f32 * 4.0),
-                    ScaleMode::Scale5x => Vec2::new(SCREEN_WIDTH as f32 * 5.0, SCREEN_HEIGHT as f32 * 5.0),
-                    ScaleMode::Scale6x => Vec2::new(SCREEN_WIDTH as f32 * 6.0, SCREEN_HEIGHT as f32 * 6.0),
-                    ScaleMode::Scale8x => Vec2::new(SCREEN_WIDTH as f32 * 8.0, SCREEN_HEIGHT as f32 * 8.0),
-                    ScaleMode::Scale10x => Vec2::new(SCREEN_WIDTH as f32 * 10.0, SCREEN_HEIGHT as f32 * 10.0),
-                    ScaleMode::Scale12x => Vec2::new(SCREEN_WIDTH as f32 * 12.0, SCREEN_HEIGHT as f32 * 12.0),
-                    ScaleMode::Scale14x => Vec2::new(SCREEN_WIDTH as f32 * 14.0, SCREEN_HEIGHT as f32 * 14.0),
-                    ScaleMode::IntegerAuto => {
-                        let max_w = (available_size.x / SCREEN_WIDTH as f32).floor() as u32;
-                        let max_h = (available_size.y / SCREEN_HEIGHT as f32).floor() as u32;
-                        let scale = max_w.min(max_h).max(1);
-                        Vec2::new(SCREEN_WIDTH as f32 * scale as f32, SCREEN_HEIGHT as f32 * scale as f32)
-                    }
-                    ScaleMode::Fit => {
-                        if self.lock_aspect_ratio {
-                            let w_by_h = available_size.y * gba_aspect;
-                            if w_by_h <= available_size.x {
-                                Vec2::new(w_by_h, available_size.y)
-                            } else {
-                                Vec2::new(available_size.x, available_size.x / gba_aspect)
-                            }
-                        } else {
-                            available_size
-                        }
-                    }
-                };
+                let target_size = self.aspect_ratio.calculate_target_size(available_size, self.scale_mode);
 
                 let tex = self.screen_renderer.update_framebuffer(
                     ctx,

@@ -1,6 +1,7 @@
-//! GBA LCD Viewport Rendering and Post-Processing Filters
+//! GBA LCD Viewport Rendering, Post-Processing Filters, and Aspect Ratio Management
 
-use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
+use crate::gba::{SCREEN_HEIGHT, SCREEN_WIDTH};
+use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayFilter {
@@ -31,6 +32,146 @@ pub enum ScaleMode {
     Scale14x,
     IntegerAuto,
     Fit,
+}
+
+/// Selectable display aspect ratios for GBA emulation viewport
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AspectRatio {
+    Native,          // 3:2 (Exact GBA hardware 240x160)
+    ClassicTv,       // 4:3 (Standard CRT / retro broadcast)
+    Square,          // 1:1 (Square pixel viewport)
+    GameBoyOriginal, // 10:9 (Classic Game Boy DMG/CGB 160x144)
+    Widescreen16_9,  // 16:9 (Modern HDTV / widescreen)
+    Widescreen16_10, // 16:10 (Steam Deck / PC laptops)
+    Ultrawide21_9,   // 21:9 (Cinematic ultrawide)
+    Stretch,         // Stretch to fill window without aspect constraint
+}
+
+impl Default for AspectRatio {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl AspectRatio {
+    pub const ALL: [AspectRatio; 8] = [
+        AspectRatio::Native,
+        AspectRatio::ClassicTv,
+        AspectRatio::Square,
+        AspectRatio::GameBoyOriginal,
+        AspectRatio::Widescreen16_9,
+        AspectRatio::Widescreen16_10,
+        AspectRatio::Ultrawide21_9,
+        AspectRatio::Stretch,
+    ];
+
+    /// Numerical width-to-height ratio (or None for stretch)
+    #[inline]
+    pub fn ratio(&self) -> Option<f32> {
+        match self {
+            Self::Native => Some(3.0 / 2.0),
+            Self::ClassicTv => Some(4.0 / 3.0),
+            Self::Square => Some(1.0 / 1.0),
+            Self::GameBoyOriginal => Some(10.0 / 9.0),
+            Self::Widescreen16_9 => Some(16.0 / 9.0),
+            Self::Widescreen16_10 => Some(16.0 / 10.0),
+            Self::Ultrawide21_9 => Some(21.0 / 9.0),
+            Self::Stretch => None,
+        }
+    }
+
+    /// User-friendly label for menus and tooltips
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Native => "Native (3:2) - GBA Original",
+            Self::ClassicTv => "Classic CRT / TV (4:3)",
+            Self::Square => "Square (1:1)",
+            Self::GameBoyOriginal => "Classic Game Boy (10:9)",
+            Self::Widescreen16_9 => "Widescreen (16:9)",
+            Self::Widescreen16_10 => "Widescreen (16:10) - Steam Deck",
+            Self::Ultrawide21_9 => "Ultrawide (21:9)",
+            Self::Stretch => "Stretch to Window (Fill)",
+        }
+    }
+
+    /// Compact badge text for status bar
+    pub fn badge_text(&self) -> &'static str {
+        match self {
+            Self::Native => "[3:2]",
+            Self::ClassicTv => "[4:3]",
+            Self::Square => "[1:1]",
+            Self::GameBoyOriginal => "[10:9]",
+            Self::Widescreen16_9 => "[16:9]",
+            Self::Widescreen16_10 => "[16:10]",
+            Self::Ultrawide21_9 => "[21:9]",
+            Self::Stretch => "[STRETCH]",
+        }
+    }
+
+    /// Cycle to the next aspect ratio in sequence
+    pub fn cycle(&self) -> Self {
+        match self {
+            Self::Native => Self::ClassicTv,
+            Self::ClassicTv => Self::Square,
+            Self::Square => Self::GameBoyOriginal,
+            Self::GameBoyOriginal => Self::Widescreen16_9,
+            Self::Widescreen16_9 => Self::Widescreen16_10,
+            Self::Widescreen16_10 => Self::Ultrawide21_9,
+            Self::Ultrawide21_9 => Self::Stretch,
+            Self::Stretch => Self::Native,
+        }
+    }
+
+    /// Calculates the target viewport size in points given the available area and scale mode.
+    pub fn calculate_target_size(&self, available_size: Vec2, scale_mode: ScaleMode) -> Vec2 {
+        let native_w = SCREEN_WIDTH as f32;
+        let native_h = SCREEN_HEIGHT as f32;
+        let native_aspect = native_w / native_h; // 1.5
+
+        match scale_mode {
+            ScaleMode::Fit => {
+                match self.ratio() {
+                    Some(aspect) => {
+                        let w_by_h = available_size.y * aspect;
+                        if w_by_h <= available_size.x {
+                            Vec2::new(w_by_h, available_size.y)
+                        } else {
+                            Vec2::new(available_size.x, available_size.x / aspect)
+                        }
+                    }
+                    None => available_size, // Stretch mode fills entire available area
+                }
+            }
+            ScaleMode::IntegerAuto => {
+                let aspect = self.ratio().unwrap_or(native_aspect);
+                let max_h = (available_size.y / native_h).floor() as u32;
+                let max_w = (available_size.x / (native_h * aspect)).floor() as u32;
+                let scale = max_w.min(max_h).max(1);
+                let target_h = native_h * scale as f32;
+                let target_w = target_h * aspect;
+                Vec2::new(target_w, target_h)
+            }
+            fixed_scale => {
+                let factor = match fixed_scale {
+                    ScaleMode::Scale1x => 1.0,
+                    ScaleMode::Scale2x => 2.0,
+                    ScaleMode::Scale3x => 3.0,
+                    ScaleMode::Scale4x => 4.0,
+                    ScaleMode::Scale5x => 5.0,
+                    ScaleMode::Scale6x => 6.0,
+                    ScaleMode::Scale8x => 8.0,
+                    ScaleMode::Scale10x => 10.0,
+                    ScaleMode::Scale12x => 12.0,
+                    ScaleMode::Scale14x => 14.0,
+                    _ => 1.0,
+                };
+                let target_h = native_h * factor;
+                let aspect = self.ratio().unwrap_or(native_aspect);
+                let target_w = target_h * aspect;
+                Vec2::new(target_w, target_h)
+            }
+        }
+    }
 }
 
 pub struct ScreenRenderer {
