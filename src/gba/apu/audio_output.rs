@@ -159,8 +159,8 @@ impl AudioOutput {
                             // 3. Headphone 3D Spatializer (Bauer Crossfeed & Sub-Bass Reinforcement)
                             cross_l += cross_alpha * (right - cross_l);
                             cross_r += cross_alpha * (left - cross_r);
-                            let hp_3d_l = (left * 0.80 + cross_l * 0.22 + sub_lfe * 0.25).clamp(-1.0, 1.0);
-                            let hp_3d_r = (right * 0.80 + cross_r * 0.22 + sub_lfe * 0.25).clamp(-1.0, 1.0);
+                            let hp_3d_l = (left * 0.70 + cross_l * 0.18 + sub_lfe * 0.15).clamp(-1.0, 1.0);
+                            let hp_3d_r = (right * 0.70 + cross_r * 0.18 + sub_lfe * 0.15).clamp(-1.0, 1.0);
 
                             // 4. Channel Output Distribution
                             if channels >= 6 {
@@ -195,8 +195,8 @@ impl AudioOutput {
                                     }
                                     SurroundMode::Surround51 => {
                                         // 5.1 Matrix Virtual Downmix to Stereo Headphones
-                                        let downmix_l = (left + center * 0.7 + surround_l * 0.7 + sub_lfe * 0.35) * 0.65;
-                                        let downmix_r = (right + center * 0.7 + surround_r * 0.7 + sub_lfe * 0.35) * 0.65;
+                                        let downmix_l = (left + center * 0.6 + surround_l * 0.5 + sub_lfe * 0.25) * 0.50;
+                                        let downmix_r = (right + center * 0.6 + surround_r * 0.5 + sub_lfe * 0.25) * 0.50;
                                         frame[0] = downmix_l.clamp(-1.0, 1.0);
                                         frame[1] = downmix_r.clamp(-1.0, 1.0);
                                     }

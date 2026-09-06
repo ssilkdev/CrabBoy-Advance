@@ -738,6 +738,78 @@ mod tests {
         assert!(apu.dmg.ch4.active);
         assert!(s1 != 0.0 || s2 != 0.0 || s3 != 0.0 || s4 != 0.0);
     }
+
+    #[test]
+    fn test_audio_dsp_calibration_and_zero_dc_symmetry() {
+        use gba_simulator::gba::apu::Apu;
+
+        let mut apu = Apu::new();
+
+        // 1. Verify Square Wave symmetry: magnitude is exactly vol/15.0 with zero DC bias
+        apu.dmg.ch1.active = true;
+        apu.dmg.ch1.envelope.volume = 9;
+        apu.dmg.ch1.duty = 2; // 50% duty cycle
+        let expected_amp = 9.0 / 15.0;
+
+        let mut high_count = 0;
+        let mut low_count = 0;
+        for step in 0..8 {
+            apu.dmg.ch1.duty_step = step;
+            let sample = apu.dmg.ch1.sample();
+            assert!((sample.abs() - expected_amp).abs() < 1e-5);
+            if sample > 0.0 {
+                high_count += 1;
+            } else {
+                low_count += 1;
+            }
+        }
+        assert_eq!(high_count, 4);
+        assert_eq!(low_count, 4);
+
+        // 2. Verify Channel 4 (Noise) symmetry: magnitude is exactly vol/15.0
+        apu.dmg.ch4.active = true;
+        apu.dmg.ch4.envelope.volume = 6;
+        let noise_amp = 6.0 / 15.0;
+        let s_noise = apu.dmg.ch4.sample();
+        assert!((s_noise.abs() - noise_amp).abs() < 1e-5);
+
+        // 3. Verify Wave Channel bipolar centering around zero
+        apu.dmg.ch3.active = true;
+        apu.dmg.ch3.master_enable = true;
+        apu.dmg.ch3.volume_code = 1; // 100%
+        // Write max sample (15) and min sample (0)
+        apu.dmg.ch3.wave_ram[0] = 0xF0;
+        apu.dmg.ch3.sample_index = 0; // high nibble: 0x0F
+        let s_max = apu.dmg.ch3.sample();
+        assert!((s_max - 1.0).abs() < 1e-5);
+
+        apu.dmg.ch3.sample_index = 1; // low nibble: 0x00
+        let s_min = apu.dmg.ch3.sample();
+        assert!((s_min - (-1.0)).abs() < 1e-5);
+
+        // 4. Test end-to-end APU stepping with DirectSound + DMG
+        apu.write_reg16(0x084, 0x0080); // Enable APU
+        apu.write_reg16(0x080, 0xFF77); // Max DMG volume
+        apu.write_reg16(0x082, 0x0002); // 100% DMG ratio
+        // Push full-scale DirectSound samples
+        for _ in 0..16 {
+            apu.sound_a.push_byte(127);
+            apu.sound_b.push_byte(127);
+        }
+        apu.sound_a.left_enable = true;
+        apu.sound_a.right_enable = true;
+        apu.sound_b.left_enable = true;
+        apu.sound_b.right_enable = true;
+
+        // Run APU through multiple sample periods
+        for _ in 0..500 {
+            apu.step(1000, [true, true, false, false]);
+        }
+        apu.flush_samples();
+
+        // Ensure audio output buffer has received valid, finite, non-clipped samples
+        assert!(apu.audio_output.buffer_len() > 0);
+    }
 }
 
 

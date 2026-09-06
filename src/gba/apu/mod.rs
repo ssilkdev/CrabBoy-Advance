@@ -69,6 +69,14 @@ pub struct Apu {
     base_cycles_per_sample: f64,
     cpu_cycles_per_sample: f64,
     sample_batch: Vec<f32>,
+
+    // DSP Filter States
+    dc_x_l: f32,
+    dc_y_l: f32,
+    dc_x_r: f32,
+    dc_y_r: f32,
+    lp_l: f32,
+    lp_r: f32,
 }
 
 impl Default for Apu {
@@ -97,6 +105,12 @@ impl Apu {
             base_cycles_per_sample: cpu_cycles_per_sample,
             cpu_cycles_per_sample,
             sample_batch: Vec::with_capacity(1024),
+            dc_x_l: 0.0,
+            dc_y_l: 0.0,
+            dc_x_r: 0.0,
+            dc_y_r: 0.0,
+            lp_l: 0.0,
+            lp_r: 0.0,
         }
     }
 
@@ -310,11 +324,32 @@ impl Apu {
             if (self.soundcnt_l & (1 << 11)) != 0 { dmg_right += s4; }
         }
 
-        dmg_left *= vol_left * dmg_ratio * 0.25;
-        dmg_right *= vol_right * dmg_ratio * 0.25;
+        // Calibrated DMG gain: balanced headroom that blends naturally with DirectSound without overpowering BGM
+        dmg_left *= vol_left * dmg_ratio * 0.10;
+        dmg_right *= vol_right * dmg_ratio * 0.10;
 
-        let final_left = (ds_left * 0.5 + dmg_left).clamp(-1.0, 1.0);
-        let final_right = (ds_right * 0.5 + dmg_right).clamp(-1.0, 1.0);
+        let raw_left = ds_left * 0.50 + dmg_left;
+        let raw_right = ds_right * 0.50 + dmg_right;
+
+        // 1. DC Blocking Filter (AC coupling capacitor modeling, ~35Hz cutoff at 44.1kHz)
+        // y[n] = x[n] - x[n-1] + R * y[n-1], with R = 0.995
+        let dc_blocked_l = raw_left - self.dc_x_l + 0.995 * self.dc_y_l;
+        self.dc_x_l = raw_left;
+        self.dc_y_l = dc_blocked_l;
+
+        let dc_blocked_r = raw_right - self.dc_x_r + 0.995 * self.dc_y_r;
+        self.dc_x_r = raw_right;
+        self.dc_y_r = dc_blocked_r;
+
+        // 2. Analog Band-Limiting Low-Pass Filter (emulates GBA hardware analog RC filtering ~12kHz)
+        // Smooths harsh high-frequency square wave edges without losing crispness
+        const LP_ALPHA: f32 = 0.80;
+        self.lp_l += LP_ALPHA * (dc_blocked_l - self.lp_l);
+        self.lp_r += LP_ALPHA * (dc_blocked_r - self.lp_r);
+
+        // 3. Smooth Soft Limiter (prevents digital clipping rail buzz while preserving musical dynamics)
+        let final_left = soft_limit(self.lp_l);
+        let final_right = soft_limit(self.lp_r);
 
         self.sample_batch.push(final_left);
         self.sample_batch.push(final_right);
@@ -344,5 +379,17 @@ impl Apu {
         } else {
             self.cpu_cycles_per_sample = self.base_cycles_per_sample;
         }
+    }
+}
+
+/// Smooth Padé rational approximation of tanh for analog saturation without harsh digital clipping
+#[inline]
+fn soft_limit(x: f32) -> f32 {
+    if x <= -3.0 {
+        -1.0
+    } else if x >= 3.0 {
+        1.0
+    } else {
+        x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
     }
 }

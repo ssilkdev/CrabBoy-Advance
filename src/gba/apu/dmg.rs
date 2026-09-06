@@ -233,11 +233,8 @@ impl Channel1 {
             return 0.0;
         }
         let bit = DUTY_TABLE[self.duty][self.duty_step];
-        if bit != 0 {
-            (self.envelope.volume as f32 / 15.0) * 2.0 - 1.0
-        } else {
-            -(self.envelope.volume as f32 / 15.0)
-        }
+        let amp = self.envelope.volume as f32 / 15.0;
+        if bit != 0 { amp } else { -amp }
     }
 }
 
@@ -337,11 +334,8 @@ impl Channel2 {
             return 0.0;
         }
         let bit = DUTY_TABLE[self.duty][self.duty_step];
-        if bit != 0 {
-            (self.envelope.volume as f32 / 15.0) * 2.0 - 1.0
-        } else {
-            -(self.envelope.volume as f32 / 15.0)
-        }
+        let amp = self.envelope.volume as f32 / 15.0;
+        if bit != 0 { amp } else { -amp }
     }
 }
 
@@ -463,18 +457,18 @@ impl Channel3 {
             byte & 0x0F
         };
 
-        let scaled = if self.force_75 {
-            (raw_sample as f32 * 0.75) / 15.0
+        // Center 4-bit unsigned sample (0..15) symmetrically around zero (-1.0..+1.0)
+        let bipolar = (raw_sample as f32 - 7.5) / 7.5;
+        if self.force_75 {
+            bipolar * 0.75
         } else {
             match self.volume_code {
-                1 => raw_sample as f32 / 15.0,        // 100%
-                2 => (raw_sample >> 1) as f32 / 15.0, // 50%
-                3 => (raw_sample >> 2) as f32 / 15.0, // 25%
+                1 => bipolar,        // 100%
+                2 => bipolar * 0.5,  // 50%
+                3 => bipolar * 0.25, // 25%
                 _ => 0.0,
             }
-        };
-
-        scaled * 2.0 - 1.0
+        }
     }
 }
 
@@ -598,11 +592,12 @@ impl Channel4 {
         if !self.active || self.envelope.volume == 0 {
             return 0.0;
         }
+        let amp = self.envelope.volume as f32 / 15.0;
         // Bit 0 of LFSR is active low
         if (self.lfsr & 1) == 0 {
-            (self.envelope.volume as f32 / 15.0) * 2.0 - 1.0
+            amp
         } else {
-            -(self.envelope.volume as f32 / 15.0)
+            -amp
         }
     }
 }
