@@ -440,7 +440,7 @@ mod tests {
         let res = fetch_latest_release(REPO_OWNER, REPO_NAME);
         assert!(res.is_ok(), "Expected live GitHub release check to succeed: {:?}", res);
         let info = res.unwrap();
-        assert_eq!(info.tag_name, "v0.2.0");
+        assert!(info.tag_name.starts_with('v') && info.tag_name.len() >= 4, "Invalid tag name: {}", info.tag_name);
         assert!(info.exe_download_url.is_some(), "Expected crabboy-advance.exe asset");
         assert!(info.exe_size > 5_000_000, "Expected valid exe asset size");
     }

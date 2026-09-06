@@ -1,9 +1,11 @@
 //! GBA Audio Processing Unit (APU)
-//! Supports DirectSound Channels A & B (FIFO) and legacy DMG channels.
+//! Supports DirectSound Channels A & B (FIFO) and legacy DMG channels (PSG).
 
 pub mod audio_output;
+pub mod dmg;
 
 pub use audio_output::{AudioOutput, SurroundMode};
+pub use dmg::DmgAudio;
 use std::collections::VecDeque;
 
 pub struct DirectSoundChannel {
@@ -55,6 +57,7 @@ impl DirectSoundChannel {
 pub struct Apu {
     pub sound_a: DirectSoundChannel,
     pub sound_b: DirectSoundChannel,
+    pub dmg: DmgAudio,
 
     pub soundcnt_l: u16,
     pub soundcnt_h: u16,
@@ -84,6 +87,7 @@ impl Apu {
         Self {
             sound_a: DirectSoundChannel::new(),
             sound_b: DirectSoundChannel::new(),
+            dmg: DmgAudio::new(),
             soundcnt_l: 0,
             soundcnt_h: 0,
             soundcnt_x: 0,
@@ -93,6 +97,74 @@ impl Apu {
             base_cycles_per_sample: cpu_cycles_per_sample,
             cpu_cycles_per_sample,
             sample_batch: Vec::with_capacity(1024),
+        }
+    }
+
+    pub fn read_reg16(&self, addr: u32) -> u16 {
+        match addr & 0x3FE {
+            0x060 => self.dmg.ch1.cnt_l,
+            0x062 => self.dmg.ch1.cnt_h,
+            0x064 => self.dmg.ch1.cnt_x,
+            0x068 => self.dmg.ch2.cnt_l,
+            0x06C => self.dmg.ch2.cnt_h,
+            0x070 => self.dmg.ch3.cnt_l,
+            0x072 => self.dmg.ch3.cnt_h,
+            0x074 => self.dmg.ch3.cnt_x,
+            0x078 => self.dmg.ch4.cnt_l,
+            0x07C => self.dmg.ch4.cnt_h,
+            0x080 => self.soundcnt_l,
+            0x082 => self.soundcnt_h,
+            0x084 => (self.soundcnt_x & 0x0080) | self.dmg.soundcnt_x_bits(),
+            0x088 => self.soundbias,
+            0x090..=0x09E => {
+                let off = (addr & 0x0E) as usize;
+                let lo = self.dmg.ch3.read_wave_ram(off) as u16;
+                let hi = self.dmg.ch3.read_wave_ram(off + 1) as u16;
+                lo | (hi << 8)
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn write_reg16(&mut self, addr: u32, val: u16) {
+        match addr & 0x3FE {
+            0x060 => self.dmg.ch1.write_cnt_l(val),
+            0x062 => self.dmg.ch1.write_cnt_h(val),
+            0x064 => self.dmg.ch1.write_cnt_x(val),
+            0x068 => self.dmg.ch2.write_cnt_l(val),
+            0x06C => self.dmg.ch2.write_cnt_h(val),
+            0x070 => self.dmg.ch3.write_cnt_l(val),
+            0x072 => self.dmg.ch3.write_cnt_h(val),
+            0x074 => self.dmg.ch3.write_cnt_x(val),
+            0x078 => self.dmg.ch4.write_cnt_l(val),
+            0x07C => self.dmg.ch4.write_cnt_h(val),
+            0x080 => self.soundcnt_l = val,
+            0x082 => self.write_soundcnt_h(val),
+            0x084 => {
+                let master_enable = (val & 0x0080) != 0;
+                self.soundcnt_x = (self.soundcnt_x & 0x007F) | (val & 0x0080);
+                if !master_enable {
+                    self.dmg.ch1.active = false;
+                    self.dmg.ch2.active = false;
+                    self.dmg.ch3.active = false;
+                    self.dmg.ch4.active = false;
+                }
+            }
+            0x088 => self.soundbias = val,
+            0x090..=0x09E => {
+                let off = (addr & 0x0E) as usize;
+                self.dmg.ch3.write_wave_ram(off, (val & 0xFF) as u8);
+                self.dmg.ch3.write_wave_ram(off + 1, (val >> 8) as u8);
+            }
+            0x0A0 | 0x0A2 => {
+                self.sound_a.push_byte((val & 0xFF) as u8);
+                self.sound_a.push_byte((val >> 8) as u8);
+            }
+            0x0A4 | 0x0A6 => {
+                self.sound_b.push_byte((val & 0xFF) as u8);
+                self.sound_b.push_byte((val >> 8) as u8);
+            }
+            _ => {}
         }
     }
 
@@ -123,6 +195,9 @@ impl Apu {
     pub fn step(&mut self, cycles: u32, timer_overflows: [bool; 4]) -> (bool, bool) {
         let mut dma_req_a = false;
         let mut dma_req_b = false;
+
+        // Step DMG channels and frame sequencer
+        self.dmg.step(cycles);
 
         // Check Timer overflows feeding DirectSound A & B
         if timer_overflows[self.sound_a.timer_select]
@@ -181,25 +256,68 @@ impl Apu {
             0.0
         };
 
-        let mut left = 0.0f32;
-        let mut right = 0.0f32;
+        let mut ds_left = 0.0f32;
+        let mut ds_right = 0.0f32;
 
         if self.sound_a.left_enable {
-            left += sa_norm;
+            ds_left += sa_norm;
         }
         if self.sound_a.right_enable {
-            right += sa_norm;
+            ds_right += sa_norm;
         }
 
         if self.sound_b.left_enable {
-            left += sb_norm;
+            ds_left += sb_norm;
         }
         if self.sound_b.right_enable {
-            right += sb_norm;
+            ds_right += sb_norm;
         }
 
-        self.sample_batch.push(left * 0.5);
-        self.sample_batch.push(right * 0.5);
+        // DMG PSG channels (1-4)
+        let (s1, s2, s3, s4) = self.dmg.get_samples();
+
+        let vol_right = ((self.soundcnt_l & 7) as f32 + 1.0) / 8.0;
+        let vol_left = (((self.soundcnt_l >> 4) & 7) as f32 + 1.0) / 8.0;
+
+        let dmg_ratio = match self.soundcnt_h & 3 {
+            0 => 0.25,
+            1 => 0.5,
+            2 => 1.0,
+            _ => 1.0,
+        };
+
+        let mut dmg_left = 0.0f32;
+        let mut dmg_right = 0.0f32;
+
+        // Ch 1 (idx 2): Square + Sweep
+        if !self.audio_output.is_channel_muted(2) {
+            if (self.soundcnt_l & (1 << 12)) != 0 { dmg_left += s1; }
+            if (self.soundcnt_l & (1 << 8)) != 0 { dmg_right += s1; }
+        }
+        // Ch 2 (idx 3): Square
+        if !self.audio_output.is_channel_muted(3) {
+            if (self.soundcnt_l & (1 << 13)) != 0 { dmg_left += s2; }
+            if (self.soundcnt_l & (1 << 9)) != 0 { dmg_right += s2; }
+        }
+        // Ch 3 (idx 4): Wave
+        if !self.audio_output.is_channel_muted(4) {
+            if (self.soundcnt_l & (1 << 14)) != 0 { dmg_left += s3; }
+            if (self.soundcnt_l & (1 << 10)) != 0 { dmg_right += s3; }
+        }
+        // Ch 4 (idx 5): Noise
+        if !self.audio_output.is_channel_muted(5) {
+            if (self.soundcnt_l & (1 << 15)) != 0 { dmg_left += s4; }
+            if (self.soundcnt_l & (1 << 11)) != 0 { dmg_right += s4; }
+        }
+
+        dmg_left *= vol_left * dmg_ratio * 0.25;
+        dmg_right *= vol_right * dmg_ratio * 0.25;
+
+        let final_left = (ds_left * 0.5 + dmg_left).clamp(-1.0, 1.0);
+        let final_right = (ds_right * 0.5 + dmg_right).clamp(-1.0, 1.0);
+
+        self.sample_batch.push(final_left);
+        self.sample_batch.push(final_right);
 
         if self.sample_batch.len() >= 512 {
             self.flush_samples();

@@ -664,7 +664,82 @@ mod tests {
         let updater = UpdateManager::new();
         assert_eq!(*updater.status.lock().unwrap(), UpdateStatus::Idle);
     }
+
+    #[test]
+    fn test_dmg_sound_channels() {
+        use gba_simulator::gba::apu::Apu;
+
+        let mut apu = Apu::new();
+
+        // Enable master audio in SOUNDCNT_X
+        apu.write_reg16(0x084, 0x0080);
+        assert_eq!(apu.read_reg16(0x084) & 0x80, 0x80);
+
+        // Configure SOUNDCNT_L: Master volume 7/7, enable all 4 channels to Left & Right
+        apu.write_reg16(0x080, 0xFF77);
+        // Configure SOUNDCNT_H: DMG volume 100% (ratio = 2)
+        apu.write_reg16(0x082, 0x0002);
+
+        // Initially no DMG channels are active
+        assert_eq!(apu.read_reg16(0x084) & 0x0F, 0);
+
+        // Test Channel 1 (Square with sweep):
+        // Duty 50% (2), Volume 15, envelope decrease step 3
+        apu.write_reg16(0x062, 0xF380);
+        // Frequency = 1000, trigger = 1 (bit 15)
+        apu.write_reg16(0x064, 0x83E8);
+
+        // Channel 1 should now be active (bit 0 of SOUNDCNT_X)
+        assert_eq!(apu.read_reg16(0x084) & 0x01, 1);
+        assert!(apu.dmg.ch1.active);
+        assert_eq!(apu.dmg.ch1.envelope.volume, 15);
+
+        // Test Channel 2 (Square):
+        // Duty 25% (1), Volume 10
+        apu.write_reg16(0x068, 0xA040);
+        // Frequency = 1200, trigger = 1
+        apu.write_reg16(0x06C, 0x84B0);
+        assert_eq!(apu.read_reg16(0x084) & 0x02, 2);
+        assert!(apu.dmg.ch2.active);
+
+        // Test Channel 3 (Wave):
+        // Master enable
+        apu.write_reg16(0x070, 0x0080);
+        // Write Wave RAM pattern at 0x090..0x09F
+        for i in 0..8 {
+            apu.write_reg16(0x090 + i * 2, 0xF0A5);
+        }
+        assert_eq!(apu.read_reg16(0x090), 0xF0A5);
+        // Volume 100%
+        apu.write_reg16(0x072, 0x2000);
+        // Frequency = 1500, trigger = 1
+        apu.write_reg16(0x074, 0x85DC);
+        assert_eq!(apu.read_reg16(0x084) & 0x04, 4);
+        assert!(apu.dmg.ch3.active);
+
+        // Test Channel 4 (Noise):
+        // Volume 12
+        apu.write_reg16(0x078, 0xC000);
+        // Ratio = 1, 15-bit, shift = 2, trigger = 1
+        apu.write_reg16(0x07C, 0x8021);
+        assert_eq!(apu.read_reg16(0x084) & 0x08, 8);
+        assert!(apu.dmg.ch4.active);
+
+        // Step APU for multiple cycles and verify samples are generated
+        for _ in 0..100 {
+            apu.step(1000, [false; 4]);
+        }
+
+        let (s1, s2, s3, s4) = apu.dmg.get_samples();
+        // Since channels are active and running, samples are generated
+        assert!(apu.dmg.ch1.active);
+        assert!(apu.dmg.ch2.active);
+        assert!(apu.dmg.ch3.active);
+        assert!(apu.dmg.ch4.active);
+        assert!(s1 != 0.0 || s2 != 0.0 || s3 != 0.0 || s4 != 0.0);
+    }
 }
+
 
 
 

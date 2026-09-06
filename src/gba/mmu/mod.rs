@@ -267,10 +267,7 @@ impl Mmu {
             0x00A => self.ppu.bgcnt[1],
             0x00C => self.ppu.bgcnt[2],
             0x00E => self.ppu.bgcnt[3],
-            0x080 => self.apu.soundcnt_l,
-            0x082 => self.apu.soundcnt_h,
-            0x084 => self.apu.soundcnt_x,
-            0x088 => self.apu.soundbias,
+            0x060..=0x09E => self.apu.read_reg16(addr),
             0x0B0 => self.dma.channels[0].sad as u16,
             0x0B2 => (self.dma.channels[0].sad >> 16) as u16,
             0x0B4 => self.dma.channels[0].dad as u16,
@@ -321,6 +318,10 @@ impl Mmu {
     fn write_io8(&mut self, addr: u32, val: u8) {
         let off = addr & 0x3FF;
         match off {
+            0x090..=0x09F => {
+                // Channel 3 Wave RAM
+                self.apu.dmg.ch3.write_wave_ram((off & 0x0F) as usize, val);
+            }
             0x0A0..=0x0A3 => {
                 // DirectSound FIFO A
                 self.apu.sound_a.push_byte(val);
@@ -405,18 +406,7 @@ impl Mmu {
             0x050 => self.ppu.bldcnt = val,
             0x052 => self.ppu.bldalpha = val,
             0x054 => self.ppu.bldy = val,
-            0x080 => self.apu.soundcnt_l = val,
-            0x082 => self.apu.write_soundcnt_h(val),
-            0x084 => self.apu.soundcnt_x = val,
-            0x088 => self.apu.soundbias = val,
-            0x0A0 | 0x0A2 => {
-                self.apu.sound_a.push_byte((val & 0xFF) as u8);
-                self.apu.sound_a.push_byte((val >> 8) as u8);
-            }
-            0x0A4 | 0x0A6 => {
-                self.apu.sound_b.push_byte((val & 0xFF) as u8);
-                self.apu.sound_b.push_byte((val >> 8) as u8);
-            }
+            0x060..=0x0A6 => self.apu.write_reg16(addr, val),
             0x0B0 => self.dma.channels[0].sad = (self.dma.channels[0].sad & !0xFFFF) | (val as u32),
             0x0B2 => self.dma.channels[0].sad = (self.dma.channels[0].sad & 0xFFFF) | ((val as u32) << 16),
             0x0B4 => self.dma.channels[0].dad = (self.dma.channels[0].dad & !0xFFFF) | (val as u32),
