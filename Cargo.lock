@@ -923,6 +923,7 @@ dependencies = [
  "egui",
  "env_logger",
  "gilrs",
+ "image",
  "log",
  "rfd",
  "xbrz-rs",

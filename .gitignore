@@ -26,6 +26,7 @@
 *.pdf
 *.doc
 *.docx
+!/assets/guide/manual.pdf
 /mba-source/
 /casper/
 

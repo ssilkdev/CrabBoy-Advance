@@ -6,6 +6,7 @@ pub mod cheats_dialog;
 pub mod controls;
 pub mod debug;
 pub mod gif_recorder;
+pub mod guide_dialog;
 pub mod link_dialog;
 pub mod pokemon_companion;
 pub mod rewind;
@@ -20,6 +21,7 @@ use audio_mixer_dialog::AudioMixerDialog;
 use bezels::{BezelMode, BezelRenderer};
 use cheats_dialog::CheatsDialog;
 use gif_recorder::GifRecorder;
+use guide_dialog::GuideDialog;
 use link_dialog::LinkDialog;
 use pokemon_companion::PokemonCompanion;
 use sensors_dialog::SensorsDialog;
@@ -58,6 +60,7 @@ pub struct GbaApp {
     pub audio_mixer_dialog: AudioMixerDialog,
     pub tas_engine: TasEngine,
     pub tas_dialog: TasDialog,
+    pub guide_dialog: GuideDialog,
 
     // Settings
     pub display_filter: DisplayFilter,
@@ -130,6 +133,7 @@ impl GbaApp {
             audio_mixer_dialog: AudioMixerDialog::new(),
             tas_engine: TasEngine::new(),
             tas_dialog: TasDialog::new(),
+            guide_dialog: GuideDialog::new(),
             display_filter: DisplayFilter::Crisp,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -324,6 +328,9 @@ impl eframe::App for GbaApp {
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Y) {
                 self.tas_dialog.is_open = !self.tas_dialog.is_open;
+            }
+            if i.key_pressed(egui::Key::F1) || (i.modifiers.ctrl && i.key_pressed(egui::Key::H)) {
+                self.guide_dialog.is_open = !self.guide_dialog.is_open;
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::F12) {
                 if self.gif_recorder.is_recording {
@@ -664,6 +671,11 @@ impl eframe::App for GbaApp {
                         self.sensors_dialog.is_open = true;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.button("📖 Pokémon Trainer's Strategy Guide (F1)...").clicked() {
+                        self.guide_dialog.is_open = true;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Controls", |ui| {
@@ -671,6 +683,52 @@ impl eframe::App for GbaApp {
                         self.show_controls_dialog = true;
                         ui.close_menu();
                     }
+                });
+
+                ui.menu_button("Help", |ui| {
+                    if ui.button("📖 Trainer's Strategy Guide & Manual (F1)...").clicked() {
+                        self.guide_dialog.is_open = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("📥 Open Full PDF in Default Viewer...").clicked() {
+                        ui.close_menu();
+                        match self.guide_dialog.open_external_pdf() {
+                            Ok(_) => self.set_toast("📖 Opened Trainer's Field Manual in PDF Viewer"),
+                            Err(e) => self.set_toast(format!("Error: {}", e)),
+                        }
+                    }
+                    if ui.button("💾 Export PDF Manual to Disk...").clicked() {
+                        ui.close_menu();
+                        match self.guide_dialog.export_pdf_as() {
+                            Ok(Some(path)) => self.set_toast(format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy())),
+                            Ok(None) => {},
+                            Err(e) => self.set_toast(format!("Export error: {}", e)),
+                        }
+                    }
+                    ui.separator();
+                    ui.menu_button("Jump to Chapter", |ui| {
+                        let chapters = [
+                            ("Cover Page", 0),
+                            ("Ch 1: Welcome & Quick Start", 1),
+                            ("Ch 2: Controls & Joypad", 2),
+                            ("Ch 3: Visual Filters & Shaders", 3),
+                            ("Ch 4: Live Pokémon Companion", 4),
+                            ("Ch 5: RTC, Solar & Sensors", 5),
+                            ("Ch 6: SIO Link & Audio Gym", 6),
+                            ("Ch 7: TAS & Troubleshooting", 7),
+                        ];
+                        for (title, page) in chapters {
+                            if ui.button(title).clicked() {
+                                self.guide_dialog.open_at_page(page);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.label(RichText::new("CrabBoy Advance v0.1.0").weak().small());
+                    ui.label(RichText::new("Cycle-Accurate 32-Bit GBA Engine").weak().small());
+                    ui.label(RichText::new("Built with Rust & egui").weak().small());
                 });
 
                 ui.menu_button("Debug Tools", |ui| {
@@ -758,6 +816,11 @@ impl eframe::App for GbaApp {
                         ui.label("Quick Save / Load:"); ui.label("F5 / F8"); ui.end_row();
                         ui.label("Reset:"); ui.label("Ctrl+R"); ui.end_row();
                     });
+
+                    ui.add_space(8.0);
+                    if ui.button("📖 Open Illustrated Strategy Guide & Manual (F1)").clicked() {
+                        self.guide_dialog.open_at_page(2);
+                    }
                 });
         }
 
@@ -1122,6 +1185,7 @@ impl eframe::App for GbaApp {
         self.pokemon_companion.show(ctx, &self.gba);
         self.audio_mixer_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.tas_dialog.show(ctx, &mut self.tas_engine, &mut self.gba, &mut dialog_toast);
+        self.guide_dialog.show(ctx, &mut dialog_toast);
 
         if let Some(msg) = dialog_toast {
             self.set_toast(msg);

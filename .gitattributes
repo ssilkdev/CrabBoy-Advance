@@ -1,0 +1,8 @@
+# Ensure binary files are never altered by CRLF conversion
+*.pdf binary
+*.png binary
+*.bmp binary
+*.ico binary
+*.bin binary
+*.gba binary
+*.sav binary
