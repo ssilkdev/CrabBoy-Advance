@@ -91,8 +91,8 @@ impl OrbitCamera {
         let z2 = y1 * sin_p + z1 * cos_p;
         let x2 = x1;
 
-        // Perspective camera distance
-        let cam_z = (z2 + self.distance).max(10.0);
+        // Perspective camera distance: closer objects (larger z2) have smaller distance to camera
+        let cam_z = (self.distance - z2).max(10.0);
         let factor = self.distance / cam_z;
 
         let proj_x = (x2 + self.pan_x) * factor * scale;
@@ -130,6 +130,7 @@ pub struct DioramaRenderer {
     obj_composite_image: ColorImage,
     sprite_atlas_texture: Option<TextureHandle>,
     sprite_atlas_image: ColorImage,
+    white_texture: Option<TextureHandle>,
 }
 
 impl Default for DioramaRenderer {
@@ -160,6 +161,7 @@ impl DioramaRenderer {
             obj_composite_image: ColorImage::new([SCREEN_WIDTH, SCREEN_HEIGHT], Color32::TRANSPARENT),
             sprite_atlas_texture: None,
             sprite_atlas_image: ColorImage::new([Self::ATLAS_SIZE, Self::ATLAS_SIZE], Color32::TRANSPARENT),
+            white_texture: None,
         }
     }
 
@@ -288,12 +290,23 @@ impl DioramaRenderer {
             tex.id()
         };
 
+        let white_tex_id = {
+            let tex = self.white_texture.get_or_insert_with(|| {
+                ctx.load_texture(
+                    "diorama_white",
+                    ColorImage::new([1, 1], Color32::WHITE),
+                    TextureOptions::NEAREST,
+                )
+            });
+            tex.id()
+        };
+
         // Collect all quads across layers and sprites
         let mut quads: Vec<ProjectedQuad> = Vec::with_capacity(256);
 
-        // 1. Diorama Pedestal Base / Grid (Z = -10.0)
+        // 1. Diorama Pedestal Base / Grid (Z = -12.0)
         if self.show_diorama_grid {
-            self.build_pedestal_grid(&mut quads, center, scale, obj_tex_id);
+            self.build_pedestal_grid(&mut quads, center, scale, white_tex_id);
         }
 
         // 2. Backdrop Plane (Z = 0.0)
@@ -302,7 +315,7 @@ impl DioramaRenderer {
             diorama_data.backdrop_color[1],
             diorama_data.backdrop_color[2],
         );
-        self.build_backdrop_quad(&mut quads, center, scale, backdrop_color, obj_tex_id);
+        self.build_backdrop_quad(&mut quads, center, scale, backdrop_color, white_tex_id);
 
         // 3. Background Layers (BG0..3)
         for i in 0..4 {
@@ -316,17 +329,17 @@ impl DioramaRenderer {
             let layer_z = 6.0 + prio_rank * self.layer_depth_separation;
 
             if let Some(tex_id) = bg_tex_ids[i] {
-                // Drop shadow
+                // Drop shadow behind floating layer
                 if self.show_layer_shadows && layer_z > 8.0 {
-                    self.build_layer_quad(
+                    self.build_layer_shadow_quad(
                         &mut quads,
                         center,
                         scale,
                         layer_z - 3.0,
                         tex_id,
-                        Color32::from_rgba_unmultiplied(0, 0, 0, 70),
-                        0.0,
-                        &self.bg_images[i],
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 65),
+                        2.0,
+                        2.5,
                     );
                 }
 
@@ -346,7 +359,7 @@ impl DioramaRenderer {
         // 4. Window Plane (Z = between BG and Sprites)
         if diorama_data.window_enabled {
             let win_z = 6.0 + 3.2 * self.layer_depth_separation;
-            self.build_window_quad(&mut quads, center, scale, win_z, diorama_data, obj_tex_id);
+            self.build_window_quad(&mut quads, center, scale, win_z, diorama_data, white_tex_id);
         }
 
         // 5. OAM Sprites (Individual 3D floating entities)
@@ -361,21 +374,23 @@ impl DioramaRenderer {
                 let id_offset = (sprite.id as f32) * 0.02;
                 let sprite_z = base_sprite_z + prio_offset + y_offset + id_offset;
 
-                // Sprite shadow
+                // Sprite shadow cast down behind the sprite onto ground
                 if self.show_layer_shadows {
-                    self.build_sprite_quad(
+                    self.build_sprite_shadow_quad(
                         &mut quads,
                         center,
                         scale,
-                        sprite_z - 4.0,
+                        sprite_z - 3.5,
                         sprite,
                         uvs,
                         atlas_tex_id,
-                        Color32::from_rgba_unmultiplied(0, 0, 0, 90),
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 80),
+                        1.5,
+                        2.5,
                     );
                 }
 
-                // Sprite quad
+                // Sprite quad in full original vibrant colors
                 self.build_sprite_quad(
                     &mut quads,
                     center,
@@ -528,6 +543,85 @@ impl DioramaRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn build_layer_shadow_quad(
+        &self,
+        quads: &mut Vec<ProjectedQuad>,
+        center: Pos2,
+        scale: f32,
+        z: f32,
+        texture_id: egui::TextureId,
+        tint: Color32,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
+        let half_w = SCREEN_WIDTH as f32 / 2.0;
+        let half_h = SCREEN_HEIGHT as f32 / 2.0;
+
+        let x0 = -half_w + offset_x;
+        let y0 = -half_h + offset_y;
+        let x1 = half_w + offset_x;
+        let y1 = half_h + offset_y;
+
+        let (p0, z0) = self.camera.project_point(x0, y0, z, center, scale);
+        let (p1, z1) = self.camera.project_point(x1, y0, z, center, scale);
+        let (p2, z2) = self.camera.project_point(x1, y1, z, center, scale);
+        let (p3, z3) = self.camera.project_point(x0, y1, z, center, scale);
+
+        let avg_cam_z = (z0 + z1 + z2 + z3) * 0.25;
+
+        quads.push(ProjectedQuad {
+            points: [p0, p1, p2, p3],
+            uvs: [
+                Pos2::new(0.0, 0.0),
+                Pos2::new(1.0, 0.0),
+                Pos2::new(1.0, 1.0),
+                Pos2::new(0.0, 1.0),
+            ],
+            avg_cam_z,
+            texture_id,
+            tint,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_sprite_shadow_quad(
+        &self,
+        quads: &mut Vec<ProjectedQuad>,
+        center: Pos2,
+        scale: f32,
+        z: f32,
+        sprite: &Sprite3D,
+        uvs: [Pos2; 4],
+        texture_id: egui::TextureId,
+        tint: Color32,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
+        let half_w = SCREEN_WIDTH as f32 / 2.0;
+        let half_h = SCREEN_HEIGHT as f32 / 2.0;
+
+        let x0 = sprite.x as f32 - half_w + offset_x;
+        let y0 = sprite.y as f32 - half_h + offset_y;
+        let x1 = x0 + sprite.width as f32;
+        let y1 = y0 + sprite.height as f32;
+
+        let (p0, z0) = self.camera.project_point(x0, y0, z, center, scale);
+        let (p1, z1) = self.camera.project_point(x1, y0, z, center, scale);
+        let (p2, z2) = self.camera.project_point(x1, y1, z, center, scale);
+        let (p3, z3) = self.camera.project_point(x0, y1, z, center, scale);
+
+        let avg_cam_z = (z0 + z1 + z2 + z3) * 0.25;
+
+        quads.push(ProjectedQuad {
+            points: [p0, p1, p2, p3],
+            uvs,
+            avg_cam_z,
+            texture_id,
+            tint,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build_sprite_quad(
         &self,
         quads: &mut Vec<ProjectedQuad>,
@@ -569,7 +663,7 @@ impl DioramaRenderer {
         center: Pos2,
         scale: f32,
         color: Color32,
-        fallback_tex: egui::TextureId,
+        white_tex_id: egui::TextureId,
     ) {
         let half_w = SCREEN_WIDTH as f32 / 2.0 + 8.0;
         let half_h = SCREEN_HEIGHT as f32 / 2.0 + 8.0;
@@ -583,14 +677,9 @@ impl DioramaRenderer {
 
         quads.push(ProjectedQuad {
             points: [p0, p1, p2, p3],
-            uvs: [
-                Pos2::new(0.0, 0.0),
-                Pos2::new(1.0, 0.0),
-                Pos2::new(1.0, 1.0),
-                Pos2::new(0.0, 1.0),
-            ],
+            uvs: [Pos2::new(0.5, 0.5); 4],
             avg_cam_z,
-            texture_id: fallback_tex,
+            texture_id: white_tex_id,
             tint: color,
         });
     }
@@ -602,7 +691,7 @@ impl DioramaRenderer {
         scale: f32,
         z: f32,
         diorama: &DioramaFrameData,
-        tex_id: egui::TextureId,
+        white_tex_id: egui::TextureId,
     ) {
         let half_w = SCREEN_WIDTH as f32 / 2.0;
         let half_h = SCREEN_HEIGHT as f32 / 2.0;
@@ -620,15 +709,15 @@ impl DioramaRenderer {
 
             quads.push(ProjectedQuad {
                 points: [p0, p1, p2, p3],
-                uvs: [Pos2::ZERO, Pos2::ZERO, Pos2::ZERO, Pos2::ZERO],
+                uvs: [Pos2::new(0.5, 0.5); 4],
                 avg_cam_z: (z0 + z1 + z2 + z3) * 0.25,
-                texture_id: tex_id,
+                texture_id: white_tex_id,
                 tint: Color32::from_rgba_unmultiplied(255, 255, 255, 25), // Subtle translucent glass
             });
         }
     }
 
-    fn build_pedestal_grid(&self, quads: &mut Vec<ProjectedQuad>, center: Pos2, scale: f32, tex_id: egui::TextureId) {
+    fn build_pedestal_grid(&self, quads: &mut Vec<ProjectedQuad>, center: Pos2, scale: f32, white_tex_id: egui::TextureId) {
         let grid_size = 180.0;
         let grid_z = -12.0;
 
@@ -637,12 +726,15 @@ impl DioramaRenderer {
         let (p2, z2) = self.camera.project_point(grid_size, grid_size * 0.8, grid_z, center, scale);
         let (p3, z3) = self.camera.project_point(-grid_size, grid_size * 0.8, grid_z, center, scale);
 
+        let avg_cam_z = (z0 + z1 + z2 + z3) * 0.25;
+
+        // Dark slate diorama pedestal base
         quads.push(ProjectedQuad {
             points: [p0, p1, p2, p3],
-            uvs: [Pos2::ZERO, Pos2::ZERO, Pos2::ZERO, Pos2::ZERO],
-            avg_cam_z: (z0 + z1 + z2 + z3) * 0.25 + 50.0, // Backmost
-            texture_id: tex_id,
-            tint: Color32::from_rgba_unmultiplied(15, 18, 25, 230),
+            uvs: [Pos2::new(0.5, 0.5); 4],
+            avg_cam_z: avg_cam_z + 40.0, // Backmost
+            texture_id: white_tex_id,
+            tint: Color32::from_rgba_unmultiplied(18, 22, 32, 240),
         });
     }
 

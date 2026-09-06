@@ -1339,6 +1339,57 @@ mod tests {
         assert!((proj.x - center.x).abs() < 1e-3);
         assert!((proj.y - center.y).abs() < 1e-3);
         assert!((cam_z - cam.distance).abs() < 1e-3);
+
+        // Test depth ordering: higher Z (foreground) is closer to camera -> smaller cam_z
+        let (_proj_front, cam_z_front) = cam.project_point(0.0, 0.0, 60.0, center, 1.0);
+        let (_proj_back, cam_z_back) = cam.project_point(0.0, 0.0, 0.0, center, 1.0);
+        assert!(
+            cam_z_front < cam_z_back,
+            "Foreground layers (higher Z) must be closer to camera than background layers"
+        );
+        assert!((cam_z_front - (cam.distance - 40.0)).abs() < 1e-3);
+        assert!((cam_z_back - (cam.distance + 20.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_diorama_window_masking() {
+        use gba_simulator::gba::ppu::diorama::DioramaFrameData;
+        use gba_simulator::gba::ppu::blend::Pixel;
+        use gba_simulator::gba::ppu::SCREEN_WIDTH;
+
+        let mut data = DioramaFrameData::new();
+        let bg_bufs = [[Pixel {
+            color: 0x03E0, // Green
+            layer: 0,
+            priority: 0,
+            is_transparent: false,
+            is_obj_alpha: false,
+        }; SCREEN_WIDTH]; 4];
+
+        let obj_buf = [Pixel {
+            color: 0x7C00, // Red
+            layer: 4,
+            priority: 0,
+            is_transparent: false,
+            is_obj_alpha: false,
+        }; SCREEN_WIDTH];
+
+        // Mask out first 50 pixels for BG0, and enable all elsewhere
+        let mut win_masks = [0x3Fu8; SCREEN_WIDTH];
+        for x in 0..50 {
+            win_masks[x] &= !1; // Disable BG0
+        }
+
+        data.record_scanline(0, &bg_bufs, &obj_buf, &win_masks);
+
+        // Pixel 0..50 for BG0 must be 0 (masked out)
+        for x in 0..50 {
+            assert_eq!(data.bg_layers[0].pixels[x], 0, "Pixel {} should be masked out", x);
+        }
+        // Pixel 50..240 for BG0 must be non-zero
+        for x in 50..SCREEN_WIDTH {
+            assert_ne!(data.bg_layers[0].pixels[x], 0, "Pixel {} should be visible", x);
+        }
     }
 
     #[test]

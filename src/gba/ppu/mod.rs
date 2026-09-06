@@ -334,11 +334,6 @@ impl Ppu {
             );
         }
 
-        // Record isolated layer buffers for 2.5D diorama mode if enabled
-        if self.diorama_enabled {
-            self.staging_diorama_data.record_scanline(y, &bg_layer_bufs, &obj_buf);
-        }
-
         // Windowing configuration
         let win0_enable = (self.dispcnt & (1 << 13)) != 0;
         let win1_enable = (self.dispcnt & (1 << 14)) != 0;
@@ -358,6 +353,30 @@ impl Ppu {
         let win1_x1 = (self.win1h >> 8) as usize;
         let win1_x2 = (self.win1h & 0xFF) as usize;
 
+        // Precompute window masks across the scanline
+        let mut win_masks = [0x3Fu8; SCREEN_WIDTH];
+        if any_win {
+            for x in 0..SCREEN_WIDTH {
+                let in_win0 = in_win0_y && (if win0_x1 <= win0_x2 { x >= win0_x1 && x < win0_x2 } else { x >= win0_x1 || x < win0_x2 });
+                let in_win1 = in_win1_y && (if win1_x1 <= win1_x2 { x >= win1_x1 && x < win1_x2 } else { x >= win1_x1 || x < win1_x2 });
+
+                win_masks[x] = if in_win0 {
+                    (self.winin & 0x3F) as u8
+                } else if in_win1 {
+                    ((self.winin >> 8) & 0x3F) as u8
+                } else if objwin_enable && objwin_buf[x] {
+                    ((self.winout >> 8) & 0x3F) as u8 // OBJWIN uses WINOUT bits 8-13
+                } else {
+                    (self.winout & 0x3F) as u8
+                };
+            }
+        }
+
+        // Record isolated layer buffers for 2.5D diorama mode if enabled
+        if self.diorama_enabled {
+            self.staging_diorama_data.record_scanline(y, &bg_layer_bufs, &obj_buf, &win_masks);
+        }
+
         let eva = self.bldalpha & 0x1F;
         let evb = (self.bldalpha >> 8) & 0x1F;
         let evy = self.bldy & 0x1F;
@@ -367,22 +386,7 @@ impl Ppu {
         // Merge layers per pixel
         for x in 0..SCREEN_WIDTH {
             // Determine window mask
-            let win_mask = if any_win {
-                let in_win0 = in_win0_y && (if win0_x1 <= win0_x2 { x >= win0_x1 && x < win0_x2 } else { x >= win0_x1 || x < win0_x2 });
-                let in_win1 = in_win1_y && (if win1_x1 <= win1_x2 { x >= win1_x1 && x < win1_x2 } else { x >= win1_x1 || x < win1_x2 });
-
-                if in_win0 {
-                    (self.winin & 0x3F) as u8
-                } else if in_win1 {
-                    ((self.winin >> 8) & 0x3F) as u8
-                } else if objwin_enable && objwin_buf[x] {
-                    ((self.winout >> 8) & 0x3F) as u8 // OBJWIN uses WINOUT bits 8-13
-                } else {
-                    (self.winout & 0x3F) as u8
-                }
-            } else {
-                0x3F // All layers enabled
-            };
+            let win_mask = win_masks[x];
 
             // Collect top 2 visible pixels
             let mut top = Pixel {

@@ -104,14 +104,16 @@ impl DioramaFrameData {
         y: u32,
         bg_layer_bufs: &[[Pixel; SCREEN_WIDTH]; 4],
         obj_buf: &[Pixel; SCREEN_WIDTH],
+        win_masks: &[u8; SCREEN_WIDTH],
     ) {
         let row = (y as usize) * SCREEN_WIDTH;
 
         // Record BG layers
         for i in 0..4 {
             let dst_row = &mut self.bg_layers[i].pixels[row..row + SCREEN_WIDTH];
+            let layer_bit = 1 << i;
             for (x, &px) in bg_layer_bufs[i].iter().enumerate() {
-                if !px.is_transparent {
+                if !px.is_transparent && (win_masks[x] & layer_bit) != 0 {
                     let (r, g, b) = bgr555_to_rgb888(px.color);
                     dst_row[x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
                 } else {
@@ -123,7 +125,7 @@ impl DioramaFrameData {
         // Record composite OBJ scanline
         let dst_obj = &mut self.obj_composite[row..row + SCREEN_WIDTH];
         for (x, &px) in obj_buf.iter().enumerate() {
-            if !px.is_transparent {
+            if !px.is_transparent && (win_masks[x] & (1 << 4)) != 0 {
                 let (r, g, b) = bgr555_to_rgb888(px.color);
                 dst_obj[x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
             } else {
