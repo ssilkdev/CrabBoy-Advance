@@ -15,9 +15,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Get GitHub credentials from git-credential
-$credInput = "protocol=https`nhost=github.com`n`n"
-$credOutput = $credInput | git credential fill
+# Anchor all relative paths (target\..., assets\...) to the repo root
+# regardless of the caller's current directory.
+Set-Location -Path (Resolve-Path (Join-Path $PSScriptRoot ".."))
+
+# Get GitHub credentials from git-credential. Piping a multi-line string
+# directly to a native command from PowerShell mangles the blank-line
+# terminator git-credential expects, so go through a temp file + cmd.exe
+# redirection instead, which preserves it correctly.
+$credFile = [System.IO.Path]::GetTempFileName()
+try {
+    [System.IO.File]::WriteAllText($credFile, "protocol=https`nhost=github.com`n`n")
+    $credOutput = cmd /c "git credential fill < `"$credFile`""
+} finally {
+    Remove-Item -Path $credFile -Force -ErrorAction SilentlyContinue
+}
 $token = ""
 foreach ($line in $credOutput) {
     if ($line -match "^password=(.+)$") {
@@ -40,7 +52,10 @@ $headers = @{
 $owner = "ssilkdev"
 $repo = "CrabBoy-Advance"
 
-$body = Get-Content -Path $BodyPath -Raw
+# Get-Content -Raw can return a string decorated with PSPath/etc. note
+# properties that break ConvertTo-Json's serialization of the payload
+# hashtable; read via .NET directly for a genuinely plain string.
+$body = [System.IO.File]::ReadAllText((Resolve-Path $BodyPath))
 
 Write-Host "Creating release: $Title ($TagName)..."
 $releasePayload = @{
@@ -59,8 +74,14 @@ Write-Host "Release created successfully! ID: $($release.id), URL: $($release.ht
 
 $uploadBase = $release.upload_url -replace '\{\?name,label\}', ''
 
-function Upload-Asset($filePath, $assetName, $contentType) {
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+function Upload-Asset($relativePath, $assetName, $contentType) {
     Write-Host "Uploading asset: $assetName ($contentType)..."
+    # Resolve against $repoRoot explicitly: relative paths passed to .NET
+    # APIs resolve against Environment.CurrentDirectory, which doesn't
+    # reliably follow PowerShell's Set-Location in this environment.
+    $filePath = Join-Path $repoRoot $relativePath
     $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
     $uploadUrl = "$uploadBase`?name=$assetName"
 

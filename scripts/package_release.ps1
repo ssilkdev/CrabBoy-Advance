@@ -11,6 +11,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Anchor all relative paths to the repo root regardless of the caller's
+# current directory.
+Set-Location -Path (Resolve-Path (Join-Path $PSScriptRoot ".."))
+
 $packageDir = "target\package_v$Version"
 $zipName = "crabboy-advance-v$Version-windows-x64.zip"
 $zipPath = "target\$zipName"
