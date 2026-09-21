@@ -207,11 +207,11 @@ pub fn show_audio_inspector(ui: &mut Ui, gba: &mut Gba) {
                 ui.label(format!("Len: {}/256", ch3.length_counter));
             });
 
-            // Mini Wave RAM preview: 32 nibbles
-            ui.label("Wave RAM (32 samples):");
+            // Mini Wave RAM preview: 32 nibbles of the currently-playing bank
+            ui.label(format!("Wave RAM (32 samples, bank {}):", ch3.bank));
             let mut wave_str = String::with_capacity(64);
             for i in 0..32 {
-                let byte = ch3.wave_ram[i / 2];
+                let byte = ch3.wave_ram[ch3.bank][i / 2];
                 let nibble = if (i & 1) == 0 { byte >> 4 } else { byte & 0xF };
                 let hex_char = match nibble {
                     0..=9 => (b'0' + nibble) as char,

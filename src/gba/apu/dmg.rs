@@ -32,6 +32,15 @@ impl Envelope {
         self.timer = self.period;
     }
 
+    /// The DAC is powered off exactly when NRx2's upper 5 bits (initial
+    /// volume + direction) are all zero -- i.e. initial volume 0 and a
+    /// decreasing envelope. This must be re-checked on every NRx2 write,
+    /// not only at trigger time: real hardware silences the channel the
+    /// instant the DAC is turned off, even mid-note.
+    pub fn dac_enabled(&self) -> bool {
+        self.initial_volume != 0 || self.direction_inc
+    }
+
     pub fn step(&mut self) {
         if self.period == 0 {
             return;
@@ -173,6 +182,19 @@ impl Channel1 {
         }
     }
 
+    /// Resets NR10-NR14 (duty/frequency/envelope/sweep) as real hardware
+    /// does on NR52 power-off. `trigger_count` (diagnostics-only) and
+    /// `length_counter` are intentionally left untouched.
+    pub fn power_off_reset(&mut self) {
+        self.duty = 0;
+        self.duty_step = 0;
+        self.frequency = 0;
+        self.length_enabled = false;
+        self.active = false;
+        self.envelope = Envelope::default();
+        self.sweep = Sweep::default();
+    }
+
     pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
         if byte_idx == 0 {
             self.sweep.shift = val & 0x07;
@@ -193,6 +215,9 @@ impl Channel1 {
             self.envelope.direction_inc = (val & 0x08) != 0;
             self.envelope.initial_volume = (val >> 4) & 0x0F;
             self.cnt_h = (self.cnt_h & 0x00FF) | ((val as u16) << 8);
+            if !self.envelope.dac_enabled() {
+                self.active = false;
+            }
         }
     }
 
@@ -228,6 +253,9 @@ impl Channel1 {
         self.envelope.period = ((val >> 8) & 0x07) as u8;
         self.envelope.direction_inc = (val & 0x0800) != 0;
         self.envelope.initial_volume = ((val >> 12) & 0x0F) as u8;
+        if !self.envelope.dac_enabled() {
+            self.active = false;
+        }
     }
 
     pub fn write_cnt_x(&mut self, val: u16) {
@@ -333,6 +361,16 @@ impl Channel2 {
         }
     }
 
+    /// See `Channel1::power_off_reset`.
+    pub fn power_off_reset(&mut self) {
+        self.duty = 0;
+        self.duty_step = 0;
+        self.frequency = 0;
+        self.length_enabled = false;
+        self.active = false;
+        self.envelope = Envelope::default();
+    }
+
     pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
         if byte_idx == 0 {
             let len = (val & 0x3F) as u16;
@@ -344,6 +382,9 @@ impl Channel2 {
             self.envelope.direction_inc = (val & 0x08) != 0;
             self.envelope.initial_volume = (val >> 4) & 0x0F;
             self.cnt_l = (self.cnt_l & 0x00FF) | ((val as u16) << 8);
+            if !self.envelope.dac_enabled() {
+                self.active = false;
+            }
         }
     }
 
@@ -372,6 +413,9 @@ impl Channel2 {
         self.envelope.period = ((val >> 8) & 0x07) as u8;
         self.envelope.direction_inc = (val & 0x0800) != 0;
         self.envelope.initial_volume = ((val >> 12) & 0x0F) as u8;
+        if !self.envelope.dac_enabled() {
+            self.active = false;
+        }
     }
 
     pub fn write_cnt_h(&mut self, val: u16) {
@@ -428,7 +472,11 @@ pub struct Channel3 {
     pub cnt_l: u16,
     pub cnt_h: u16,
     pub cnt_x: u16,
-    pub wave_ram: [u8; 16], // 16 bytes = 32 4-bit samples
+    /// Two independent 16-byte (32 x 4-bit sample) banks. `bank` selects
+    /// which one is currently played back; CPU reads/writes always target
+    /// the *other* (inactive) bank, letting a game prepare new waveform
+    /// data while the hardware plays the currently-selected one.
+    pub wave_ram: [[u8; 16]; 2],
     pub bank: usize,
     pub two_banks: bool,
     pub master_enable: bool,
@@ -449,7 +497,7 @@ impl Default for Channel3 {
             cnt_l: 0,
             cnt_h: 0,
             cnt_x: 0,
-            wave_ram: [0; 16],
+            wave_ram: [[0; 16]; 2],
             bank: 0,
             two_banks: false,
             master_enable: false,
@@ -475,6 +523,19 @@ impl Channel3 {
         }
         self.timer = (2048 - self.frequency as i32) * 8;
         self.sample_index = 0;
+    }
+
+    /// See `Channel1::power_off_reset`. Wave RAM contents are not an NRx
+    /// register and persist through power-off on real hardware.
+    pub fn power_off_reset(&mut self) {
+        self.bank = 0;
+        self.two_banks = false;
+        self.master_enable = false;
+        self.volume_code = 0;
+        self.force_75 = false;
+        self.frequency = 0;
+        self.length_enabled = false;
+        self.active = false;
     }
 
     pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
@@ -545,12 +606,14 @@ impl Channel3 {
         }
     }
 
+    /// CPU wave RAM access always targets the *inactive* bank (the one
+    /// opposite of `bank`, which the DAC is currently playing from).
     pub fn read_wave_ram(&self, offset: usize) -> u8 {
-        self.wave_ram[offset & 0x0F]
+        self.wave_ram[1 - self.bank][offset & 0x0F]
     }
 
     pub fn write_wave_ram(&mut self, offset: usize, val: u8) {
-        self.wave_ram[offset & 0x0F] = val;
+        self.wave_ram[1 - self.bank][offset & 0x0F] = val;
     }
 
     pub fn step_timer(&mut self, cycles: u32) {
@@ -558,10 +621,11 @@ impl Channel3 {
             return;
         }
         self.timer -= cycles as i32;
+        let sample_count = if self.two_banks { 64 } else { 32 };
         while self.timer <= 0 {
             let period = (2048 - self.frequency as i32) * 8;
             self.timer += if period > 0 { period } else { 8 };
-            self.sample_index = (self.sample_index + 1) & 31;
+            self.sample_index = (self.sample_index + 1) % sample_count;
         }
     }
 
@@ -579,8 +643,16 @@ impl Channel3 {
             return 0.0;
         }
 
-        let byte = self.wave_ram[self.sample_index / 2];
-        let raw_sample = if (self.sample_index & 1) == 0 {
+        // In two-bank mode, `bank` selects which bank plays first (samples
+        // 0-31); the other bank is appended after it (samples 32-63),
+        // forming one continuous 64-sample waveform.
+        let (bank, local_index) = if !self.two_banks || self.sample_index < 32 {
+            (self.bank, self.sample_index)
+        } else {
+            (1 - self.bank, self.sample_index - 32)
+        };
+        let byte = self.wave_ram[bank][local_index / 2];
+        let raw_sample = if (local_index & 1) == 0 {
             byte >> 4
         } else {
             byte & 0x0F
@@ -653,6 +725,16 @@ impl Channel4 {
         }
     }
 
+    /// See `Channel1::power_off_reset`.
+    pub fn power_off_reset(&mut self) {
+        self.ratio = 0;
+        self.width_7bit = false;
+        self.shift_clock = 0;
+        self.length_enabled = false;
+        self.active = false;
+        self.envelope = Envelope::default();
+    }
+
     pub fn write_cnt_l_byte(&mut self, byte_idx: u8, val: u8) {
         if byte_idx == 0 {
             let len = (val & 0x3F) as u16;
@@ -663,6 +745,9 @@ impl Channel4 {
             self.envelope.direction_inc = (val & 0x08) != 0;
             self.envelope.initial_volume = (val >> 4) & 0x0F;
             self.cnt_l = (self.cnt_l & 0x00FF) | ((val as u16) << 8);
+            if !self.envelope.dac_enabled() {
+                self.active = false;
+            }
         }
     }
 
@@ -691,6 +776,9 @@ impl Channel4 {
         self.envelope.period = ((val >> 8) & 0x07) as u8;
         self.envelope.direction_inc = (val & 0x0800) != 0;
         self.envelope.initial_volume = ((val >> 12) & 0x0F) as u8;
+        if !self.envelope.dac_enabled() {
+            self.active = false;
+        }
     }
 
     pub fn write_cnt_h(&mut self, val: u16) {
@@ -863,5 +951,68 @@ impl DmgAudio {
         if self.ch3.active { bits |= 1 << 2; }
         if self.ch4.active { bits |= 1 << 3; }
         bits
+    }
+}
+
+#[cfg(test)]
+mod channel3_wave_bank_tests {
+    use super::*;
+
+    #[test]
+    fn writes_target_the_inactive_bank_not_the_playing_one() {
+        let mut ch3 = Channel3::default();
+        ch3.bank = 0; // bank 0 is selected for playback
+
+        // Writing wave RAM must land in bank 1 (the inactive one), not
+        // stomp the bank currently being played.
+        ch3.write_wave_ram(0, 0xAB);
+        assert_eq!(ch3.wave_ram[1][0], 0xAB);
+        assert_eq!(ch3.wave_ram[0][0], 0x00, "playing bank must be untouched");
+        assert_eq!(ch3.read_wave_ram(0), 0xAB, "reads must also target the inactive bank");
+    }
+
+    fn bipolar(raw_sample: u8) -> f32 {
+        (raw_sample as f32 - 7.5) / 7.5
+    }
+
+    #[test]
+    fn flipping_bank_swaps_which_bank_plays() {
+        let mut ch3 = Channel3::default();
+        ch3.master_enable = true;
+        ch3.volume_code = 1; // 100%
+        ch3.active = true;
+
+        ch3.wave_ram[0] = [0x11; 16];
+        ch3.wave_ram[1] = [0x22; 16];
+
+        ch3.bank = 0;
+        ch3.sample_index = 0;
+        assert_eq!(ch3.sample(), bipolar(0x1));
+
+        ch3.bank = 1;
+        assert_eq!(ch3.sample(), bipolar(0x2));
+    }
+
+    #[test]
+    fn two_bank_mode_plays_64_continuous_samples() {
+        let mut ch3 = Channel3::default();
+        ch3.two_banks = true;
+        ch3.bank = 0; // bank 0 plays first, then bank 1 is appended
+
+        // step_timer should wrap sample_index at 64, not 32, in two-bank mode.
+        ch3.master_enable = true;
+        ch3.active = true;
+        ch3.frequency = 2047; // shortest possible period (8 cycles) for a fast test
+        ch3.sample_index = 63;
+        ch3.timer = 1;
+        ch3.step_timer(1);
+        assert_eq!(ch3.sample_index, 0, "must wrap at 64 samples, not 32");
+
+        // Sample 32 (first sample of the appended bank) must come from bank 1.
+        ch3.wave_ram[0] = [0x00; 16];
+        ch3.wave_ram[1][0] = 0xF0;
+        ch3.volume_code = 1;
+        ch3.sample_index = 32;
+        assert_eq!(ch3.sample(), bipolar(0xF));
     }
 }

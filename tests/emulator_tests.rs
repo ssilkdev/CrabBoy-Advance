@@ -777,8 +777,9 @@ mod tests {
         apu.dmg.ch3.active = true;
         apu.dmg.ch3.master_enable = true;
         apu.dmg.ch3.volume_code = 1; // 100%
-        // Write max sample (15) and min sample (0)
-        apu.dmg.ch3.wave_ram[0] = 0xF0;
+        // Write max sample (15) and min sample (0) directly into the
+        // playing bank (bank 0 by default)
+        apu.dmg.ch3.wave_ram[0][0] = 0xF0;
         apu.dmg.ch3.sample_index = 0; // high nibble: 0x0F
         let s_max = apu.dmg.ch3.sample();
         assert!((s_max - 1.0).abs() < 1e-5);

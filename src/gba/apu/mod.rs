@@ -237,10 +237,15 @@ impl Apu {
                 let master_enable = (val & 0x0080) != 0;
                 self.soundcnt_x = (self.soundcnt_x & 0x007F) | (val & 0x0080);
                 if !master_enable {
-                    self.dmg.ch1.active = false;
-                    self.dmg.ch2.active = false;
-                    self.dmg.ch3.active = false;
-                    self.dmg.ch4.active = false;
+                    // Real hardware zeroes NR10-NR51 (duty/envelope/sweep/
+                    // frequency) on power-off, not just the active flags, so
+                    // a later power-on doesn't resume with stale settings.
+                    // Wave RAM (not an NRx register) and the diagnostic
+                    // trigger counters are left untouched.
+                    self.dmg.ch1.power_off_reset();
+                    self.dmg.ch2.power_off_reset();
+                    self.dmg.ch3.power_off_reset();
+                    self.dmg.ch4.power_off_reset();
                 }
             }
             0x088 => self.soundbias = val,
