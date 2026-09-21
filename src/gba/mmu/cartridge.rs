@@ -2,15 +2,16 @@
 
 use std::fs;
 use std::path::Path;
-use super::flash::Flash;
 use super::rtc::Rtc;
+use super::save_backend::{detect_save_type, SaveBackend, SaveType};
 use super::sensors::{CartridgeSensors, SensorType};
 
 pub struct Cartridge {
     pub rom: Vec<u8>,
     pub title: String,
     pub game_code: String,
-    pub flash: Flash,
+    pub save: SaveBackend,
+    pub save_type: SaveType,
     pub rtc: Rtc,
     pub has_rtc: bool,
     pub sensors: CartridgeSensors,
@@ -58,7 +59,8 @@ impl Cartridge {
             || game_code.starts_with("AXP")
             || game_code.starts_with("AXV");
 
-        let flash = Flash::new(save_path);
+        let save_type = detect_save_type(&rom);
+        let save = SaveBackend::new(save_type, save_path);
         let rtc = Rtc::new();
 
         let mut sensors = CartridgeSensors::new();
@@ -68,10 +70,27 @@ impl Cartridge {
             rom,
             title,
             game_code,
-            flash,
+            save,
+            save_type,
             rtc,
             has_rtc,
             sensors,
+        }
+    }
+
+    /// True if `addr` (a full 32-bit address) falls in this cartridge's
+    /// EEPROM window: for ROMs <= 16MB, the whole 0x0D000000-0x0DFFFFFF
+    /// mirror (since the real ROM data never reaches that far); for larger
+    /// ROMs, only the top 256 bytes of that window (0x0DFFFF00-0x0DFFFFFF),
+    /// matching real hardware.
+    pub fn is_eeprom_address(&self, addr: u32) -> bool {
+        if self.save_type != SaveType::Eeprom || ((addr >> 24) & 0xFF) != 0x0D {
+            return false;
+        }
+        if self.rom.len() <= 16 * 1024 * 1024 {
+            true
+        } else {
+            (addr & 0x01FF_FFFF) >= 0x01FF_FF00
         }
     }
 
@@ -96,10 +115,7 @@ impl Cartridge {
                     0
                 }
             }
-            0x0E | 0x0F => {
-                // Flash / SRAM
-                self.flash.read(addr)
-            }
+            0x0E | 0x0F => self.save.read(addr),
             _ => 0,
         }
     }
@@ -119,10 +135,7 @@ impl Cartridge {
                     }
                 }
             }
-            0x0E | 0x0F => {
-                // Flash / SRAM write
-                self.flash.write(addr, val);
-            }
+            0x0E | 0x0F => self.save.write(addr, val),
             _ => {}
         }
     }

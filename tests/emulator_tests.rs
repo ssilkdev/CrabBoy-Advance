@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_flash_128kb_state_machine() {
-        let mut flash = Flash::new(None);
+        let mut flash = Flash::new(None, gba_simulator::gba::mmu::flash::FlashSize::Kb128);
 
         // Enter Chip ID mode: write 0xAA to 0x5555, 0x55 to 0x2AAA, 0x90 to 0x5555
         flash.write(0x5555, 0xAA);

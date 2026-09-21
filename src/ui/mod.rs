@@ -530,7 +530,7 @@ impl eframe::App for GbaApp {
                     if ui.button("Save Battery (.sav)").clicked() {
                         ui.close_menu();
                         if let Some(ref mut cart) = self.gba.mmu.cartridge {
-                            cart.flash.sync_to_disk();
+                            cart.save.sync_to_disk();
                             self.set_toast("Battery Save Synced to Disk");
                         }
                     }

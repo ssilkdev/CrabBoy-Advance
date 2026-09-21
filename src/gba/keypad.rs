@@ -50,4 +50,53 @@ impl Keypad {
     pub fn is_key_pressed(&self, key: Key) -> bool {
         (self.keyinput & (1 << (key as u16))) == 0
     }
+
+    /// Evaluates KEYCNT against the current key state.
+    /// Bit 14 of KEYCNT enables the IRQ; bit 15 selects AND (all selected
+    /// keys must be pressed) vs OR (any selected key pressed) condition mode.
+    pub fn check_irq(&self) -> bool {
+        if (self.keycnt & 0x4000) == 0 {
+            return false;
+        }
+        let selected = self.keycnt & 0x03FF;
+        if selected == 0 {
+            return false;
+        }
+        let pressed = (!self.keyinput) & 0x03FF;
+        if (self.keycnt & 0x8000) != 0 {
+            (pressed & selected) == selected
+        } else {
+            (pressed & selected) != 0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn irq_disabled_by_default() {
+        let kp = Keypad::new();
+        assert!(!kp.check_irq());
+    }
+
+    #[test]
+    fn or_mode_fires_on_any_selected_key() {
+        let mut kp = Keypad::new();
+        kp.keycnt = 0x4000 | (1 << Key::A as u16) | (1 << Key::B as u16); // OR mode
+        assert!(!kp.check_irq());
+        kp.set_key_state(Key::A, true);
+        assert!(kp.check_irq());
+    }
+
+    #[test]
+    fn and_mode_requires_all_selected_keys() {
+        let mut kp = Keypad::new();
+        kp.keycnt = 0x4000 | 0x8000 | (1 << Key::A as u16) | (1 << Key::B as u16); // AND mode
+        kp.set_key_state(Key::A, true);
+        assert!(!kp.check_irq(), "only one of two required keys pressed");
+        kp.set_key_state(Key::B, true);
+        assert!(kp.check_irq(), "both required keys pressed");
+    }
 }

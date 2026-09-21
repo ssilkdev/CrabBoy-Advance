@@ -1,11 +1,35 @@
-//! GBA 128KB Flash Memory Emulation (Macronix MX29L010 / Sanyo)
-//! Used by compatible 128KB Flash cartridges for game saves.
+//! GBA Flash Memory Emulation (64KB Panasonic / 128KB Macronix)
+//! Used by compatible Flash cartridges for game saves.
 
 use std::fs;
 use std::path::PathBuf;
 
-const FLASH_SIZE: usize = 128 * 1024; // 128 KB
-const SECTOR_SIZE: usize = 4096;      // 4 KB per sector (32 sectors)
+const SECTOR_SIZE: usize = 4096; // 4 KB per sector
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashSize {
+    Kb64,
+    Kb128,
+}
+
+impl FlashSize {
+    fn bytes(self) -> usize {
+        match self {
+            FlashSize::Kb64 => 64 * 1024,
+            FlashSize::Kb128 => 128 * 1024,
+        }
+    }
+
+    /// (manufacturer_id, device_id) as returned in Flash ID-read mode.
+    fn chip_id(self) -> (u8, u8) {
+        match self {
+            // Panasonic MN63F805MNP: common 64KB Flash chip.
+            FlashSize::Kb64 => (0x32, 0x1B),
+            // Macronix MX29L010: common 128KB Flash chip.
+            FlashSize::Kb128 => (0xC2, 0x09),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FlashState {
@@ -24,7 +48,8 @@ enum FlashCommand {
 }
 
 pub struct Flash {
-    pub data: Box<[u8; FLASH_SIZE]>,
+    pub data: Vec<u8>,
+    size: FlashSize,
     current_bank: usize,
     state: FlashState,
     command: FlashCommand,
@@ -33,13 +58,14 @@ pub struct Flash {
 }
 
 impl Flash {
-    pub fn new(save_path: Option<PathBuf>) -> Self {
-        let mut data = Box::new([0xFFu8; FLASH_SIZE]);
+    pub fn new(save_path: Option<PathBuf>, size: FlashSize) -> Self {
+        let flash_size = size.bytes();
+        let mut data = vec![0xFFu8; flash_size];
 
         if let Some(ref path) = save_path {
             if path.exists() {
                 if let Ok(file_data) = fs::read(path) {
-                    let len = file_data.len().min(FLASH_SIZE);
+                    let len = file_data.len().min(flash_size);
                     data[..len].copy_from_slice(&file_data[..len]);
                     log::info!("Loaded {} bytes save file from {:?}", len, path);
                 }
@@ -48,6 +74,7 @@ impl Flash {
 
         Self {
             data,
+            size,
             current_bank: 0,
             state: FlashState::Raw,
             command: FlashCommand::None,
@@ -60,26 +87,29 @@ impl Flash {
         let offset = (addr & 0xFFFF) as usize;
 
         if self.command == FlashCommand::Id {
+            let (manufacturer, device) = self.size.chip_id();
             if offset == 0 {
-                return 0xC2; // Macronix Manufacturer ID
+                return manufacturer;
             } else if offset == 1 {
-                return 0x09; // MX29L010 Device ID (128 KB)
+                return device;
             }
         }
 
+        let flash_size = self.size.bytes();
         let full_addr = (self.current_bank * 0x10000) + offset;
-        self.data[full_addr % FLASH_SIZE]
+        self.data[full_addr % flash_size]
     }
 
     pub fn write(&mut self, addr: u32, val: u8) {
         let offset = (addr & 0xFFFF) as usize;
+        let flash_size = self.size.bytes();
 
         match self.state {
             FlashState::Raw => {
                 match self.command {
                     FlashCommand::Program => {
                         let full_addr = (self.current_bank * 0x10000) + offset;
-                        if full_addr < FLASH_SIZE {
+                        if full_addr < flash_size {
                             self.data[full_addr] = val;
                             self.dirty = true;
                         }
@@ -142,7 +172,7 @@ impl Flash {
                     && val == 0x30 {
                         // Erase 4KB sector
                         let sector_base = (self.current_bank * 0x10000) + (offset & !(SECTOR_SIZE - 1));
-                        if sector_base + SECTOR_SIZE <= FLASH_SIZE {
+                        if sector_base + SECTOR_SIZE <= flash_size {
                             self.data[sector_base..sector_base + SECTOR_SIZE].fill(0xFF);
                             self.dirty = true;
                         }

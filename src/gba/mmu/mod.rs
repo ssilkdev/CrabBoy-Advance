@@ -2,10 +2,13 @@
 
 pub mod bios;
 pub mod cartridge;
+pub mod eeprom;
 pub mod flash;
 pub mod rtc;
+pub mod save_backend;
 pub mod sensors;
 pub mod sio;
+pub mod sram;
 
 use super::apu::Apu;
 use super::cpu::Arm7Tdmi;
@@ -15,6 +18,7 @@ use super::ppu::Ppu;
 use super::timer::TimerController;
 use crate::gba::diagnostics::FlightRecorder;
 use cartridge::Cartridge;
+use save_backend::{SaveBackend, SaveType};
 use sio::Sio;
 
 pub struct Mmu {
@@ -500,7 +504,120 @@ impl Mmu {
         }
     }
 
+    /// Intercepts DMA transfers whose source or destination lands in the
+    /// cartridge's EEPROM window, handling the whole logical request/reply
+    /// in one shot instead of running it through the generic per-halfword
+    /// loop below (see eeprom.rs's module docs for why). Returns true if
+    /// this transfer was an EEPROM access and has been fully handled,
+    /// including completion bookkeeping (repeat/disable/IRQ).
+    fn try_execute_eeprom_dma(&mut self, idx: usize) -> bool {
+        let is_eeprom_cart = matches!(
+            self.cartridge.as_ref().map(|c| c.save_type),
+            Some(SaveType::Eeprom)
+        );
+        if !is_eeprom_cart {
+            return false;
+        }
+
+        let (sad, dad, count, sad_ctrl, dad_ctrl, repeat, irq_on_finish) = {
+            let ch = &self.dma.channels[idx];
+            (
+                ch.internal_sad,
+                ch.internal_dad,
+                ch.internal_count,
+                (ch.cnt_h >> 7) & 3,
+                (ch.cnt_h >> 5) & 3,
+                (ch.cnt_h & (1 << 9)) != 0,
+                (ch.cnt_h & (1 << 14)) != 0,
+            )
+        };
+
+        let dad_is_eeprom = self.cartridge.as_ref().is_some_and(|c| c.is_eeprom_address(dad));
+        let sad_is_eeprom = self.cartridge.as_ref().is_some_and(|c| c.is_eeprom_address(sad));
+        if !dad_is_eeprom && !sad_is_eeprom {
+            return false;
+        }
+
+        const STEP: u32 = 2; // EEPROM protocol transfers are always 16-bit halfwords
+
+        let (final_sad, final_dad) = if dad_is_eeprom {
+            // Write-direction: gather `count` protocol bits (bit 0 of each
+            // halfword) from RAM at `sad`, MSB-first as received.
+            let mut bits = Vec::with_capacity(count as usize);
+            let mut addr = sad;
+            for _ in 0..count {
+                bits.push((self.read16(addr) & 1) != 0);
+                addr = match sad_ctrl {
+                    0 => addr.wrapping_add(STEP),
+                    1 => addr.wrapping_sub(STEP),
+                    _ => addr,
+                };
+            }
+            if let Some(ee) = self.cartridge.as_mut().and_then(|c| c.save.as_eeprom_mut()) {
+                ee.handle_write_request(&bits);
+            }
+            let dad_final = match dad_ctrl {
+                0 | 3 => dad.wrapping_add(STEP.wrapping_mul(count)),
+                1 => dad.wrapping_sub(STEP.wrapping_mul(count)),
+                _ => dad, // Fixed: the EEPROM "register" address doesn't move
+            };
+            (addr, dad_final)
+        } else {
+            // Read-direction: produce `count` reply bits and scatter them
+            // (one per halfword, bit 0 only) to RAM at `dad`.
+            let mut bits = vec![false; count as usize];
+            if let Some(cart) = self.cartridge.as_ref() {
+                if let SaveBackend::Eeprom(ee) = &cart.save {
+                    ee.handle_read_reply(&mut bits);
+                }
+            }
+            let mut addr = dad;
+            for &bit in &bits {
+                self.write16(addr, bit as u16);
+                addr = match dad_ctrl {
+                    0 | 3 => addr.wrapping_add(STEP),
+                    1 => addr.wrapping_sub(STEP),
+                    _ => addr,
+                };
+            }
+            let sad_final = match sad_ctrl {
+                0 => sad.wrapping_add(STEP.wrapping_mul(count)),
+                1 => sad.wrapping_sub(STEP.wrapping_mul(count)),
+                _ => sad,
+            };
+            (sad_final, addr)
+        };
+
+        self.dma.channels[idx].internal_sad = final_sad;
+        self.dma.channels[idx].internal_dad = final_dad;
+
+        if repeat {
+            let max_cnt = if idx == 3 { 0x10000 } else { 0x4000 };
+            let cnt = (self.dma.channels[idx].count as u32) & (max_cnt - 1);
+            self.dma.channels[idx].internal_count = if cnt == 0 { max_cnt } else { cnt };
+            if dad_ctrl == 3 {
+                self.dma.channels[idx].internal_dad = self.dma.channels[idx].dad;
+            }
+        } else {
+            self.dma.channels[idx].enabled = false;
+            self.dma.channels[idx].cnt_h &= !(1 << 15);
+        }
+
+        if irq_on_finish {
+            self.request_interrupt(8 + idx as u16);
+        }
+
+        true
+    }
+
     pub fn execute_dma_channel(&mut self, idx: usize) {
+        if !self.dma.channels[idx].enabled {
+            return;
+        }
+        if self.try_execute_eeprom_dma(idx) {
+            return;
+        }
+
         let (is_32bit, dad_ctrl, sad_ctrl, repeat, irq_on_finish, count, current_dad, current_sad, _is_direct_sound) = {
             let ch = &self.dma.channels[idx];
             if !ch.enabled {

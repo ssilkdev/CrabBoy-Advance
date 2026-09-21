@@ -139,6 +139,11 @@ impl Gba {
             self.mmu.request_interrupt(7); // SIO interrupt
         }
 
+        // Keypad IRQ (KEYCNT AND/OR condition against KEYINPUT)
+        if self.mmu.keypad.check_irq() {
+            self.mmu.request_interrupt(12);
+        }
+
         // On GBA, HALT is only broken when (IE & IF) != 0
         if self.cpu.halted && (self.mmu.ie & self.mmu.if_reg) != 0 {
             self.cpu.halted = false;
@@ -224,7 +229,7 @@ impl Gba {
         // Periodically sync save file to disk (every 60 frames / 1 sec)
         if self.frame_counter.is_multiple_of(60) {
             if let Some(ref mut cart) = self.mmu.cartridge {
-                cart.flash.sync_to_disk();
+                cart.save.sync_to_disk();
             }
         }
     }
