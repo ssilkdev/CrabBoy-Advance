@@ -291,7 +291,26 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     }
 
     let is_msr_i = (instr & (1 << 25)) != 0;
-    if (instr & 0x0D60_F000) == 0x0120_F000 && (is_msr_i || (instr & 0x0FF0) == 0) {
+    // MSR encoding: cond 00 I 10 R 10 field_mask 1111 <operand>
+    //
+    // Fixed bits that must be matched: 27..26 = 00, 24 = 1, 23 = 0, 21 = 1,
+    // 20 = 0, and 15..12 = 1111. Bit 25 (I) and bit 22 (R) are operands and
+    // must be DON'T CARE.
+    //
+    // The previous mask was 0x0D60_F000, which left bit 23 unchecked but
+    // *constrained bit 22 to 0*. That made every `msr spsr_<f>, Rm` (R=1) fail
+    // the test and fall through to the data-processing decoder, where the same
+    // word decodes as CMN with S=0 -- a silent no-op. MSR SPSR was therefore
+    // completely unimplemented.
+    //
+    // Pokemon Emerald's IntrMain saves SPSR on entry, re-enables IRQs in System
+    // mode to run the game handler, then restores the saved value with
+    // `msr spsr_fc, r0` (0xE169F000) before returning through the BIOS
+    // `subs pc, lr, #4`. With the restore silently dropped, a nested IRQ during
+    // the battle transition left SPSR_irq holding the System-mode CPSR (T=0),
+    // so the interrupted THUMB code at 0x080008CE was resumed in ARM state at
+    // 0x080008CC. Execution then ran off into uninitialised ROM at 0x08C00008.
+    if (instr & 0x0DB0_F000) == 0x0120_F000 && (is_msr_i || (instr & 0x0FF0) == 0) {
         // MSR (Status Register Access)
         let r = (instr & (1 << 22)) != 0;
         let mask_ctrl = (instr & (1 << 16)) != 0;
@@ -319,7 +338,23 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
                 mask |= 0x0000_FF00;
             }
             if mask_ctrl {
-                mask |= 0x0000_00DF; // Bit 5 (T-bit) masked out; T must not be changed via MSR
+                // Control byte. The T-bit (bit 5) is a special case:
+                //
+                //   - MSR CPSR: writing T is UNPREDICTABLE on ARMv4T, and doing
+                //     it would switch execution state behind the pipeline's
+                //     back. Mask it out -> 0xDF.
+                //   - MSR SPSR: the SPSR is an ordinary data register here, not
+                //     the live execution state. ALL 32 bits must be writable.
+                //     Masking T corrupts the saved THUMB state of whatever was
+                //     interrupted, so the eventual `subs pc, lr, #4` resumes
+                //     THUMB code in ARM state. Use the full 0xFF.
+                //
+                // Pokemon Emerald's IntrMain saves SPSR on entry and restores
+                // it with `msr spsr_fc, r0` before returning. With T masked the
+                // restore silently dropped T=1, the battle-transition handler
+                // returned into THUMB code as ARM, and the CPU derailed into
+                // uninitialised ROM at 0x08C00008.
+                mask |= if r { 0x0000_00FF } else { 0x0000_00DF };
             }
         }
 
