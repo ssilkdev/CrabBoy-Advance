@@ -59,6 +59,25 @@ impl Default for Mmu {
 impl Mmu {
     pub fn new() -> Self {
         let mut bios = Box::new([0u8; 16 * 1024]);
+
+        // Undefined-instruction vector at 0x00000004.
+        //
+        // `arm.rs` vectors here for any unrecognized encoding, but this area
+        // used to be left as zeros -- which decode as `andeq r0,r0,r0`, i.e. a
+        // fall-through. The CPU would then walk 0x04, 0x08, 0x0C ... up through
+        // empty BIOS and off into IO space (0x04xxxxxx), producing a hung game
+        // whose diagnostic report showed PC inside the IO registers.
+        //
+        // Real hardware returns from the exception. `subs pc, lr, #4` restores
+        // CPSR from SPSR_und and resumes at the faulting instruction's
+        // successor, which keeps a bad opcode local instead of fatal.
+        bios[0x04..0x08].copy_from_slice(&0xE25E_F004u32.to_le_bytes()); // subs pc, lr, #4
+
+        // Note: the SWI vector (0x08) is deliberately NOT stubbed. SWIs are
+        // intercepted in arm.rs/thumb.rs and serviced by the HLE BIOS
+        // (`handle_swi`), so the CPU never actually vectors to 0x08. Writing
+        // a stub there would be dead code that implies otherwise.
+
         // GBA BIOS IRQ Vector & Dispatcher at 0x0000_0018
         // When an interrupt fires, CPU vectors to 0x18 in IRQ mode.
         // The BIOS saves registers, jumps to [0x03007FFC] (user handler),

@@ -19,6 +19,14 @@ use std::path::Path;
 
 pub const CYCLES_PER_FRAME: u32 = 280_896; // 228 scanlines * 1232 cycles (~59.73 Hz)
 
+/// Marks the start of the v2 save-state tail (hardware controller state).
+///
+/// v1 states stopped after `io_regs` and silently lost IME/IE/DMA/timer state,
+/// so restoring one resumed a machine with interrupts disabled and every DMA
+/// channel cleared. States without this marker still load; they just can't
+/// restore what was never written.
+pub const STATE_V2_MAGIC: &[u8; 4] = b"CBA2";
+
 pub struct Gba {
     pub cpu: Arm7Tdmi,
     pub mmu: Mmu,
@@ -304,6 +312,44 @@ impl Gba {
         data.extend_from_slice(&self.mmu.ppu.oam[..]);
         data.extend_from_slice(&self.mmu.io_regs[..]);
 
+        // --- v2 tail -------------------------------------------------------
+        // Everything above is raw memory + CPU. The hardware controllers below
+        // live in their own structs and were previously NOT serialized, so a
+        // restored state resumed with IME=false, IE=0 and all DMA channels
+        // cleared. For Pokemon Emerald that meant the game's IRQ setup was
+        // gone and execution ran off into IO space on the next interrupt.
+        //
+        // Appended as a versioned tail so older state files (which simply end
+        // here) still load.
+        data.extend_from_slice(STATE_V2_MAGIC);
+
+        data.push(self.mmu.ime as u8);
+        data.extend_from_slice(&self.mmu.ie.to_le_bytes());
+        data.extend_from_slice(&self.mmu.if_reg.to_le_bytes());
+        data.extend_from_slice(&self.mmu.waitcnt.to_le_bytes());
+
+        for ch in &self.mmu.dma.channels {
+            data.extend_from_slice(&ch.sad.to_le_bytes());
+            data.extend_from_slice(&ch.dad.to_le_bytes());
+            data.extend_from_slice(&ch.count.to_le_bytes());
+            data.extend_from_slice(&ch.cnt_h.to_le_bytes());
+            data.extend_from_slice(&ch.internal_sad.to_le_bytes());
+            data.extend_from_slice(&ch.internal_dad.to_le_bytes());
+            data.extend_from_slice(&ch.internal_count.to_le_bytes());
+            data.push(ch.enabled as u8);
+        }
+
+        for tm in &self.mmu.timers.timers {
+            data.extend_from_slice(&tm.reload.to_le_bytes());
+            data.extend_from_slice(&tm.counter.to_le_bytes());
+            data.extend_from_slice(&tm.cnt_h.to_le_bytes());
+            data.push(tm.enabled as u8);
+            data.extend_from_slice(&tm.prescaler_cycles.to_le_bytes());
+            data.extend_from_slice(&tm.cycles_accum.to_le_bytes());
+            data.push(tm.cascade as u8);
+            data.push(tm.irq_enable as u8);
+        }
+
         data
     }
 
@@ -382,6 +428,79 @@ impl Gba {
         offset += 1024;
 
         self.mmu.io_regs.copy_from_slice(&data[offset..offset + 1024]);
+        offset += 1024;
+
+        // --- v2 tail (optional) --------------------------------------------
+        // Restore the hardware controllers. Older state files end right here,
+        // so their absence is not an error -- but then IME/IE/DMA/timers keep
+        // whatever `reset()` left, which is why v1 states resumed broken.
+        if data.len() >= offset + STATE_V2_MAGIC.len()
+            && &data[offset..offset + STATE_V2_MAGIC.len()] == STATE_V2_MAGIC
+        {
+            offset += STATE_V2_MAGIC.len();
+
+            let need = 1 + 2 + 2 + 2 + 4 * 21 + 4 * 16;
+            if data.len() < offset + need {
+                return false;
+            }
+
+            let u8_at = |o: &mut usize| {
+                let v = data[*o];
+                *o += 1;
+                v
+            };
+            self.mmu.ime = u8_at(&mut offset) != 0;
+
+            let u16_at = |o: &mut usize| {
+                let v = u16::from_le_bytes(data[*o..*o + 2].try_into().unwrap());
+                *o += 2;
+                v
+            };
+            self.mmu.ie = u16_at(&mut offset);
+            self.mmu.if_reg = u16_at(&mut offset);
+            self.mmu.waitcnt = u16_at(&mut offset);
+
+            for i in 0..4 {
+                let ch = &mut self.mmu.dma.channels[i];
+                ch.sad = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                ch.dad = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                ch.count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+                offset += 2;
+                ch.cnt_h = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+                offset += 2;
+                ch.internal_sad = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                ch.internal_dad = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                ch.internal_count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                ch.enabled = data[offset] != 0;
+                offset += 1;
+            }
+
+            for i in 0..4 {
+                let tm = &mut self.mmu.timers.timers[i];
+                tm.reload = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+                offset += 2;
+                tm.counter = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+                offset += 2;
+                tm.cnt_h = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+                offset += 2;
+                tm.enabled = data[offset] != 0;
+                offset += 1;
+                tm.prescaler_cycles =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                tm.cycles_accum = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+                tm.cascade = data[offset] != 0;
+                offset += 1;
+                tm.irq_enable = data[offset] != 0;
+                offset += 1;
+            }
+        }
 
         true
     }

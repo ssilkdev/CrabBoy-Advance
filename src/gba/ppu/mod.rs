@@ -143,63 +143,96 @@ impl Ppu {
         let mut dma_vblank = false;
         let mut dma_hblank = false;
 
-        self.cycle_in_scanline += cycles;
-
-        // Check HBlank transition (at cycle 960)
-        let old_hblank = (self.dispstat & 2) != 0;
-        let in_hblank = self.cycle_in_scanline >= HDRAW_CYCLES;
-
-        // HBlank flag/IRQ/DMA fire on all 228 scanlines, including during VBlank
-        // (lines 160-227) -- real hardware does not suppress HBlank there, and
-        // several games rely on HBlank DMA/IRQ continuing through VBlank.
-        if !old_hblank && in_hblank {
-            self.dispstat |= 2;
-            if (self.dispstat & (1 << 4)) != 0 {
-                irq_hblank = true;
-            }
-            dma_hblank = true;
-        }
-
-        if self.cycle_in_scanline >= SCANLINE_CYCLES {
-            self.cycle_in_scanline -= SCANLINE_CYCLES;
-            self.dispstat &= !2; // Exit HBlank
-
-            // Render previous scanline if visible
-            if self.vcount < 160 {
-                self.render_scanline(self.vcount as u32);
-            }
-
-            self.vcount += 1;
-            if self.vcount == 160 {
-                // Entering VBlank
-                self.dispstat |= 1;
-                self.frame_ready = true;
-
-                if (self.dispstat & (1 << 3)) != 0 {
-                    irq_vblank = true;
-                }
-                dma_vblank = true;
-            } else if self.vcount == 227 {
-                // On scanline 227, VBlank flag in DISPSTAT is cleared according to GBA specs
-                self.dispstat &= !1;
-            } else if self.vcount >= TOTAL_SCANLINES as u16 {
-                // New frame
-                self.vcount = 0;
-                self.dispstat &= !1; // Ensure VBlank cleared
-                // Reload internal affine coordinates at start of frame
-                self.bg_x_internal = self.bg_x;
-                self.bg_y_internal = self.bg_y;
-            }
-
-            // V-Counter match check
-            let target_vcount = (self.dispstat >> 8) & 0xFF;
-            if self.vcount == target_vcount {
-                self.dispstat |= 4;
-                if (self.dispstat & (1 << 5)) != 0 {
-                    irq_vcounter = true;
-                }
+        // Consume the cycle budget in pieces that never cross more than one
+        // scanline boundary.
+        //
+        // `step()` is called once per instruction with that instruction's cycle
+        // count, and a long DMA burst or slow instruction can hand us several
+        // scanlines' worth at once. The previous code did a single
+        // `if cycle_in_scanline >= SCANLINE_CYCLES { -= SCANLINE_CYCLES }`,
+        // which advances vcount at most once per call -- so large chunks
+        // silently dropped scanlines (measured: 46 of 160 visible lines never
+        // rendered at a 2464-cycle chunk). That is what produced the torn,
+        // mostly-black battle transition in Pokemon Emerald.
+        let mut remaining = cycles;
+        while remaining > 0 {
+            // How many cycles until the next event boundary on this line?
+            let next_boundary = if self.cycle_in_scanline < HDRAW_CYCLES {
+                HDRAW_CYCLES - self.cycle_in_scanline
             } else {
-                self.dispstat &= !4;
+                SCANLINE_CYCLES - self.cycle_in_scanline
+            };
+            let chunk = remaining.min(next_boundary.max(1));
+            remaining -= chunk;
+            self.cycle_in_scanline += chunk;
+
+            // Check HBlank transition (at cycle 960)
+            let old_hblank = (self.dispstat & 2) != 0;
+            let in_hblank = self.cycle_in_scanline >= HDRAW_CYCLES;
+
+            // HBlank flag/IRQ/DMA fire on all 228 scanlines, including during
+            // VBlank (lines 160-227) -- real hardware does not suppress HBlank
+            // there, and several games rely on HBlank DMA/IRQ continuing
+            // through VBlank.
+            if !old_hblank && in_hblank {
+                // Render the visible scanline HERE, at the moment HDraw ends
+                // and before the HBlank IRQ handler runs.
+                //
+                // Games drive raster effects (windows, scroll, blend) by
+                // rewriting PPU registers from the HBlank IRQ to set up the
+                // NEXT line. Rendering at the *end* of the scanline instead
+                // would use values the handler already advanced -- Pokemon
+                // Emerald's battle-entry transition rewrites WIN0H every 1232
+                // cycles (exactly one scanline), so that timing error shows up
+                // directly as a broken transition.
+                if self.vcount < 160 {
+                    self.render_scanline(self.vcount as u32);
+                }
+
+                self.dispstat |= 2;
+                if (self.dispstat & (1 << 4)) != 0 {
+                    irq_hblank = true;
+                }
+                dma_hblank = true;
+            }
+
+            if self.cycle_in_scanline >= SCANLINE_CYCLES {
+                self.cycle_in_scanline -= SCANLINE_CYCLES;
+                self.dispstat &= !2; // Exit HBlank
+
+                self.vcount += 1;
+                if self.vcount == 160 {
+                    // Entering VBlank
+                    self.dispstat |= 1;
+                    self.frame_ready = true;
+
+                    if (self.dispstat & (1 << 3)) != 0 {
+                        irq_vblank = true;
+                    }
+                    dma_vblank = true;
+                } else if self.vcount == 227 {
+                    // On scanline 227, VBlank flag in DISPSTAT is cleared
+                    // according to GBA specs
+                    self.dispstat &= !1;
+                } else if self.vcount >= TOTAL_SCANLINES as u16 {
+                    // New frame
+                    self.vcount = 0;
+                    self.dispstat &= !1; // Ensure VBlank cleared
+                    // Reload internal affine coordinates at start of frame
+                    self.bg_x_internal = self.bg_x;
+                    self.bg_y_internal = self.bg_y;
+                }
+
+                // V-Counter match check
+                let target_vcount = (self.dispstat >> 8) & 0xFF;
+                if self.vcount == target_vcount {
+                    self.dispstat |= 4;
+                    if (self.dispstat & (1 << 5)) != 0 {
+                        irq_vcounter = true;
+                    }
+                } else {
+                    self.dispstat &= !4;
+                }
             }
         }
 
