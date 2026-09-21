@@ -1,6 +1,6 @@
 [package]
 name = "crabboy-advance"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "CrabBoy Advance: Cycle-accurate Game Boy Advance emulator in Rust with 5.1 Spatial Audio, xBRZ/NIS upscaling, TAS Engine, and Hardware Sensors"
 license = "MIT"
@@ -29,7 +29,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
 
-[build-dependencies]
+# winres embeds a PE .rsrc section (icon + version info) and is meaningful only
+# when the TARGET is Windows. Scoping it here keeps it out of the dependency
+# graph for native Linux/macOS builds entirely.
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 [profile.dev]
