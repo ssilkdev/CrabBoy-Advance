@@ -14,6 +14,7 @@ pub fn render_text_bg(
     vofs: u16,
     vram: &[u8],
     palette_ram: &[u8],
+    mosaic: Option<(u32, u32)>,
     line_buf: &mut [Pixel; 240],
 ) {
     let priority = (bgcnt & 3) as u8;
@@ -30,10 +31,21 @@ pub fn render_text_bg(
         _ => (256, 256),
     };
 
-    let scrolled_y = (y + vofs as u32) % map_height;
+    // Mosaic sample-and-hold: source coordinates are snapped down to the
+    // nearest block boundary, but each screen pixel is still written
+    // individually (the whole block just samples the same source texel).
+    let sample_y = match mosaic {
+        Some((_, v)) if v > 1 => y - (y % v),
+        _ => y,
+    };
+    let scrolled_y = (sample_y + vofs as u32) % map_height;
 
     for x in 0..240 {
-        let scrolled_x = (x as u32 + hofs as u32) % map_width;
+        let sample_x = match mosaic {
+            Some((h, _)) if h > 1 => (x as u32) - ((x as u32) % h),
+            _ => x as u32,
+        };
+        let scrolled_x = (sample_x + hofs as u32) % map_width;
 
         // Calculate screen block index based on screen size
         let block_x = scrolled_x / 256;
@@ -190,15 +202,26 @@ pub fn render_bitmap_bg(
     vram: &[u8],
     palette_ram: &[u8],
     priority: u16,
+    mosaic: Option<(u32, u32)>,
     line_buf: &mut [Pixel; 240],
 ) {
     let priority = (priority & 3) as u8;
+    let sample_y = match mosaic {
+        Some((_, v)) if v > 1 => y - (y % v),
+        _ => y,
+    };
+    let snap_x = |x: usize| -> usize {
+        match mosaic {
+            Some((h, _)) if h > 1 => x - (x % h as usize),
+            _ => x,
+        }
+    };
     match mode {
         3 => {
             // 240x160 15-bit color
-            let row_offset = (y as usize) * 240 * 2;
+            let row_offset = (sample_y as usize) * 240 * 2;
             for x in 0..240 {
-                let addr = row_offset + x * 2;
+                let addr = row_offset + snap_x(x) * 2;
                 if addr + 1 < vram.len() {
                     let color = (vram[addr] as u16) | ((vram[addr + 1] as u16) << 8);
                     line_buf[x] = Pixel {
@@ -214,9 +237,9 @@ pub fn render_bitmap_bg(
         4 => {
             // 240x160 8-bit paletted, dual frame
             let base = if frame { 0xA000 } else { 0x0000 };
-            let row_offset = base + (y as usize) * 240;
+            let row_offset = base + (sample_y as usize) * 240;
             for x in 0..240 {
-                let addr = row_offset + x;
+                let addr = row_offset + snap_x(x);
                 if addr < vram.len() {
                     let color_idx = vram[addr] as usize;
                     if color_idx != 0 {
@@ -239,9 +262,9 @@ pub fn render_bitmap_bg(
             // 160x128 15-bit color
             if y < 128 => {
                 let base = if frame { 0xA000 } else { 0x0000 };
-                let row_offset = base + (y as usize) * 160 * 2;
+                let row_offset = base + (sample_y as usize) * 160 * 2;
                 for x in 0..160 {
-                    let addr = row_offset + x * 2;
+                    let addr = row_offset + snap_x(x) * 2;
                     if addr + 1 < vram.len() {
                         let color = (vram[addr] as u16) | ((vram[addr + 1] as u16) << 8);
                         line_buf[x] = Pixel {
@@ -255,5 +278,52 @@ pub fn render_bitmap_bg(
                 }
             }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod mosaic_tests {
+    use super::*;
+
+    #[test]
+    fn bitmap_mode3_mosaic_holds_source_across_block() {
+        // Mode 3: 240x160, 2 bytes/pixel, direct 15-bit color. Encode each
+        // pixel's color as its own x-coordinate so mosaic grouping is easy
+        // to detect: without mosaic every pixel would differ from its
+        // neighbors; with a 4-pixel mosaic block, groups of 4 must share
+        // the color sampled at the block's start.
+        let mut vram = vec![0u8; 240 * 160 * 2];
+        for x in 0..240usize {
+            let addr = x * 2;
+            vram[addr] = (x & 0xFF) as u8;
+            vram[addr + 1] = ((x >> 8) & 0xFF) as u8;
+        }
+        let palette = vec![0u8; 4];
+        let mut line_buf = [Pixel::default(); 240];
+
+        render_bitmap_bg(3, false, 0, &vram, &palette, 0, Some((4, 1)), &mut line_buf);
+
+        for block_start in (0..240usize).step_by(4) {
+            let expected = line_buf[block_start].color;
+            for x in block_start..(block_start + 4).min(240) {
+                assert_eq!(line_buf[x].color, expected, "pixel {} should match block start {}", x, block_start);
+            }
+        }
+        // And the value actually sampled should be the block-start x itself.
+        assert_eq!(line_buf[5].color, 4);
+        assert_eq!(line_buf[9].color, 8);
+    }
+
+    #[test]
+    fn bitmap_mode3_no_mosaic_samples_every_pixel_independently() {
+        let mut vram = vec![0u8; 240 * 160 * 2];
+        for x in 0..240usize {
+            vram[x * 2] = (x & 0xFF) as u8;
+        }
+        let palette = vec![0u8; 4];
+        let mut line_buf = [Pixel::default(); 240];
+        render_bitmap_bg(3, false, 0, &vram, &palette, 0, None, &mut line_buf);
+        assert_eq!(line_buf[5].color, 5);
+        assert_eq!(line_buf[9].color, 9);
     }
 }

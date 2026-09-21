@@ -52,6 +52,10 @@ pub struct Ppu {
     pub bldalpha: u16,
     pub bldy: u16,
 
+    // Mosaic: bits 0-3 BG H-size, 4-7 BG V-size, 8-11 OBJ H-size, 12-15 OBJ V-size
+    // (stored value + 1 = block size in pixels)
+    pub mosaic: u16,
+
     // Scanline timing state
     pub cycle_in_scanline: u32,
     pub frame_ready: bool,
@@ -97,10 +101,37 @@ impl Ppu {
             bldcnt: 0,
             bldalpha: 0,
             bldy: 0,
+            mosaic: 0,
             cycle_in_scanline: 0,
             frame_ready: false,
             layer_mask: 0x1F,
             framebuffer: Box::new([0xFF00_0000; SCREEN_WIDTH * SCREEN_HEIGHT]),
+        }
+    }
+
+    pub fn bg_mosaic_h(&self) -> u32 {
+        (self.mosaic & 0xF) as u32 + 1
+    }
+
+    pub fn bg_mosaic_v(&self) -> u32 {
+        ((self.mosaic >> 4) & 0xF) as u32 + 1
+    }
+
+    pub fn obj_mosaic_h(&self) -> u32 {
+        ((self.mosaic >> 8) & 0xF) as u32 + 1
+    }
+
+    pub fn obj_mosaic_v(&self) -> u32 {
+        ((self.mosaic >> 12) & 0xF) as u32 + 1
+    }
+
+    /// Returns the mosaic block size for a BG layer if BGCNT bit 6 (mosaic
+    /// enable) is set, or `None` otherwise.
+    fn bg_mosaic_for(&self, bgcnt: u16) -> Option<(u32, u32)> {
+        if (bgcnt & (1 << 6)) != 0 {
+            Some((self.bg_mosaic_h(), self.bg_mosaic_v()))
+        } else {
+            None
         }
     }
 
@@ -201,6 +232,7 @@ impl Ppu {
                 // Mode 0: Text BG 0, 1, 2, 3
                 for i in 0..4 {
                     if (self.dispcnt & (1 << (8 + i))) != 0 && (self.layer_mask & (1 << i)) != 0 {
+                        let mosaic = self.bg_mosaic_for(self.bgcnt[i]);
                         render_text_bg(
                             i as u8,
                             y,
@@ -210,6 +242,7 @@ impl Ppu {
                             self.bgvofs[i],
                             &self.vram[..],
                             &self.palette_ram[..],
+                            mosaic,
                             &mut bg_layer_bufs[i],
                         );
                     }
@@ -219,6 +252,7 @@ impl Ppu {
                 // Mode 1: BG 0, 1 Text, BG 2 Affine
                 for i in 0..2 {
                     if (self.dispcnt & (1 << (8 + i))) != 0 && (self.layer_mask & (1 << i)) != 0 {
+                        let mosaic = self.bg_mosaic_for(self.bgcnt[i]);
                         render_text_bg(
                             i as u8,
                             y,
@@ -228,6 +262,7 @@ impl Ppu {
                             self.bgvofs[i],
                             &self.vram[..],
                             &self.palette_ram[..],
+                            mosaic,
                             &mut bg_layer_bufs[i],
                         );
                     }
@@ -279,6 +314,7 @@ impl Ppu {
             }
             3..=5
                 if (self.dispcnt & (1 << 10)) != 0 && (self.layer_mask & (1 << 2)) != 0 => {
+                    let mosaic = self.bg_mosaic_for(self.bgcnt[2]);
                     render_bitmap_bg(
                         mode,
                         frame,
@@ -286,6 +322,7 @@ impl Ppu {
                         &self.vram[..],
                         &self.palette_ram[..],
                         self.bgcnt[2],
+                        mosaic,
                         &mut bg_layer_bufs[2],
                     );
                 }
@@ -300,6 +337,7 @@ impl Ppu {
                 &self.oam[..],
                 &self.vram[..],
                 &self.palette_ram[..],
+                (self.obj_mosaic_h(), self.obj_mosaic_v()),
                 &mut obj_buf,
                 &mut objwin_buf,
             );

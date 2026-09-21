@@ -32,12 +32,14 @@ pub fn get_sprite_size(shape: u16, size: u16) -> (usize, usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_sprites(
     y: u32,
     dispcnt: u16,
     oam: &[u8],
     vram: &[u8],
     palette_ram: &[u8],
+    obj_mosaic: (u32, u32),
     line_buf: &mut [Pixel; 240],
     objwin_buf: &mut [bool; 240],
 ) {
@@ -63,6 +65,7 @@ pub fn render_sprites(
         if is_disabled {
             continue;
         }
+        let mosaic_enabled = (attr0 & (1 << 12)) != 0;
 
         let is_double_size = is_affine && ((attr0 & (1 << 9)) != 0);
         let obj_mode = (attr0 >> 10) & 3;
@@ -116,7 +119,16 @@ pub fn render_sprites(
             let hflip = (attr1 & (1 << 12)) != 0;
             let vflip = (attr1 & (1 << 13)) != 0;
 
-            let mut py = py_i32 as usize;
+            // Mosaic sample-and-hold in sprite-local space: the sampled row/
+            // column is snapped to a block boundary (before flip is applied)
+            // so a whole block reads the same source texel, while output
+            // still writes one screen pixel at a time.
+            let py_sample = if mosaic_enabled && obj_mosaic.1 > 1 {
+                py_i32 - (py_i32 % obj_mosaic.1 as i32)
+            } else {
+                py_i32
+            };
+            let mut py = py_sample as usize;
             if vflip {
                 py = orig_h - 1 - py;
             }
@@ -128,7 +140,12 @@ pub fn render_sprites(
                 }
                 let sx = screen_x as usize;
 
-                let mut px = bx;
+                let bx_sample = if mosaic_enabled && obj_mosaic.0 > 1 {
+                    bx - (bx % obj_mosaic.0 as usize)
+                } else {
+                    bx
+                };
+                let mut px = bx_sample;
                 if hflip {
                     px = orig_w - 1 - px;
                 }
@@ -305,6 +322,84 @@ pub fn render_sprites(
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod mosaic_tests {
+    use super::*;
+
+    fn build_single_8x8_sprite_oam(mosaic_enabled: bool) -> Vec<u8> {
+        let mut oam = vec![0u8; 1024];
+        // attr0: y=0, non-affine, not disabled, normal mode, square shape,
+        // mosaic bit (12) per test, 4bpp
+        let attr0: u16 = if mosaic_enabled { 1 << 12 } else { 0 };
+        // attr1: x=0, size=0 (8x8 for square shape)
+        let attr1: u16 = 0;
+        // attr2: tile 0, priority 0, palette 0
+        let attr2: u16 = 0;
+        oam[0..2].copy_from_slice(&attr0.to_le_bytes());
+        oam[2..4].copy_from_slice(&attr1.to_le_bytes());
+        oam[4..6].copy_from_slice(&attr2.to_le_bytes());
+        oam
+    }
+
+    /// Builds a 64KB VRAM with OBJ tile 0 (4bpp, row 0) holding 8 distinct
+    /// non-zero color indices, one per column: px0=1, px1=2, ..., px7=8.
+    fn build_single_row_tile_vram() -> Vec<u8> {
+        let mut vram = vec![0u8; 96 * 1024];
+        let obj_char_base = 0x10000;
+        vram[obj_char_base] = 0x21; // px0=1 (low nibble), px1=2 (high nibble)
+        vram[obj_char_base + 1] = 0x43; // px2=3, px3=4
+        vram[obj_char_base + 2] = 0x65; // px4=5, px5=6
+        vram[obj_char_base + 3] = 0x87; // px6=7, px7=8
+        vram
+    }
+
+    fn build_palette_with_indices_1_to_8() -> Vec<u8> {
+        let mut palette = vec![0u8; 1024];
+        for idx in 1u16..=8 {
+            let addr = 0x200 + (idx as usize) * 2;
+            palette[addr..addr + 2].copy_from_slice(&idx.to_le_bytes());
+        }
+        palette
+    }
+
+    #[test]
+    fn obj_mosaic_holds_source_across_block() {
+        let oam = build_single_8x8_sprite_oam(true);
+        let vram = build_single_row_tile_vram();
+        let palette = build_palette_with_indices_1_to_8();
+        let mut line_buf = [Pixel::default(); 240];
+        let mut objwin_buf = [false; 240];
+
+        render_sprites(0, 0, &oam, &vram, &palette, (4, 1), &mut line_buf, &mut objwin_buf);
+
+        // Columns 0-3 must all sample column 0's color (1); columns 4-7
+        // must all sample column 4's color (5).
+        for x in 0..4 {
+            assert_eq!(line_buf[x].color, 1, "column {} should hold block-start color", x);
+        }
+        for x in 4..8 {
+            assert_eq!(line_buf[x].color, 5, "column {} should hold block-start color", x);
+        }
+    }
+
+    #[test]
+    fn obj_without_mosaic_bit_samples_every_column_independently() {
+        let oam = build_single_8x8_sprite_oam(false);
+        let vram = build_single_row_tile_vram();
+        let palette = build_palette_with_indices_1_to_8();
+        let mut line_buf = [Pixel::default(); 240];
+        let mut objwin_buf = [false; 240];
+
+        // Pass a nonzero obj_mosaic size, but the sprite's own mosaic bit
+        // is off, so it must still sample every column independently.
+        render_sprites(0, 0, &oam, &vram, &palette, (4, 1), &mut line_buf, &mut objwin_buf);
+
+        for (x, expected) in (0u16..8).enumerate() {
+            assert_eq!(line_buf[x].color, expected + 1, "column {} should sample its own color", x);
         }
     }
 }
