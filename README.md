@@ -72,8 +72,10 @@ A cycle-accurate, high-performance Game Boy Advance (GBA) emulator written in pu
 ## Building and Running
 
 ### Prerequisites
-- [Rust](https://www.rust-lang.org/) (1.75+ recommended)
+- [Rust](https://www.rust-lang.org/) (1.75+ recommended), `x86_64-pc-windows-gnu` host toolchain
 - Windows 10/11 x64
+- **LLVM MinGW (MSVCRT)**: `winget install MartinStorsjo.LLVM-MinGW.MSVCRT`. This project builds for the `x86_64-pc-windows-gnullvm` Rust target (see `.cargo/config.toml`) rather than plain `x86_64-pc-windows-gnu`, because the GUI/windowing stack (`eframe`/`winit`/`glow`) needs the ABI this toolchain provides — building with a plain MinGW-w64 GCC toolchain compiles and links successfully but crashes at runtime.
+  - If `cargo build` fails with a missing linker, the installed toolchain's version-dated folder name in `.cargo/config.toml` may not match your install; check `%LOCALAPPDATA%\Microsoft\WinGet\Packages\MartinStorsjo.LLVM-MinGW.MSVCRT_*\` and update the two paths there.
 
 ### Build Release
 ```powershell
@@ -82,7 +84,7 @@ cargo build --release
 
 The optimized executable will be located at:
 ```powershell
-target/release/crabboy-advance.exe
+target/x86_64-pc-windows-gnullvm/release/crabboy-advance.exe
 ```
 
 ### Run
@@ -91,7 +93,7 @@ cargo run --release
 ```
 Or launch directly with a ROM:
 ```powershell
-.\target\release\crabboy-advance.exe "path\to\game.gba"
+.\target\x86_64-pc-windows-gnullvm\release\crabboy-advance.exe "path\to\game.gba"
 ```
 
 ---

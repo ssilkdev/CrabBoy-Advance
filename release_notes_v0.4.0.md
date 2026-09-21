@@ -2,6 +2,10 @@
 
 This release is a comprehensive correctness and security pass following an in-depth automated code review of the entire emulator core, memory system, and auto-updater. It implements fixes from [`docs/AI_AGENT_FIX_DESIGN.md`](docs/AI_AGENT_FIX_DESIGN.md), addressing every critical finding and most major findings identified by that review.
 
+## ⚠️ Build toolchain fix
+
+Building with a plain MinGW-w64 GCC toolchain (`x86_64-pc-windows-gnu`) compiles and links this project successfully, but the resulting binary crashes immediately on launch (window never appears) due to an ABI mismatch in the GUI/windowing stack (`eframe`/`winit`/`glow`). This release's binary is built for the `x86_64-pc-windows-gnullvm` target against the **LLVM MinGW (MSVCRT)** toolchain instead, which resolves it. If you build from source, see the updated Prerequisites in the README — `winget install MartinStorsjo.LLVM-MinGW.MSVCRT` is required.
+
 ---
 
 ## 🔒 Security

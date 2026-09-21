@@ -1,0 +1,22 @@
+# Requires the LLVM MinGW (MSVCRT) toolchain, installed at its default winget
+# location: `winget install MartinStorsjo.LLVM-MinGW.MSVCRT`
+# (source: https://github.com/mstorsjo/llvm-mingw). If `cargo build` fails with
+# "linker ... not found", the installed version folder name below
+# (llvm-mingw-<date>-msvcrt-x86_64) has likely changed with a newer release --
+# check `%LOCALAPPDATA%\Microsoft\WinGet\Packages\MartinStorsjo.LLVM-MinGW.MSVCRT_*\`
+# and update the two paths below to match.
+#
+# The x86_64-pc-windows-gnu Rust target expects a real GCC-style runtime
+# (-lgcc/-lgcc_eh) that llvm-mingw doesn't ship, so this builds for
+# x86_64-pc-windows-gnullvm instead -- the Rust target designed to pair with
+# llvm-mingw's clang + compiler-rt/libunwind runtime. (A PATH-resolved
+# `x86_64-w64-mingw32-clang` shim was tried instead of this absolute path but
+# fails to locate its own compiler-rt resource directory; the absolute path
+# into the toolchain's own bin/ works reliably.)
+[target.x86_64-pc-windows-gnullvm]
+linker = "C:\\Users\\ssilk\\AppData\\Local\\Microsoft\\WinGet\\Packages\\MartinStorsjo.LLVM-MinGW.MSVCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\\llvm-mingw-20260616-msvcrt-x86_64\\bin\\x86_64-w64-mingw32-clang.exe"
+ar = "C:\\Users\\ssilk\\AppData\\Local\\Microsoft\\WinGet\\Packages\\MartinStorsjo.LLVM-MinGW.MSVCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\\llvm-mingw-20260616-msvcrt-x86_64\\bin\\llvm-ar.exe"
+rustflags = ["-C", "link-self-contained=no", "-C", "link-args=-fuse-ld=lld"]
+
+[build]
+target = "x86_64-pc-windows-gnullvm"

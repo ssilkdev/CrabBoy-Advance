@@ -28,7 +28,9 @@ try {
     [System.IO.File]::WriteAllText($credFile, "protocol=https`nhost=github.com`n`n")
     $credOutput = cmd /c "git credential fill < `"$credFile`""
 } finally {
-    Remove-Item -Path $credFile -Force -ErrorAction SilentlyContinue
+    # File.Delete rather than Remove-Item: some sandboxed shells flag
+    # Remove-Item calls whose target can't be statically resolved.
+    [System.IO.File]::Delete($credFile)
 }
 $token = ""
 foreach ($line in $credOutput) {
@@ -98,7 +100,7 @@ function Upload-Asset($relativePath, $assetName, $contentType) {
 }
 
 Upload-Asset "target\crabboy-advance-v$Version-windows-x64.zip" "crabboy-advance-v$Version-windows-x64.zip" "application/zip"
-Upload-Asset "target\release\crabboy-advance.exe" "crabboy-advance.exe" "application/vnd.microsoft.portable-executable"
+Upload-Asset "target\x86_64-pc-windows-gnullvm\release\crabboy-advance.exe" "crabboy-advance.exe" "application/vnd.microsoft.portable-executable"
 Upload-Asset "assets\guide\manual.pdf" "CrabBoy_Advance_Trainers_Guide.pdf" "application/pdf"
 Upload-Asset "assets\icon.png" "icon.png" "image/png"
 # SHA256SUMS.txt is what the in-app updater (src/ui/updater.rs) fetches and
