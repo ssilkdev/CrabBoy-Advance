@@ -15,18 +15,27 @@ $ErrorActionPreference = "Stop"
 # current directory.
 Set-Location -Path (Resolve-Path (Join-Path $PSScriptRoot ".."))
 
-# The project's .cargo/config.toml builds for the x86_64-pc-windows-gnullvm
-# target (paired with the required LLVM MinGW toolchain), so the release
-# binary lives under target\x86_64-pc-windows-gnullvm\release, not target\release.
-$exePath = "target\x86_64-pc-windows-gnullvm\release\crabboy-advance.exe"
+# The Windows release is built with an explicit --target (the repo no longer
+# pins a default target in .cargo/config.toml, so that native Linux/macOS
+# builds work). Locate the exe under whichever Windows target was actually
+# built, falling back to the plain target\release path used by a host MSVC
+# build on Windows.
+$candidateExePaths = @(
+    "target\x86_64-pc-windows-gnullvm\release\crabboy-advance.exe",
+    "target\x86_64-pc-windows-msvc\release\crabboy-advance.exe",
+    "target\release\crabboy-advance.exe"
+)
+$exePath = $candidateExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+if (-not $exePath) {
+    throw ("Release binary not found. Looked in:`n  " + ($candidateExePaths -join "`n  ") +
+           "`nBuild it first, e.g. 'cargo build --release --target x86_64-pc-windows-gnullvm'.")
+}
+
 $packageDir = "target\package_v$Version"
 $zipName = "crabboy-advance-v$Version-windows-x64.zip"
 $zipPath = "target\$zipName"
 $sumsPath = "target\SHA256SUMS.txt"
-
-if (-not (Test-Path $exePath)) {
-    throw "Release binary not found at $exePath. Run 'cargo build --release' first."
-}
 
 if (Test-Path $packageDir) {
     Remove-Item -Path $packageDir -Recurse -Force

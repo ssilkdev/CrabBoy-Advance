@@ -1,5 +1,7 @@
 //! Modern Windows 11 UI/UX Application Implementation
 
+pub mod ai_agent;
+pub mod ai_agent_dialog;
 pub mod audio_mixer_dialog;
 pub mod bezels;
 pub mod cheats_dialog;
@@ -8,6 +10,7 @@ pub mod debug;
 pub mod gif_recorder;
 pub mod guide_dialog;
 pub mod link_dialog;
+pub mod platform;
 pub mod pokemon_companion;
 pub mod rewind;
 pub mod save_manager;
@@ -19,6 +22,8 @@ pub mod tas_dialog;
 pub mod updater;
 pub mod updater_dialog;
 
+use ai_agent::AiAgent;
+use ai_agent_dialog::AiAgentDialog;
 use audio_mixer_dialog::AudioMixerDialog;
 use bezels::{BezelMode, BezelRenderer};
 use cheats_dialog::CheatsDialog;
@@ -64,6 +69,8 @@ pub struct GbaApp {
     pub audio_mixer_dialog: AudioMixerDialog,
     pub tas_engine: TasEngine,
     pub tas_dialog: TasDialog,
+    pub ai_agent: AiAgent,
+    pub ai_agent_dialog: AiAgentDialog,
     pub guide_dialog: GuideDialog,
     pub updater: UpdateManager,
     pub updater_dialog: UpdaterDialog,
@@ -147,6 +154,8 @@ impl GbaApp {
             audio_mixer_dialog: AudioMixerDialog::new(),
             tas_engine: TasEngine::new(),
             tas_dialog: TasDialog::new(),
+            ai_agent: AiAgent::new(),
+            ai_agent_dialog: AiAgentDialog::new(),
             guide_dialog: GuideDialog::new(),
             updater,
             updater_dialog: UpdaterDialog::new(),
@@ -210,6 +219,53 @@ impl GbaApp {
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
         self.toast_message = Some((msg.into(), Instant::now()));
+    }
+
+    /// Applies `--ai-*` command-line options and optionally starts the agent.
+    /// Returns a human-readable summary of what was applied, for logging.
+    pub fn apply_ai_launch_options(
+        &mut self,
+        endpoint: Option<&str>,
+        model: Option<&str>,
+        brain: Option<&str>,
+        objective: Option<&str>,
+        no_pause: bool,
+        autostart: bool,
+    ) -> String {
+        if let Some(e) = endpoint {
+            self.ai_agent.config.endpoint = e.to_string();
+        }
+        if let Some(m) = model {
+            self.ai_agent.config.model = m.to_string();
+        }
+        if let Some(b) = brain {
+            self.ai_agent.config.brain = match b.trim().to_ascii_lowercase().as_str() {
+                "heuristic" | "offline" | "local" => ai_agent::Brain::Heuristic,
+                _ => ai_agent::Brain::VisionModel,
+            };
+        }
+        if let Some(o) = objective {
+            self.ai_agent.config.objective = o.to_string();
+        }
+        if no_pause {
+            self.ai_agent.config.pause_while_thinking = false;
+        }
+
+        if autostart {
+            let rom = self.loaded_rom_name.clone();
+            self.ai_agent.start(&rom);
+            self.ai_agent_dialog.show_panel = true;
+            self.ai_agent.probe_endpoint();
+            self.set_toast("🤖 AI Agent is now playing");
+        }
+
+        format!(
+            "brain={:?} endpoint={} autostart={} pause_while_thinking={}",
+            self.ai_agent.config.brain,
+            self.ai_agent.config.endpoint,
+            autostart,
+            self.ai_agent.config.pause_while_thinking,
+        )
     }
 }
 
@@ -346,6 +402,9 @@ impl eframe::App for GbaApp {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::Y) {
                 self.tas_dialog.is_open = !self.tas_dialog.is_open;
             }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::A) {
+                self.ai_agent_dialog.is_open = !self.ai_agent_dialog.is_open;
+            }
             if i.key_pressed(egui::Key::F1) || (i.modifiers.ctrl && i.key_pressed(egui::Key::H)) {
                 self.guide_dialog.is_open = !self.guide_dialog.is_open;
             }
@@ -412,6 +471,17 @@ impl eframe::App for GbaApp {
             }
         }
 
+        // ---- AI Agent Player -------------------------------------------
+        // Collect any finished inference, then overwrite the keypad with the
+        // agent's currently-held buttons. This runs AFTER human/TAS input so
+        // the agent wins the pad (unless co-op mode is enabled, in which case
+        // its buttons are OR'd over the human's).
+        self.ai_agent.poll(self.gba.frame_counter);
+        if self.ai_agent.enabled {
+            self.ai_agent.maybe_request(&self.gba, &self.loaded_rom_name);
+            self.ai_agent.apply_inputs(&mut self.gba);
+        }
+
         // Turbo and Rewind States
         let wants_rewind = ctx.input(|i| i.key_down(self.key_bindings.rewind)) || self.gamepad_manager.rewind_button_down;
         self.is_rewinding = wants_rewind && !self.is_paused;
@@ -427,7 +497,14 @@ impl eframe::App for GbaApp {
         let target_frame_duration = Duration::from_secs_f64(1.0 / (59.7275 * effective_speed as f64));
         let mut frames_run = 0;
 
-        if !self.is_paused {
+        // The agent may request that emulation freeze while it waits on the
+        // model, so a slow local vision model doesn't mean the game runs on
+        // unattended for thousands of frames between decisions.
+        let ai_stall = self.ai_agent.enabled
+            && self.ai_agent.config.pause_while_thinking
+            && self.ai_agent.is_thinking();
+
+        if !self.is_paused && !ai_stall {
             self.frame_accumulator += delta;
 
             if self.is_rewinding {
@@ -450,6 +527,16 @@ impl eframe::App for GbaApp {
             if self.frame_accumulator > target_frame_duration * 2 {
                 self.frame_accumulator = Duration::ZERO;
             }
+        } else if ai_stall {
+            // Don't bank up wall-clock time while frozen on inference, or the
+            // emulator would sprint through a burst of frames on resume.
+            self.frame_accumulator = Duration::ZERO;
+        }
+
+        // Advance the agent's action cursor by the frames actually emulated.
+        // Rewound frames are deliberately excluded.
+        if self.ai_agent.enabled && !self.is_rewinding {
+            self.ai_agent.tick(frames_run as u32);
         }
 
         self.gba.mmu.apu.audio_output.set_fast_forwarding(is_turbo || effective_speed > 1);
@@ -698,6 +785,10 @@ impl eframe::App for GbaApp {
                     }
                     if ui.button("⏱ TAS Speedrun Engine (Ctrl+Y)...").clicked() {
                         self.tas_dialog.is_open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("🤖 AI Agent Player — Watch an AI Play (Ctrl+A)...").clicked() {
+                        self.ai_agent_dialog.is_open = true;
                         ui.close_menu();
                     }
                     if ui.button("🎮 Hardware Sensors (Solar/Tilt/Rumble)...").clicked() {
@@ -953,6 +1044,10 @@ impl eframe::App for GbaApp {
                 });
         }
 
+        // AI Agent live spectator panel (must be declared before CentralPanel
+        // so egui allocates the remaining space to the game viewport).
+        self.ai_agent_dialog.show_panel(ctx, &self.ai_agent);
+
         // Central Panel (GBA LCD Viewport)
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 15, 18)))
@@ -1106,6 +1201,60 @@ impl eframe::App for GbaApp {
                                 tas_rect.center(),
                                 egui::Align2::CENTER_CENTER,
                                 format!("🔴 TAS REC ({})", self.tas_engine.recorded_inputs.len()),
+                                egui::FontId::proportional(12.0),
+                                Color32::WHITE,
+                            );
+                        }
+
+                        // AI Agent HUD badge — shows the viewer that the game
+                        // is under machine control and what it is doing.
+                        if self.ai_agent.enabled {
+                            let (text, fill, border) = match &self.ai_agent.status {
+                                ai_agent::AgentStatus::Thinking => {
+                                    let secs = self
+                                        .ai_agent
+                                        .thinking_elapsed()
+                                        .map(|d| d.as_secs_f32())
+                                        .unwrap_or(0.0);
+                                    (
+                                        format!("🤖 AI THINKING ({:.1}s)", secs),
+                                        Color32::from_rgba_unmultiplied(190, 140, 20, 230),
+                                        Color32::from_rgb(255, 210, 90),
+                                    )
+                                }
+                                ai_agent::AgentStatus::Error(_) => (
+                                    "🤖 AI OFFLINE".to_string(),
+                                    Color32::from_rgba_unmultiplied(170, 40, 40, 230),
+                                    Color32::from_rgb(255, 120, 120),
+                                ),
+                                _ => {
+                                    let act = self
+                                        .ai_agent
+                                        .current_action_label()
+                                        .unwrap_or_else(|| "standing by".to_string());
+                                    (
+                                        format!("🤖 AI PLAYING — {}", act),
+                                        Color32::from_rgba_unmultiplied(30, 110, 170, 230),
+                                        Color32::from_rgb(120, 200, 255),
+                                    )
+                                }
+                            };
+
+                            let badge_rect = Rect::from_min_size(
+                                rect.min + Vec2::new(12.0, 86.0),
+                                Vec2::new(250.0, 28.0),
+                            );
+                            ui.painter().rect_filled(badge_rect, 6.0, fill);
+                            ui.painter().rect_stroke(
+                                badge_rect,
+                                6.0,
+                                Stroke::new(1.0_f32, border),
+                                egui::StrokeKind::Outside,
+                            );
+                            ui.painter().text(
+                                badge_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                text,
                                 egui::FontId::proportional(12.0),
                                 Color32::WHITE,
                             );
@@ -1283,6 +1432,7 @@ impl eframe::App for GbaApp {
         self.pokemon_companion.show(ctx, &self.gba);
         self.audio_mixer_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.tas_dialog.show(ctx, &mut self.tas_engine, &mut self.gba, &mut dialog_toast);
+        self.ai_agent_dialog.show_dialog(ctx, &mut self.ai_agent, &self.loaded_rom_name, &mut dialog_toast);
         self.guide_dialog.show(ctx, &mut dialog_toast);
         self.updater_dialog.show(ctx, &self.updater, &mut dialog_toast);
 
@@ -1347,6 +1497,14 @@ impl eframe::App for GbaApp {
 
         // Request repaint precisely when the next frame is due for locked 60 FPS pacing
         let time_until_next = target_frame_duration.saturating_sub(self.frame_accumulator);
-        ctx.request_repaint_after(time_until_next);
+        // While frozen on inference no frames are being emulated, so the
+        // accumulator-derived deadline would let repaints stop and freeze the
+        // "thinking" timer. Poll at ~10 Hz instead to keep the HUD live and to
+        // pick up the worker's response promptly.
+        if ai_stall {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            ctx.request_repaint_after(time_until_next);
+        }
     }
 }

@@ -67,31 +67,8 @@ impl GuideDialog {
         std::fs::write(&target_path, EMBEDDED_MANUAL_PDF)
             .map_err(|e| format!("Failed to write embedded PDF to temp directory: {}", e))?;
 
-        #[cfg(target_os = "windows")]
-        {
-            let status = std::process::Command::new("cmd")
-                .args(["/C", "start", "", &target_path.to_string_lossy()])
-                .spawn();
-            if let Err(e) = status {
-                return Err(format!("Failed to launch default PDF viewer: {}", e));
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open")
-                .arg(&target_path)
-                .spawn()
-                .map_err(|e| format!("Failed to launch PDF viewer: {}", e))?;
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("xdg-open")
-                .arg(&target_path)
-                .spawn()
-                .map_err(|e| format!("Failed to launch PDF viewer: {}", e))?;
-        }
+        crate::ui::platform::open_path(&target_path)
+            .map_err(|e| format!("Failed to launch default PDF viewer: {}", e))?;
 
         Ok(target_path)
     }

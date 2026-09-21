@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Registers the .gba ROM MIME type so that ROMs get a proper icon in the file
+  manager and list CrabBoy Advance under "Open With".
+
+  GBA ROMs have no magic number at offset 0 (the header begins with an ARM
+  branch instruction that varies per game), so detection is by extension only.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-gba-rom">
+    <comment>Game Boy Advance ROM</comment>
+    <glob pattern="*.gba"/>
+    <icon name="io.github.ssilkdev.CrabBoyAdvance"/>
+  </mime-type>
+</mime-info>

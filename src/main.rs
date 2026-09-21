@@ -10,11 +10,20 @@ use std::env;
 use std::path::PathBuf;
 use ui::GbaApp;
 
-// Force NVIDIA Optimus and AMD PowerXpress drivers on Windows to run on the high-performance dedicated GPU
+// Force NVIDIA Optimus and AMD PowerXpress drivers to run on the high-performance
+// dedicated GPU. These are exported-symbol protocols the Windows drivers look up in
+// the process image; they have no meaning on Linux/macOS, where GPU selection is
+// handled by the system (PRIME / DRI_PRIME env vars, or the compositor).
+//
+// They MUST stay Windows-only: `#[no_mangle]` puts these unmangled names in the
+// dynamic symbol table, where on Linux they can collide with other objects at link
+// or load time.
+#[cfg(target_os = "windows")]
 #[no_mangle]
 #[used]
 pub static NvOptimusEnablement: u32 = 1;
 
+#[cfg(target_os = "windows")]
 #[no_mangle]
 #[used]
 pub static AmdPowerXpressRequestHighPerformance: i32 = 1;
@@ -25,6 +34,7 @@ fn print_help() {
 
 USAGE:
     crabboy-advance [ROM_PATH]                                  Launch GUI emulator
+    crabboy-advance <ROM> --ai-play [--ai-endpoint URL]         Launch GUI with the AI Agent already playing
     crabboy-advance --diagnose <ROM> [--frames N] [--output P]  Run headless diagnostics and export report
     crabboy-advance --dump-frame <ROM> [--frame N] [--output P] Run headless to frame N and save PNG screenshot
     crabboy-advance --audit-audio <ROM> [--frames N]            Run headless audio health audit
@@ -34,6 +44,15 @@ OPTIONS:
     --frames <N>   Number of frames to emulate (default: 300)
     --frame <N>    Target frame to capture (default: 60)
     --output <P>   Output file path for JSON report or PNG frame
+
+AI AGENT PLAYER (watch an AI play):
+    --ai-play              Start the AI Agent immediately on launch
+    --ai-endpoint <URL>    OpenAI-compatible vision endpoint
+                           (default: http://127.0.0.1:8080/v1/chat/completions)
+    --ai-model <NAME>      Model name sent in the request (default: local-vision)
+    --ai-brain <KIND>      'vision' (default) or 'heuristic' (offline, no server)
+    --ai-objective <TEXT>  Standing objective handed to the agent
+    --ai-no-pause          Keep emulating while the model thinks (smoother to watch)
 "#
     );
 }
@@ -45,6 +64,28 @@ fn get_arg_val(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// AI Agent options parsed from the command line, applied once the GUI boots.
+#[derive(Default)]
+pub struct AiLaunchOptions {
+    pub autostart: bool,
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub brain: Option<String>,
+    pub objective: Option<String>,
+    pub no_pause: bool,
+}
+
+fn parse_ai_options(args: &[String]) -> AiLaunchOptions {
+    AiLaunchOptions {
+        autostart: args.iter().any(|a| a == "--ai-play"),
+        endpoint: get_arg_val(args, "--ai-endpoint"),
+        model: get_arg_val(args, "--ai-model"),
+        brain: get_arg_val(args, "--ai-brain"),
+        objective: get_arg_val(args, "--ai-objective"),
+        no_pause: args.iter().any(|a| a == "--ai-no-pause"),
+    }
 }
 
 fn handle_headless_cli(args: &[String]) {
@@ -206,7 +247,18 @@ fn handle_headless_cli(args: &[String]) {
 }
 
 fn main() -> eframe::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // On Linux the eframe/winit stack pulls in D-Bus (zbus) and the AT-SPI
+    // accessibility bridge, which are extremely chatty at INFO -- they emit
+    // multi-kilobyte struct dumps per message and bury the emulator's own logs.
+    // Windows has no such bus, so this noise is Linux-specific. Default those
+    // crates to `warn` while keeping our own logging at `info`. An explicit
+    // RUST_LOG still overrides everything.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(
+            "info,zbus=warn,tracing=warn,atspi=warn,accesskit=warn,ashpd=warn,calloop=warn",
+        ),
+    )
+    .init();
 
     let args: Vec<String> = env::args().collect();
     handle_headless_cli(&args);
@@ -240,6 +292,16 @@ fn main() -> eframe::Result<()> {
         .with_title(rom_title)
         .with_drag_and_drop(true);
 
+    // On Wayland the compositor identifies a window solely by its app_id and
+    // ignores the pixel icon set below; it shows the icon from the installed
+    // .desktop file whose basename matches. This must therefore stay in sync
+    // with packaging/linux/io.github.ssilkdev.CrabBoyAdvance.desktop, or the
+    // taskbar/dock falls back to a generic placeholder icon.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        viewport = viewport.with_app_id("io.github.ssilkdev.CrabBoyAdvance");
+    }
+
     if let Ok(img) = image::load_from_memory(include_bytes!("../assets/icon_256.png")) {
         let rgba = img.to_rgba8();
         let (width, height) = rgba.dimensions();
@@ -255,9 +317,25 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let ai_opts = parse_ai_options(&args);
+
     eframe::run_native(
         "GBA Simulator",
         options,
-        Box::new(|cc| Ok(Box::new(GbaApp::new(cc, initial_rom)))),
+        Box::new(move |cc| {
+            let mut app = GbaApp::new(cc, initial_rom);
+            let summary = app.apply_ai_launch_options(
+                ai_opts.endpoint.as_deref(),
+                ai_opts.model.as_deref(),
+                ai_opts.brain.as_deref(),
+                ai_opts.objective.as_deref(),
+                ai_opts.no_pause,
+                ai_opts.autostart,
+            );
+            if ai_opts.autostart {
+                log::info!("AI Agent autostarted: {}", summary);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }

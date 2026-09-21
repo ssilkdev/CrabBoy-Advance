@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CrabBoy Advance
+GenericName=Game Boy Advance Emulator
+Comment=Cycle-accurate Game Boy Advance emulator with spatial audio, xBRZ upscaling and TAS tools
+# Icon is referenced by name, not path: the loader resolves it from the
+# hicolor theme (see install.sh), which lets it scale across panel sizes.
+Icon=io.github.ssilkdev.CrabBoyAdvance
+# %f passes a single dropped/opened ROM path; the binary takes it as argv[1].
+Exec=crabboy-advance %f
+Terminal=false
+Categories=Game;Emulator;
+Keywords=gba;gameboy;advance;emulator;nintendo;retro;
+MimeType=application/x-gba-rom;
+StartupNotify=true
+# Must match the Wayland app_id set in src/main.rs, or the compositor cannot
+# associate the running window with this entry and shows a generic icon.
+StartupWMClass=io.github.ssilkdev.CrabBoyAdvance

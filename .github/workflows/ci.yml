@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Builds and tests on both platforms so that a Windows-only assumption
+  # (or a Linux-only one) fails here rather than in a user's hands.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+            # The repo has no default target; a host MSVC build needs no
+            # --target, so the plain release path is used on Windows.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # eframe/winit link against X11, Wayland, ALSA and udev (via gilrs) on
+      # Linux. The GitHub runner image does not ship these -dev packages, so
+      # the build fails at link time without them.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libudev-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        continue-on-error: true
+
+      # Exercises the real emulation pipeline headlessly (no display needed):
+      # generates a ROM, runs it, and asserts a frame was actually rendered.
+      - name: Headless smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/make_test_rom.py /tmp/ci_test.gba
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            BIN="target/release/crabboy-advance.exe"
+          else
+            BIN="target/release/crabboy-advance"
+          fi
+          "$BIN" --diagnose /tmp/ci_test.gba --frames 60 --output /tmp/ci_diag.json
+          "$BIN" --dump-frame /tmp/ci_test.gba --frame 30 --output /tmp/ci_frame.png
+          test -s /tmp/ci_diag.json  || { echo "diagnostics report missing"; exit 1; }
+          test -s /tmp/ci_frame.png  || { echo "frame dump missing"; exit 1; }
+          echo "Headless pipeline OK on ${RUNNER_OS}"
+
+  package-linux:
+    name: Package Linux tarball
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libx11-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+            pkg-config desktop-file-utils
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Validate desktop entry
+        run: desktop-file-validate packaging/linux/io.github.ssilkdev.CrabBoyAdvance.desktop
+
+      - name: Package
+        run: ./scripts/package_release.sh "${GITHUB_REF_NAME#v}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crabboy-advance-linux-x86_64
+          path: |
+            target/*.tar.gz
+            target/SHA256SUMS.txt

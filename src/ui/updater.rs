@@ -3,9 +3,13 @@
 //! Features:
 //! - Asynchronous, non-blocking startup check against GitHub Releases API.
 //! - Semver comparison between currently running binary and latest GitHub tag.
-//! - Live download tracking of release asset (crabboy-advance.exe).
-//! - Windows atomic executable replacement (.old swap) and automatic restart.
+//! - Live download tracking of the platform's release asset.
+//! - Atomic executable replacement (.old swap) and automatic restart.
 //! - Startup cleanup of legacy .old executable files.
+//!
+//! Platform notes: the release asset name, the curl binary location, and the
+//! post-download `chmod +x` step all differ per OS and are isolated behind the
+//! `EXE_ASSET_NAME`, `curl_path()`, and `mark_executable()` helpers below.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,18 +19,84 @@ pub const REPO_OWNER: &str = "ssilkdev";
 pub const REPO_NAME: &str = "CrabBoy-Advance";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
-const EXE_ASSET_NAME: &str = "crabboy-advance.exe";
 
-/// Resolves an absolute path to the real Windows-shipped curl.exe rather than
-/// trusting whatever "curl.exe" happens to resolve to first on PATH.
+/// Release asset this build knows how to install over itself. Each target OS
+/// publishes a distinctly named artifact, so a Linux build must never try to
+/// install a Windows `.exe` over its own running binary.
+#[cfg(target_os = "windows")]
+pub const EXE_ASSET_NAME: &str = "crabboy-advance.exe";
+#[cfg(target_os = "linux")]
+pub const EXE_ASSET_NAME: &str = "crabboy-advance-linux-x86_64";
+#[cfg(target_os = "macos")]
+pub const EXE_ASSET_NAME: &str = "crabboy-advance-macos-universal";
+
+/// Resolves the curl executable.
+///
+/// On Windows this pins the absolute path to the OS-shipped `curl.exe` rather
+/// than trusting whatever "curl.exe" resolves to first on PATH. On Unix, curl
+/// lives in a root-owned directory already on PATH, so a bare name is fine.
 fn curl_path() -> PathBuf {
-    if let Ok(system_root) = std::env::var("SystemRoot") {
-        let candidate = PathBuf::from(system_root).join("System32").join("curl.exe");
-        if candidate.exists() {
-            return candidate;
+    #[cfg(windows)]
+    {
+        if let Ok(system_root) = std::env::var("SystemRoot") {
+            let candidate = PathBuf::from(system_root).join("System32").join("curl.exe");
+            if candidate.exists() {
+                return candidate;
+            }
         }
+        return PathBuf::from("curl.exe");
     }
-    PathBuf::from("curl.exe")
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("curl")
+    }
+}
+
+/// Hides the console window curl would otherwise flash on Windows. No-op elsewhere.
+fn silence_console(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Returns a sibling path of the running binary with `suffix` appended to its
+/// file name (e.g. `crabboy-advance` -> `crabboy-advance.new`).
+///
+/// This appends rather than using `Path::with_extension`, which would mangle
+/// Unix binaries that have no extension at all.
+fn sibling_with_suffix(exe: &Path, suffix: &str) -> PathBuf {
+    let mut name = exe.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    exe.with_file_name(name)
+}
+
+/// Restores the executable bit on a freshly downloaded binary.
+///
+/// curl writes the file with the default 0644 mode, so on Unix the downloaded
+/// update would be non-executable and the post-update restart would fail with
+/// EACCES. Windows infers executability from the file extension instead.
+fn mark_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .map_err(|e| format!("Cannot stat downloaded update: {}", e))?
+            .permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| format!("Cannot mark update executable: {}", e))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Computes the lowercase hex SHA-256 digest of a file's contents.
@@ -68,11 +138,7 @@ fn fetch_text_asset(url: &str) -> Result<String, String> {
         url,
     ]);
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    silence_console(&mut cmd);
 
     let output = cmd.output().map_err(|e| format!("Failed to fetch checksums (curl error): {}", e))?;
     if !output.status.success() {
@@ -142,11 +208,11 @@ impl UpdateManager {
     /// Clean up any leftover `.old` executable from a previous update.
     pub fn cleanup_old_exe() {
         if let Ok(current_exe) = std::env::current_exe() {
-            let old_exe = current_exe.with_extension("exe.old");
+            let old_exe = sibling_with_suffix(&current_exe, ".old");
             if old_exe.exists() {
                 let _ = std::fs::remove_file(old_exe);
             }
-            let new_exe = current_exe.with_extension("exe.new");
+            let new_exe = sibling_with_suffix(&current_exe, ".new");
             if new_exe.exists() {
                 // If an aborted .new exists from an incomplete download, clean it up
                 let _ = std::fs::remove_file(new_exe);
@@ -231,25 +297,21 @@ impl UpdateManager {
                 }
             };
 
-            let temp_download = current_exe.with_extension("exe.new");
+            let temp_download = sibling_with_suffix(&current_exe, ".new");
             let _ = std::fs::remove_file(&temp_download);
 
-            // Execute curl.exe with silent flags and CREATE_NO_WINDOW
+            // Execute curl with silent flags (and CREATE_NO_WINDOW on Windows)
             let mut cmd = std::process::Command::new(curl_path());
             cmd.args(&[
                 "-L",
                 "-f",
                 "--max-time", "180",
                 "-H", "User-Agent: CrabBoy-Advance-Updater",
-                "-o", temp_download.to_str().unwrap_or("crabboy-advance.exe.new"),
+                "-o", &temp_download.to_string_lossy(),
                 &exe_url,
             ]);
 
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            }
+            silence_console(&mut cmd);
 
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
@@ -275,6 +337,16 @@ impl UpdateManager {
                                     // transfer, or a tampered release asset.
                                     match verify_download_checksum(&temp_download, &release_info) {
                                         Ok(expected_sha256) => {
+                                            // Restore the executable bit before the
+                                            // binary is ever handed to the installer:
+                                            // curl wrote it 0644, so on Unix the
+                                            // post-update restart would hit EACCES.
+                                            if let Err(e) = mark_executable(&temp_download) {
+                                                let _ = std::fs::remove_file(&temp_download);
+                                                let mut lock = status_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                                *lock = UpdateStatus::Failed(e);
+                                                return;
+                                            }
                                             let mut lock = status_clone.lock().unwrap_or_else(|e| e.into_inner());
                                             *lock = UpdateStatus::DownloadedReadyToRestart {
                                                 new_exe_path: temp_download,
@@ -335,11 +407,14 @@ impl UpdateManager {
     /// Replaces the currently running executable with the updated executable and restarts.
     pub fn restart_and_apply(&self) -> Result<(), String> {
         let current_exe = std::env::current_exe().map_err(|e| format!("Current exe error: {}", e))?;
-        let old_exe = current_exe.with_extension("exe.old");
-        let new_exe = current_exe.with_extension("exe.new");
+        let old_exe = sibling_with_suffix(&current_exe, ".old");
+        let new_exe = sibling_with_suffix(&current_exe, ".new");
 
         if !new_exe.exists() {
-            return Err("Updated binary (crabboy-advance.exe.new) not found. Download may not have finished.".to_string());
+            return Err(format!(
+                "Updated binary ({}) not found. Download may not have finished.",
+                new_exe.display()
+            ));
         }
 
         // Re-verify the checksum immediately before installing, not only right after
@@ -404,11 +479,7 @@ fn fetch_latest_release(owner: &str, repo: &str) -> Result<ReleaseInfo, String> 
         &url,
     ]);
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    silence_console(&mut cmd);
 
     let output = cmd.output().map_err(|e| format!("Network request failed (curl error): {}", e))?;
 
@@ -470,7 +541,7 @@ fn fetch_latest_release(owner: &str, repo: &str) -> Result<ReleaseInfo, String> 
             if name.eq_ignore_ascii_case(EXE_ASSET_NAME) {
                 exe_download_url = download_url.clone();
                 exe_size = size;
-            } else if name.ends_with(".zip") && name.to_lowercase().contains("windows") {
+            } else if is_archive_asset_for_this_platform(name) {
                 zip_download_url = download_url;
                 zip_size = size;
             } else if name.eq_ignore_ascii_case(CHECKSUMS_ASSET_NAME) {
@@ -517,6 +588,28 @@ fn verify_download_checksum(downloaded_path: &Path, release: &ReleaseInfo) -> Re
     }
 
     Ok(expected)
+}
+
+/// True if `name` is the full redistributable archive for the *running* platform.
+///
+/// Releases carry one archive per OS, so each build must ignore the other
+/// platforms' archives rather than offering a Windows .zip to a Linux user.
+fn is_archive_asset_for_this_platform(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    #[cfg(target_os = "windows")]
+    {
+        lower.ends_with(".zip") && lower.contains("windows")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        (lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || lower.ends_with(".appimage"))
+            && lower.contains("linux")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        (lower.ends_with(".tar.gz") || lower.ends_with(".dmg"))
+            && (lower.contains("macos") || lower.contains("darwin"))
+    }
 }
 
 /// Parses a version string like "0.2.0" or "v0.2.1" into (major, minor, patch).
@@ -574,8 +667,58 @@ mod tests {
         assert!(res.is_ok(), "Expected live GitHub release check to succeed: {:?}", res);
         let info = res.unwrap();
         assert!(info.tag_name.starts_with('v') && info.tag_name.len() >= 4, "Invalid tag name: {}", info.tag_name);
-        assert!(info.exe_download_url.is_some(), "Expected crabboy-advance.exe asset");
+        assert!(info.exe_download_url.is_some(), "Expected {} asset", EXE_ASSET_NAME);
         assert!(info.exe_size > 5_000_000, "Expected valid exe asset size");
+    }
+
+    #[test]
+    fn sibling_suffix_handles_extensionless_unix_binaries() {
+        // with_extension() would turn "crabboy-advance" into "crabboy-advance.new"
+        // correctly but mangle "crabboy-advance.exe" into "crabboy-advance.new",
+        // losing the .exe. Appending preserves both shapes.
+        let unix = sibling_with_suffix(Path::new("/usr/local/bin/crabboy-advance"), ".new");
+        assert_eq!(unix, PathBuf::from("/usr/local/bin/crabboy-advance.new"));
+
+        let win = sibling_with_suffix(Path::new("/tmp/crabboy-advance.exe"), ".old");
+        assert_eq!(win, PathBuf::from("/tmp/crabboy-advance.exe.old"));
+    }
+
+    #[test]
+    fn archive_asset_matches_only_this_platform() {
+        // Whatever platform the tests run on, the other platforms' archives
+        // must never be selected as this build's update archive.
+        #[cfg(target_os = "linux")]
+        {
+            assert!(is_archive_asset_for_this_platform("CrabBoy-linux-x86_64.tar.gz"));
+            assert!(is_archive_asset_for_this_platform("CrabBoy-Linux.AppImage"));
+            assert!(!is_archive_asset_for_this_platform("CrabBoy-windows-x64.zip"));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_archive_asset_for_this_platform("CrabBoy-windows-x64.zip"));
+            assert!(!is_archive_asset_for_this_platform("CrabBoy-linux-x86_64.tar.gz"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_archive_asset_for_this_platform("CrabBoy-macos-universal.dmg"));
+            assert!(!is_archive_asset_for_this_platform("CrabBoy-windows-x64.zip"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_executable_sets_user_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("crabboy_chmod_test_{}", std::process::id()));
+        std::fs::write(&path, b"#!/bin/true\n").unwrap();
+        // curl writes downloads as 0644; simulate that starting state.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        mark_executable(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(mode & 0o111, 0o111, "expected exec bits, got {:o}", mode);
     }
 
     #[test]
