@@ -392,13 +392,15 @@ impl Mmu {
             0x026 => self.ppu.bg_pd[0] = val as i16,
             0x028 => self.ppu.bg_x[0] = (self.ppu.bg_x[0] & !0xFFFF) | (val as i32),
             0x02A => {
-                let sign_ext = ((val as i16) as i32) << 16;
+                // BG2X high halfword: only bits 0-11 are meaningful (the reference
+                // point is a 28-bit signed value); sign-extend from bit 11, not bit 15.
+                let sign_ext = (((val & 0x0FFF) as i32) << 20) >> 4;
                 self.ppu.bg_x[0] = (self.ppu.bg_x[0] & 0xFFFF) | sign_ext;
                 self.ppu.bg_x_internal[0] = self.ppu.bg_x[0];
             }
             0x02C => self.ppu.bg_y[0] = (self.ppu.bg_y[0] & !0xFFFF) | (val as i32),
             0x02E => {
-                let sign_ext = ((val as i16) as i32) << 16;
+                let sign_ext = (((val & 0x0FFF) as i32) << 20) >> 4;
                 self.ppu.bg_y[0] = (self.ppu.bg_y[0] & 0xFFFF) | sign_ext;
                 self.ppu.bg_y_internal[0] = self.ppu.bg_y[0];
             }

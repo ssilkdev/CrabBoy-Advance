@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ppu_hblank_masking_during_vblank() {
+    fn test_ppu_hblank_fires_during_vblank() {
         use gba_simulator::gba::ppu::Ppu;
 
         let mut ppu = Ppu::new();
@@ -1183,14 +1183,20 @@ mod tests {
         assert!(dma_hblank, "HBlank DMA must fire on active scanlines");
         assert_eq!(ppu.dispstat & 2, 2, "HBlank flag must be set during active scanlines");
 
-        // Step during VBlank (e.g. scanline 180)
+        // Step during VBlank (e.g. scanline 180). Real GBA hardware asserts the
+        // HBlank flag/IRQ/DMA on every one of the 228 scanlines, including the
+        // 68 VBlank lines -- it is not suppressed just because the frame is in
+        // VBlank. Clear the leftover HBlank flag from the previous scanline
+        // first so this exercises a fresh rising edge, same as the real
+        // per-scanline cycle would.
         ppu.vcount = 180;
         ppu.dispstat |= 1; // In VBlank
+        ppu.dispstat &= !2; // Start this scanline outside HBlank
         ppu.cycle_in_scanline = 0;
         let (_, irq_hblank, _, _, dma_hblank) = ppu.step(1000);
-        assert!(!irq_hblank, "HBlank IRQ must NOT fire during VBlank (vcount >= 160)");
-        assert!(!dma_hblank, "HBlank DMA must NOT fire during VBlank");
-        assert_eq!(ppu.dispstat & 2, 0, "HBlank flag must NOT be set during VBlank");
+        assert!(irq_hblank, "HBlank IRQ must still fire during VBlank (vcount >= 160)");
+        assert!(dma_hblank, "HBlank DMA must still fire during VBlank");
+        assert_eq!(ppu.dispstat & 2, 2, "HBlank flag must still be set during VBlank");
 
         // Verify scanline 227 clears VBlank flag
         ppu.vcount = 226;

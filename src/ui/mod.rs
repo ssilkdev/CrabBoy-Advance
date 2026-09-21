@@ -775,7 +775,7 @@ impl eframe::App for GbaApp {
 
                 // Software Update Menu Tab
                 let update_status_peek = {
-                    let lock = self.updater.status.lock().unwrap();
+                    let lock = self.updater.status.lock().unwrap_or_else(|e| e.into_inner());
                     lock.clone()
                 };
                 let has_update = matches!(
@@ -880,7 +880,7 @@ impl eframe::App for GbaApp {
 
                     // Gamepad connection status badge
                     if let Some(ref gp_name) = self.gamepad_manager.connected_gamepad_name {
-                        let short_name = if gp_name.len() > 24 { &gp_name[..24] } else { gp_name };
+                        let short_name: String = gp_name.chars().take(24).collect();
                         ui.label(RichText::new(format!("🎮 {}", short_name)).color(Color32::from_rgb(100, 220, 100)).small());
                     } else {
                         ui.label(RichText::new("🎮 No Controller").color(Color32::DARK_GRAY).small());

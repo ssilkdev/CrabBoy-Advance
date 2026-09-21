@@ -93,12 +93,15 @@ impl Rtc {
         if !old_sck && sck {
             match self.state {
                 RtcState::Idle => {
+                    // Unlike ordinary data bytes (LSB-first), the RTC command byte
+                    // is clocked in MSB-first: `0110 bbb r` (magic nibble, 3-bit
+                    // register, read/write flag).
                     self.state = RtcState::Command;
                     self.command = if sio_in { 1 } else { 0 };
                     self.cmd_bits_received = 1;
                 }
                 RtcState::Command => {
-                    self.command |= (if sio_in { 1 } else { 0 }) << self.cmd_bits_received;
+                    self.command = (self.command << 1) | (if sio_in { 1 } else { 0 });
                     self.cmd_bits_received += 1;
                     if self.cmd_bits_received == 8 {
                         self.process_command();
@@ -145,15 +148,16 @@ impl Rtc {
     }
 
     fn process_command(&mut self) {
-        // Bits: [Read flag (1)] [Cmd (3)] [Magic: 0110 (4)]
-        let magic = self.command & 0x0F;
+        // Command byte is clocked in MSB-first as `0110 bbb r`:
+        // Magic (4, high nibble) | Register (3) | Read flag (1, low bit)
+        let magic = (self.command >> 4) & 0x0F;
         if magic != 0x06 {
             self.state = RtcState::Idle;
             return;
         }
 
-        let is_read = (self.command & 0x80) != 0;
-        let cmd = (self.command >> 4) & 0x07;
+        let is_read = (self.command & 0x01) != 0;
+        let cmd = (self.command >> 1) & 0x07;
 
         self.buf_bit_idx = 0;
         self.state = RtcState::TransferData;
@@ -208,7 +212,7 @@ impl Rtc {
     }
 
     fn finish_write(&mut self) {
-        let cmd = (self.command >> 4) & 0x07;
+        let cmd = (self.command >> 1) & 0x07;
         if cmd == 4 {
             self.rtc_control = self.buffer[0];
         }
@@ -290,5 +294,64 @@ impl Rtc {
         self.buffer[4] = bcd_hrs;
         self.buffer[5] = to_bcd(mins);
         self.buffer[6] = to_bcd(secs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds the MSB-first command byte `0110 bbb r` for a given register/read-flag,
+    /// as it would appear serialized bit-by-bit over the wire.
+    fn command_byte(register: u8, is_read: bool) -> u8 {
+        (0x06 << 4) | ((register & 0x07) << 1) | (is_read as u8)
+    }
+
+    #[test]
+    fn command_register_decode_is_not_bit_reversed() {
+        // Every documented register number (0,2,3,4,6) must decode to itself,
+        // not a bit-reversed value. Registers 0 and 2 are palindromic in the
+        // 3-bit field and would pass even with the old buggy LSB-first assembly;
+        // 3, 4, and 6 are not, so they're the ones that catch the regression.
+        for &register in &[0u8, 2, 3, 4, 6] {
+            for &is_read in &[false, true] {
+                let mut rtc = Rtc::new();
+                rtc.command = command_byte(register, is_read);
+                rtc.process_command();
+                let decoded_cmd = (rtc.command >> 1) & 0x07;
+                assert_eq!(
+                    decoded_cmd, register,
+                    "register {} (is_read={}) decoded as {}",
+                    register, is_read, decoded_cmd
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rtc_control_write_then_read_roundtrips() {
+        let mut rtc = Rtc::new();
+
+        // WRITE to RTC_CONTROL (register 4): process_command() puts us in
+        // TransferData with a zeroed buffer ready to receive the incoming byte.
+        rtc.command = command_byte(4, false);
+        rtc.process_command();
+        assert_eq!(rtc.bytes_to_transfer, 1);
+        rtc.buffer[0] = 0x40; // 24-hour mode
+        rtc.finish_write();
+        assert_eq!(rtc.rtc_control, 0x40);
+
+        // READ from RTC_CONTROL (register 4) should reflect the value just written.
+        rtc.command = command_byte(4, true);
+        rtc.process_command();
+        assert_eq!(rtc.buffer[0], 0x40);
+    }
+
+    #[test]
+    fn magic_nibble_still_gates_unknown_commands() {
+        let mut rtc = Rtc::new();
+        rtc.command = 0x00; // magic nibble wrong (not 0110)
+        rtc.process_command();
+        assert_eq!(rtc.state, RtcState::Idle);
     }
 }

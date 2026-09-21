@@ -118,17 +118,15 @@ impl Ppu {
         let old_hblank = (self.dispstat & 2) != 0;
         let in_hblank = self.cycle_in_scanline >= HDRAW_CYCLES;
 
-        if self.vcount < 160 {
-            if !old_hblank && in_hblank {
-                self.dispstat |= 2;
-                if (self.dispstat & (1 << 4)) != 0 {
-                    irq_hblank = true;
-                }
-                dma_hblank = true;
+        // HBlank flag/IRQ/DMA fire on all 228 scanlines, including during VBlank
+        // (lines 160-227) -- real hardware does not suppress HBlank there, and
+        // several games rely on HBlank DMA/IRQ continuing through VBlank.
+        if !old_hblank && in_hblank {
+            self.dispstat |= 2;
+            if (self.dispstat & (1 << 4)) != 0 {
+                irq_hblank = true;
             }
-        } else {
-            // During VBlank (lines 160..227), HBlank flag is not set on GBA
-            self.dispstat &= !2;
+            dma_hblank = true;
         }
 
         if self.cycle_in_scanline >= SCANLINE_CYCLES {
@@ -287,6 +285,7 @@ impl Ppu {
                         y,
                         &self.vram[..],
                         &self.palette_ram[..],
+                        self.bgcnt[2],
                         &mut bg_layer_bufs[2],
                     );
                 }

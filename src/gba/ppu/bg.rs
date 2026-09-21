@@ -189,8 +189,10 @@ pub fn render_bitmap_bg(
     y: u32,
     vram: &[u8],
     palette_ram: &[u8],
+    priority: u16,
     line_buf: &mut [Pixel; 240],
 ) {
+    let priority = (priority & 3) as u8;
     match mode {
         3 => {
             // 240x160 15-bit color
@@ -202,7 +204,7 @@ pub fn render_bitmap_bg(
                     line_buf[x] = Pixel {
                         color,
                         layer: 2, // BG2
-                        priority: 2,
+                        priority,
                         is_transparent: false,
                         is_obj_alpha: false,
                     };
@@ -224,7 +226,7 @@ pub fn render_bitmap_bg(
                             line_buf[x] = Pixel {
                                 color,
                                 layer: 2,
-                                priority: 2,
+                                priority,
                                 is_transparent: false,
                                 is_obj_alpha: false,
                             };
@@ -245,7 +247,7 @@ pub fn render_bitmap_bg(
                         line_buf[x] = Pixel {
                             color,
                             layer: 2,
-                            priority: 2,
+                            priority,
                             is_transparent: false,
                             is_obj_alpha: false,
                         };

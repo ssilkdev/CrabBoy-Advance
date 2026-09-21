@@ -40,7 +40,7 @@ impl UpdaterDialog {
         let mut is_open = self.is_open;
         let mut close_dialog = false;
         let status = {
-            let lock = updater.status.lock().unwrap();
+            let lock = updater.status.lock().unwrap_or_else(|e| e.into_inner());
             lock.clone()
         };
 
