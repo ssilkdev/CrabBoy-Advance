@@ -1,3 +1,15 @@
+> **Implementation status (2026-09-21):** Phase 0 (security), all of Phase 1
+> (critical correctness), and most of Phase 2 (major) are implemented and
+> merged — see commits `cd6e40f`, `f4b926d`, `a01a4e5`, `8820077` and later on
+> `main`. Remaining open items: 3.1 (LDM/STM `^` user-bank transfer), 3.2
+> (SWI HLE exception entry, likely intentional per the HLE design), 3.6
+> (pitch-preserved decimate fast-forward mode), affine BG/sprite mosaic
+> (scoped out of the mosaic implementation — see commit `8820077`), and most
+> of the Phase 3 minor/cleanup table (a few items from it were folded into
+> the commits above: dead DMA code removal, dead sharpening-function
+> dedup, gamepad-name panic, live-network test opt-in, RTC regression
+> tests). Cross-check `git log` before re-doing any item below.
+
 # CrabBoy Advance — Bug Fix & Enhancement Design Document
 
 **Audience:** an AI coding agent implementing fixes against this repository.

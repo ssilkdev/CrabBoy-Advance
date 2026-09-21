@@ -407,60 +407,23 @@ pub fn apply_nvidia_adaptive_sharpening_image(
     }
 }
 
-/// Applies NVIDIA-style Contrast-Adaptive Sharpening (NIS / CAS)
-/// Detects edge gradients and enhances high frequencies without halo artifacts.
+/// Applies NVIDIA-style Contrast-Adaptive Sharpening (NIS / CAS) to a raw
+/// framebuffer. Populates `image_buffer` from `raw_fb` and delegates to
+/// `apply_nvidia_adaptive_sharpening_image` for the actual filter, so the
+/// two entry points share one implementation instead of maintaining two
+/// independently-drifting copies of the same algorithm.
 pub fn apply_nvidia_adaptive_sharpening(
     raw_fb: &[u32; 240 * 160],
     image_buffer: &mut ColorImage,
     sharpness: f32,
 ) {
-    let s = sharpness.clamp(0.0, 1.0);
-
-    for y in 0..160 {
-        let y_top = if y > 0 { y - 1 } else { y };
-        let y_bot = if y < 159 { y + 1 } else { y };
-
-        for x in 0..240 {
-            let x_left = if x > 0 { x - 1 } else { x };
-            let x_right = if x < 239 { x + 1 } else { x };
-
-            let c = raw_fb[y * 240 + x];
-            let n = raw_fb[y_top * 240 + x];
-            let s_pix = raw_fb[y_bot * 240 + x];
-            let w = raw_fb[y * 240 + x_left];
-            let e = raw_fb[y * 240 + x_right];
-
-            let (cr, cg, cb) = ((c & 0xFF) as f32, ((c >> 8) & 0xFF) as f32, ((c >> 16) & 0xFF) as f32);
-            let (nr, ng, nb) = ((n & 0xFF) as f32, ((n >> 8) & 0xFF) as f32, ((n >> 16) & 0xFF) as f32);
-            let (sr, sg, sb) = ((s_pix & 0xFF) as f32, ((s_pix >> 8) & 0xFF) as f32, ((s_pix >> 16) & 0xFF) as f32);
-            let (wr, wg, wb) = ((w & 0xFF) as f32, ((w >> 8) & 0xFF) as f32, ((w >> 16) & 0xFF) as f32);
-            let (er, eg, eb) = ((e & 0xFF) as f32, ((e >> 8) & 0xFF) as f32, ((e >> 16) & 0xFF) as f32);
-
-            let sharpen_channel = |c: f32, n: f32, s_val: f32, w: f32, e: f32| -> u8 {
-                let min_val = c.min(n).min(s_val).min(w).min(e);
-                let max_val = c.max(n).max(s_val).max(w).max(e);
-                let delta = max_val - min_val;
-
-                if delta < 1.0 || s <= 0.001 {
-                    return c.round().clamp(0.0, 255.0) as u8;
-                }
-
-                // NVIDIA CAS-style adaptive weight
-                let amp = ((min_val.min(255.0 - max_val)) / (delta + 1.0)).sqrt();
-                let weight = -s * 0.25 * amp;
-                let sum_neighbors = n + s_val + w + e;
-                let sharp = (c + weight * sum_neighbors) / (1.0 + 4.0 * weight);
-
-                sharp.clamp(min_val, max_val).clamp(0.0, 255.0).round() as u8
-            };
-
-            let r = sharpen_channel(cr, nr, sr, wr, er);
-            let g = sharpen_channel(cg, ng, sg, wg, eg);
-            let b = sharpen_channel(cb, nb, sb, wb, eb);
-
-            image_buffer.pixels[y * 240 + x] = Color32::from_rgb(r, g, b);
-        }
+    for (i, &pixel) in raw_fb.iter().enumerate() {
+        let r = (pixel & 0xFF) as u8;
+        let g = ((pixel >> 8) & 0xFF) as u8;
+        let b = ((pixel >> 16) & 0xFF) as u8;
+        image_buffer.pixels[i] = Color32::from_rgb(r, g, b);
     }
+    apply_nvidia_adaptive_sharpening_image(image_buffer, sharpness);
 }
 
 /// Applies authentic GBA LCD color and gamma correction to rebalance hyper-saturated palettes for modern displays.
