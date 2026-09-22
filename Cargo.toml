@@ -1,6 +1,6 @@
 [package]
 name = "crabboy-advance"
-version = "0.5.0"
+version = "5.1.0"
 edition = "2021"
 description = "CrabBoy Advance: Cycle-accurate Game Boy Advance emulator in Rust with 5.1 Spatial Audio, xBRZ/NIS upscaling, TAS Engine, and Hardware Sensors"
 license = "MIT"
@@ -28,6 +28,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
+# Inflate for PDF FlateDecode content streams (game-guide ingestion). Already
+# in the graph transitively via `png`; naming it here keeps the guide parser
+# free of a full PDF crate and its dozens of transitive dependencies.
+miniz_oxide = "0.8"
 
 # winres embeds a PE .rsrc section (icon + version info) and is meaningful only
 # when the TARGET is Windows. Scoping it here keeps it out of the dependency
