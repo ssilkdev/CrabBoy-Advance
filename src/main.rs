@@ -1,11 +1,14 @@
 //! Game Boy Advance Simulator - Application Entry Point
 //! Supports interactive GUI and headless AI Agent diagnostic execution.
 
+pub mod dmg;
 pub mod gba;
 pub mod ui;
 
+use dmg::GameBoy;
 use gba::diagnostics::{HealthGrade, OverallHealthGrade};
 use gba::Gba;
+use ui::emu_core::ConsoleKind;
 use std::env;
 use std::path::PathBuf;
 use ui::GbaApp;
@@ -33,12 +36,17 @@ fn print_help() {
         r#"🦀 CrabBoy Advance - Next-Generation Game Boy Advance Emulator
 
 USAGE:
-    crabboy-advance [ROM_PATH]                                  Launch GUI emulator
+    crabboy-advance [ROM_PATH]                                  Launch GUI emulator (.gba, .gb, .gbc)
     crabboy-advance <ROM> --ai-play [--ai-endpoint URL]         Launch GUI with the AI Agent already playing
     crabboy-advance --diagnose <ROM> [--frames N] [--output P]  Run headless diagnostics and export report
     crabboy-advance --dump-frame <ROM> [--frame N] [--output P] Run headless to frame N and save PNG screenshot
     crabboy-advance --audit-audio <ROM> [--frames N]            Run headless audio health audit
+    crabboy-advance --gb-serial <GB_ROM> [--frames N]           Run a Game Boy ROM headless and print its link-port output
     crabboy-advance --help                                      Show this help message
+
+GAME BOY / GAME BOY COLOR:
+    .gb and .gbc ROMs are detected by extension and run on the SM83 core.
+    --force-dmg    Run a CGB-enhanced cartridge in original Game Boy mode
 
 OPTIONS:
     --frames <N>   Number of frames to emulate (default: 300)
@@ -156,6 +164,33 @@ fn handle_headless_cli(args: &[String]) {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("frame_{}.png", target_frame)));
 
+        // A .gb/.gbc ROM dumps a native 160x144 PNG from the SM83 core.
+        if ConsoleKind::from_extension(&rom_path) == ConsoleKind::GameBoy {
+            let force_dmg = args.iter().any(|a| a == "--force-dmg");
+            let mut gb = match GameBoy::from_file(&rom_path, force_dmg) {
+                Ok(gb) => gb,
+                Err(e) => {
+                    eprintln!("Failed to load GB ROM '{}': {}", rom_path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            println!(
+                "Stepping to frame {} on '{}' ({})...",
+                target_frame,
+                rom_path.display(),
+                if gb.is_cgb() { "Game Boy Color" } else { "Game Boy" }
+            );
+            for _ in 0..target_frame {
+                gb.run_frame();
+            }
+            if let Err(e) = gb.dump_frame_png(&output_path) {
+                eprintln!("Failed to save frame PNG: {}", e);
+                std::process::exit(1);
+            }
+            println!("Saved frame {} to '{}'.", target_frame, output_path.display());
+            std::process::exit(0);
+        }
+
         let mut gba = Gba::new();
         if let Err(e) = gba.load_rom(&rom_path) {
             eprintln!("Failed to load ROM '{}': {}", rom_path.display(), e);
@@ -243,6 +278,52 @@ fn handle_headless_cli(args: &[String]) {
         } else {
             std::process::exit(0);
         }
+    }
+
+    // 4. Game Boy serial-port capture (test ROM harness)
+    if let Some(pos) = args.iter().position(|a| a == "--gb-serial") {
+        if pos + 1 >= args.len() {
+            eprintln!("Error: --gb-serial requires a ROM path.");
+            std::process::exit(1);
+        }
+        let rom_path = PathBuf::from(&args[pos + 1]);
+        let frames: u64 = get_arg_val(args, "--frames")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        let force_dmg = args.iter().any(|a| a == "--force-dmg");
+
+        let mut gb = match GameBoy::from_file(&rom_path, force_dmg) {
+            Ok(gb) => gb,
+            Err(e) => {
+                eprintln!("Failed to load GB ROM '{}': {}", rom_path.display(), e);
+                std::process::exit(1);
+            }
+        };
+        println!(
+            "Running '{}' ({}) for up to {} frames...",
+            rom_path.display(),
+            if gb.is_cgb() { "Game Boy Color" } else { "Game Boy" },
+            frames
+        );
+
+        for _ in 0..frames {
+            gb.run_frame();
+            // Blargg-style suites announce their verdict on the link port;
+            // stop as soon as one appears instead of burning the full budget.
+            if gb.mmu.serial_out.len() > 4 {
+                let s = String::from_utf8_lossy(&gb.mmu.serial_out);
+                if s.contains("Passed") || s.contains("Failed") {
+                    break;
+                }
+            }
+        }
+
+        let out = String::from_utf8_lossy(&gb.mmu.serial_out).to_string();
+        println!("--- serial output ---\n{}\n---------------------", out);
+        if out.contains("Failed") {
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 }
 

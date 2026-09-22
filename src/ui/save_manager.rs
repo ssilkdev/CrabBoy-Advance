@@ -1,6 +1,6 @@
 //! Persistent Multi-Slot Save State Manager with Disk Serialization
 
-use crate::gba::Gba;
+use crate::ui::emu_core::SnapshotCore;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -47,7 +47,12 @@ impl SaveStateManager {
         self.saves_dir.join(format!("{}_slot{}.state", safe_name, slot))
     }
 
-    pub fn save_slot(&mut self, slot: usize, gba: &Gba, rom_name: &str) -> Result<(), String> {
+    pub fn save_slot<C: SnapshotCore + ?Sized>(
+        &mut self,
+        slot: usize,
+        gba: &C,
+        rom_name: &str,
+    ) -> Result<(), String> {
         let slot_idx = slot.min(9);
         let data = gba.save_state();
 
@@ -62,7 +67,12 @@ impl SaveStateManager {
         Ok(())
     }
 
-    pub fn load_slot(&mut self, slot: usize, gba: &mut Gba, rom_name: &str) -> Result<(), String> {
+    pub fn load_slot<C: SnapshotCore + ?Sized>(
+        &mut self,
+        slot: usize,
+        gba: &mut C,
+        rom_name: &str,
+    ) -> Result<(), String> {
         let slot_idx = slot.min(9);
 
         // Check memory cache first

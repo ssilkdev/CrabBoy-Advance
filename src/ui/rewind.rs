@@ -1,6 +1,6 @@
 //! Real-Time Rewind / Time-Travel Engine for GBA Emulation
 
-use crate::gba::Gba;
+use crate::ui::emu_core::SnapshotCore;
 use std::collections::VecDeque;
 
 pub struct RewindManager {
@@ -27,7 +27,7 @@ impl RewindManager {
     }
 
     /// Records a save state snapshot at regular frame intervals during normal emulation.
-    pub fn record_frame(&mut self, gba: &Gba) {
+    pub fn record_frame<C: SnapshotCore + ?Sized>(&mut self, gba: &C) {
         self.frame_counter += 1;
         if self.frame_counter.is_multiple_of(self.capture_interval) {
             let state = gba.save_state();
@@ -40,7 +40,7 @@ impl RewindManager {
 
     /// Steps emulation one snapshot backwards in time.
     /// Returns true if a state was successfully restored, false if the buffer is empty.
-    pub fn rewind_step(&mut self, gba: &mut Gba) -> bool {
+    pub fn rewind_step<C: SnapshotCore + ?Sized>(&mut self, gba: &mut C) -> bool {
         if let Some(state) = self.states.pop_back() {
             gba.load_state(&state)
         } else {

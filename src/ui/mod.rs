@@ -7,6 +7,7 @@ pub mod bezels;
 pub mod cheats_dialog;
 pub mod controls;
 pub mod debug;
+pub mod emu_core;
 pub mod gif_recorder;
 pub mod guide_dialog;
 pub mod link_dialog;
@@ -37,9 +38,12 @@ use tas_dialog::TasDialog;
 use updater::UpdateManager;
 use updater_dialog::UpdaterDialog;
 
+use crate::dmg::mmu::GbKey;
+use crate::dmg::GameBoy;
 use crate::gba::apu::SurroundMode;
 use crate::gba::keypad::Key;
 use crate::gba::Gba;
+use emu_core::ConsoleKind;
 use controls::{handle_input, GamepadManager, KeyBindings};
 use debug::DebugWindows;
 use rewind::RewindManager;
@@ -52,6 +56,18 @@ use std::time::{Duration, Instant};
 
 pub struct GbaApp {
     pub gba: Gba,
+    /// Game Boy / Game Boy Color core, live only while a .gb/.gbc ROM is
+    /// loaded. The GBA core stays resident but idle so every dialog that
+    /// borrows `&mut self.gba` keeps compiling unchanged.
+    pub gb: Option<GameBoy>,
+    pub console: ConsoleKind,
+    /// GB output letterboxed into a GBA-sized buffer, so the screen
+    /// renderer, GIF recorder, screenshots and the ambient-glow sampler all
+    /// consume one framebuffer shape regardless of the active core.
+    gb_framebuffer: Box<[u32; 240 * 160]>,
+    /// Run CGB-enhanced cartridges in original Game Boy mode. Takes effect
+    /// on the next ROM load, since the model is fixed at construction.
+    pub gb_force_dmg: bool,
     pub screen_renderer: ScreenRenderer,
     pub debug_windows: DebugWindows,
     pub key_bindings: KeyBindings,
@@ -116,19 +132,11 @@ impl GbaApp {
         visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(48, 52, 64));
         cc.egui_ctx.set_visuals(visuals);
 
-        let mut gba = Gba::new();
-        let mut loaded_rom_name = "No ROM Loaded".to_string();
-
-        if let Some(ref path) = initial_rom {
-            if let Ok(()) = gba.load_rom(path) {
-                loaded_rom_name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                log::info!("Successfully loaded initial ROM: {}", loaded_rom_name);
-            }
-        }
+        // The ROM (of either console) is loaded after construction through
+        // load_rom_from_path, so there is exactly one dispatch site deciding
+        // which core a file goes to.
+        let gba = Gba::new();
+        let loaded_rom_name = "No ROM Loaded".to_string();
 
         // Clean up any lingering backup executable from previous updates
         UpdateManager::cleanup_old_exe();
@@ -137,8 +145,12 @@ impl GbaApp {
         let updater = UpdateManager::new();
         updater.check_for_updates_async();
 
-        Self {
+        let mut app = Self {
             gba,
+            gb: None,
+            console: ConsoleKind::Gba,
+            gb_framebuffer: Box::new([0xFF00_0000; 240 * 160]),
+            gb_force_dmg: false,
             screen_renderer: ScreenRenderer::new(),
             debug_windows: DebugWindows::default(),
             key_bindings: KeyBindings::default(),
@@ -184,7 +196,12 @@ impl GbaApp {
             show_rtc_dialog: false,
             show_about_dialog: false,
             loaded_rom_name,
+        };
+
+        if let Some(ref path) = initial_rom {
+            app.load_rom_from_path(path);
         }
+        app
     }
 
     pub fn take_screenshot(&mut self) {
@@ -192,7 +209,7 @@ impl GbaApp {
         let res = if self.screenshot_enhanced {
             screenshot::save_color_image(&path, self.screen_renderer.last_image())
         } else {
-            screenshot::save_raw_framebuffer(&path, self.gba.get_framebuffer())
+            screenshot::save_raw_framebuffer(&path, self.display_framebuffer())
         };
 
         match res {
@@ -201,20 +218,135 @@ impl GbaApp {
         }
     }
 
+    /// Single dispatch point for loading a ROM of either console. The file
+    /// extension picks the core (see `ConsoleKind::from_extension`); a
+    /// failed load leaves the previously running game untouched.
     pub fn load_rom_from_path(&mut self, path: &Path) {
-        match self.gba.load_rom(path) {
-            Ok(()) => {
-                self.loaded_rom_name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
-            }
-            Err(e) => {
-                self.set_toast(format!("Failed to load ROM: {}", e));
-            }
+        let kind = ConsoleKind::from_extension(path);
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        match kind {
+            ConsoleKind::GameBoy => match GameBoy::from_file(path, self.gb_force_dmg) {
+                Ok(gb) => {
+                    let model = if gb.is_cgb() { "Game Boy Color" } else { "Game Boy" };
+                    let title = gb.mmu.cart.title.clone();
+                    self.gb = Some(gb);
+                    self.console = ConsoleKind::GameBoy;
+                    self.loaded_rom_name = name;
+                    self.rewind_manager.clear();
+                    self.set_toast(format!("Loaded {} ({}): {}", self.loaded_rom_name, model, title));
+                }
+                Err(e) => self.set_toast(format!("Failed to load GB ROM: {}", e)),
+            },
+            ConsoleKind::Gba => match self.gba.load_rom(path) {
+                Ok(()) => {
+                    self.gb = None;
+                    self.console = ConsoleKind::Gba;
+                    self.loaded_rom_name = name;
+                    self.rewind_manager.clear();
+                    self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
+                }
+                Err(e) => self.set_toast(format!("Failed to load ROM: {}", e)),
+            },
         }
+    }
+
+    /// True while a Game Boy / Game Boy Color ROM is the active core.
+    pub fn is_gb_mode(&self) -> bool {
+        self.gb.is_some()
+    }
+
+    /// Refresh `gb_framebuffer` from the Game Boy core. Called once per UI
+    /// pass before anything reads the display buffer, so consumers can take
+    /// a plain field reference (which keeps egui's disjoint-borrow patterns
+    /// working) instead of a &mut self accessor.
+    fn sync_display_framebuffer(&mut self) {
+        if let Some(ref gb) = self.gb {
+            let src = gb.framebuffer_gba_sized();
+            self.gb_framebuffer.copy_from_slice(&src);
+        }
+    }
+
+    /// The framebuffer to display, always in GBA dimensions. For a GB game
+    /// this is the 160x144 image letterboxed into 240x160.
+    fn display_framebuffer(&self) -> &[u32; 240 * 160] {
+        if self.gb.is_some() {
+            &self.gb_framebuffer
+        } else {
+            self.gba.get_framebuffer()
+        }
+    }
+
+    fn save_active_slot(&mut self, slot: usize) -> Result<(), String> {
+        let name = self.loaded_rom_name.clone();
+        match self.gb {
+            Some(ref gb) => self.save_manager.save_slot(slot, gb, &name),
+            None => self.save_manager.save_slot(slot, &self.gba, &name),
+        }
+    }
+
+    fn load_active_slot(&mut self, slot: usize) -> Result<(), String> {
+        let name = self.loaded_rom_name.clone();
+        match self.gb {
+            Some(ref mut gb) => self.save_manager.load_slot(slot, gb, &name),
+            None => self.save_manager.load_slot(slot, &mut self.gba, &name),
+        }
+    }
+
+    fn record_rewind_frame(&mut self) {
+        match self.gb {
+            Some(ref gb) => self.rewind_manager.record_frame(gb),
+            None => self.rewind_manager.record_frame(&self.gba),
+        }
+    }
+
+    fn rewind_active(&mut self) {
+        match self.gb {
+            Some(ref mut gb) => self.rewind_manager.rewind_step(gb),
+            None => self.rewind_manager.rewind_step(&mut self.gba),
+        };
+    }
+
+    /// Run one frame on whichever core is active.
+    fn run_active_frame(&mut self) {
+        match self.gb {
+            Some(ref mut gb) => gb.run_frame(),
+            None => self.gba.run_frame(),
+        }
+    }
+
+    fn reset_active(&mut self) {
+        match self.gb {
+            Some(ref mut gb) => gb.reset(),
+            None => self.gba.reset(),
+        }
+    }
+
+    fn active_frame_counter(&self) -> u64 {
+        match self.gb {
+            Some(ref gb) => gb.frame_counter,
+            None => self.gba.frame_counter,
+        }
+    }
+
+    /// GBA keypad events mapped onto the Game Boy's 8-button pad. L and R
+    /// have no Game Boy equivalent and are dropped.
+    fn gb_key_for(key: Key) -> Option<GbKey> {
+        Some(match key {
+            Key::A => GbKey::A,
+            Key::B => GbKey::B,
+            Key::Select => GbKey::Select,
+            Key::Start => GbKey::Start,
+            Key::Right => GbKey::Right,
+            Key::Left => GbKey::Left,
+            Key::Up => GbKey::Up,
+            Key::Down => GbKey::Down,
+            Key::L | Key::R => return None,
+        })
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -286,7 +418,14 @@ impl eframe::App for GbaApp {
             key_events.push((key, pressed));
         });
         for (k, p) in key_events {
-            self.gba.mmu.keypad.set_key_state(k, p);
+            match self.gb {
+                Some(ref mut gb) => {
+                    if let Some(gk) = Self::gb_key_for(k) {
+                        gb.set_key(gk, p);
+                    }
+                }
+                None => self.gba.mmu.keypad.set_key_state(k, p),
+            }
         }
 
         // Fullscreen Toggle (F11 / Alt+Enter / Gamepad Select+Start)
@@ -345,14 +484,14 @@ impl eframe::App for GbaApp {
         }
         if self.gamepad_manager.quick_save_pressed {
             let slot = self.save_manager.active_slot;
-            match self.save_manager.save_slot(slot, &self.gba, &self.loaded_rom_name) {
+            match self.save_active_slot(slot) {
                 Ok(()) => self.set_toast(format!("Saved to Slot {} (Controller)", slot)),
                 Err(e) => self.set_toast(e),
             }
         }
         if self.gamepad_manager.quick_load_pressed {
             let slot = self.save_manager.active_slot;
-            match self.save_manager.load_slot(slot, &mut self.gba, &self.loaded_rom_name) {
+            match self.load_active_slot(slot) {
                 Ok(()) => self.set_toast(format!("Loaded Slot {} (Controller)", slot)),
                 Err(e) => self.set_toast(e),
             }
@@ -365,23 +504,23 @@ impl eframe::App for GbaApp {
                 self.set_toast(if self.is_paused { "Paused" } else { "Resumed" });
             }
             if i.key_pressed(self.key_bindings.reset) && i.modifiers.ctrl {
-                self.gba.reset();
+                self.reset_active();
                 self.rewind_manager.clear();
                 self.set_toast("Reset Emulation");
             }
             if i.key_pressed(self.key_bindings.frame_step) && self.is_paused {
-                self.gba.run_frame();
+                self.run_active_frame();
             }
             if i.key_pressed(self.key_bindings.quick_save) {
                 let slot = self.save_manager.active_slot;
-                match self.save_manager.save_slot(slot, &self.gba, &self.loaded_rom_name) {
+                match self.save_active_slot(slot) {
                     Ok(()) => self.set_toast(format!("Saved to Slot {} (F5)", slot)),
                     Err(e) => self.set_toast(e),
                 }
             }
             if i.key_pressed(self.key_bindings.quick_load) {
                 let slot = self.save_manager.active_slot;
-                match self.save_manager.load_slot(slot, &mut self.gba, &self.loaded_rom_name) {
+                match self.load_active_slot(slot) {
                     Ok(()) => self.set_toast(format!("Loaded Slot {} (F8)", slot)),
                     Err(e) => self.set_toast(e),
                 }
@@ -433,7 +572,7 @@ impl eframe::App for GbaApp {
                 self.set_toast(format!("📐 Aspect Ratio: {}", self.aspect_ratio.display_name()));
             }
             if (i.key_pressed(egui::Key::N) || i.key_pressed(egui::Key::Period)) && self.is_paused {
-                self.gba.run_frame();
+                self.run_active_frame();
             }
         });
 
@@ -476,7 +615,7 @@ impl eframe::App for GbaApp {
         // agent's currently-held buttons. This runs AFTER human/TAS input so
         // the agent wins the pad (unless co-op mode is enabled, in which case
         // its buttons are OR'd over the human's).
-        self.ai_agent.poll(self.gba.frame_counter);
+        self.ai_agent.poll(self.active_frame_counter());
         if self.ai_agent.enabled {
             self.ai_agent.maybe_request(&self.gba, &self.loaded_rom_name);
             self.ai_agent.apply_inputs(&mut self.gba);
@@ -509,15 +648,25 @@ impl eframe::App for GbaApp {
 
             if self.is_rewinding {
                 while self.frame_accumulator >= target_frame_duration && frames_run < 4 {
-                    self.rewind_manager.rewind_step(&mut self.gba);
+                    self.rewind_active();
+                    self.sync_display_framebuffer();
                     self.frame_accumulator -= target_frame_duration;
                     frames_run += 1;
                 }
             } else {
                 while self.frame_accumulator >= target_frame_duration && frames_run < 4 {
-                    self.gba.run_frame();
-                    self.rewind_manager.record_frame(&self.gba);
-                    self.gif_recorder.capture_frame(self.gba.get_framebuffer());
+                    self.run_active_frame();
+                    self.sync_display_framebuffer();
+                    self.record_rewind_frame();
+                    // Bind the frame first: `display_framebuffer` borrows
+                    // `self`, which would otherwise conflict with the
+                    // recorder's &mut self borrow in the same expression.
+                    let frame = if self.gb.is_some() {
+                        &*self.gb_framebuffer
+                    } else {
+                        self.gba.get_framebuffer()
+                    };
+                    self.gif_recorder.capture_frame(frame);
                     self.frame_accumulator -= target_frame_duration;
                     frames_run += 1;
                     self.emulated_frames += 1;
@@ -539,10 +688,16 @@ impl eframe::App for GbaApp {
             self.ai_agent.tick(frames_run as u32);
         }
 
-        self.gba.mmu.apu.audio_output.set_fast_forwarding(is_turbo || effective_speed > 1);
+        let ff = is_turbo || effective_speed > 1;
+        match self.gb {
+            Some(ref mut gb) => gb.mmu.apu.audio_output.set_fast_forwarding(ff),
+            None => self.gba.mmu.apu.audio_output.set_fast_forwarding(ff),
+        }
 
         // Poll Pokémon party periodically if companion is active
-        if self.pokemon_companion.is_open && self.emulated_frames.is_multiple_of(30) {
+        // The companion reads GBA-specific party structures out of EWRAM, so
+        // it has no meaning while a Game Boy ROM is loaded.
+        if self.gb.is_none() && self.pokemon_companion.is_open && self.emulated_frames.is_multiple_of(30) {
             if let Some(ref cart) = self.gba.mmu.cartridge {
                 self.pokemon_companion.poll_party_memory(&self.gba.mmu, &cart.game_code);
             }
@@ -568,7 +723,9 @@ impl eframe::App for GbaApp {
                     if ui.button("Open ROM...").clicked() {
                         ui.close_menu();
                         if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Game ROM", &["gba", "gb", "gbc", "bin"])
                             .add_filter("GBA ROM", &["gba", "bin"])
+                            .add_filter("Game Boy / Color", &["gb", "gbc"])
                             .pick_file()
                         {
                             self.load_rom_from_path(&path);
@@ -576,7 +733,7 @@ impl eframe::App for GbaApp {
                     }
                     if ui.button("Reset (Ctrl+R)").clicked() {
                         ui.close_menu();
-                        self.gba.reset();
+                        self.reset_active();
                         self.rewind_manager.clear();
                         self.set_toast("Emulation Reset");
                     }
@@ -584,7 +741,7 @@ impl eframe::App for GbaApp {
                     if ui.button(format!("Quick Save State - Slot {} (F5)", self.save_manager.active_slot)).clicked() {
                         ui.close_menu();
                         let slot = self.save_manager.active_slot;
-                        match self.save_manager.save_slot(slot, &self.gba, &self.loaded_rom_name) {
+                        match self.save_active_slot(slot) {
                             Ok(()) => self.set_toast(format!("Saved to Slot {}", slot)),
                             Err(e) => self.set_toast(e),
                         }
@@ -592,7 +749,7 @@ impl eframe::App for GbaApp {
                     if ui.button(format!("Quick Load State - Slot {} (F8)", self.save_manager.active_slot)).clicked() {
                         ui.close_menu();
                         let slot = self.save_manager.active_slot;
-                        match self.save_manager.load_slot(slot, &mut self.gba, &self.loaded_rom_name) {
+                        match self.load_active_slot(slot) {
                             Ok(()) => self.set_toast(format!("Loaded Slot {}", slot)),
                             Err(e) => self.set_toast(e),
                         }
@@ -616,9 +773,17 @@ impl eframe::App for GbaApp {
                     ui.separator();
                     if ui.button("Save Battery (.sav)").clicked() {
                         ui.close_menu();
-                        if let Some(ref mut cart) = self.gba.mmu.cartridge {
-                            cart.save.sync_to_disk();
-                            self.set_toast("Battery Save Synced to Disk");
+                        match self.gb {
+                            Some(ref mut gb) => {
+                                gb.mmu.cart.sync_to_disk();
+                                self.set_toast("Battery Save Synced to Disk");
+                            }
+                            None => {
+                                if let Some(ref mut cart) = self.gba.mmu.cartridge {
+                                    cart.save.sync_to_disk();
+                                    self.set_toast("Battery Save Synced to Disk");
+                                }
+                            }
                         }
                     }
                     ui.separator();
@@ -635,7 +800,7 @@ impl eframe::App for GbaApp {
                     }
                     if ui.button("Frame Step (F)").clicked() {
                         if self.is_paused {
-                            self.gba.run_frame();
+                            self.run_active_frame();
                         }
                         ui.close_menu();
                     }
@@ -751,6 +916,51 @@ impl eframe::App for GbaApp {
                     }
                     let hw_channels = self.gba.mmu.apu.audio_output.hardware_channels();
                     ui.label(RichText::new(format!("Hardware Channels Detected: {}", hw_channels)).weak().small());
+                });
+
+                ui.menu_button("Game Boy", |ui| {
+                    match self.gb {
+                        Some(ref gb) => {
+                            let model = if gb.is_cgb() { "Game Boy Color" } else { "Game Boy (DMG)" };
+                            ui.label(RichText::new(format!("Running: {}", model)).strong());
+                            ui.label(format!("Cartridge: {}", gb.mmu.cart.title));
+                            ui.label(format!("Mapper: {:?}", gb.mmu.cart.mbc));
+                            ui.label(format!(
+                                "ROM banks: {} | RAM: {} KiB{}",
+                                gb.mmu.cart.rom_banks,
+                                gb.mmu.cart.ram.len() / 1024,
+                                if gb.mmu.cart.has_battery { " (battery)" } else { "" }
+                            ));
+                            if gb.mmu.double_speed {
+                                ui.label(RichText::new("CGB double-speed active").weak());
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("No Game Boy ROM loaded").weak());
+                            ui.label("Open a .gb or .gbc file to switch cores.");
+                        }
+                    }
+                    ui.separator();
+                    // Boot model is fixed when the system is constructed, so
+                    // changing this only affects the next load.
+                    if ui
+                        .checkbox(&mut self.gb_force_dmg, "Force original Game Boy mode")
+                        .on_hover_text(
+                            "Run CGB-enhanced cartridges through their DMG code path.\n\
+                             Applies on the next ROM load.",
+                        )
+                        .changed()
+                    {
+                        self.set_toast(if self.gb_force_dmg {
+                            "DMG mode: reload the ROM to apply"
+                        } else {
+                            "CGB mode: reload the ROM to apply"
+                        });
+                    }
+                    if ui.button("Reload current ROM").clicked() {
+                        ui.close_menu();
+                        self.set_toast("Use File > Open ROM to reload with the new mode");
+                    }
                 });
 
                 ui.menu_button("Tools", |ui| {
@@ -977,6 +1187,14 @@ impl eframe::App for GbaApp {
                         ui.label(RichText::new("🎮 No Controller").color(Color32::DARK_GRAY).small());
                     }
 
+                    // Console badge: which core is actually executing.
+                    let (badge, badge_col) = match self.gb {
+                        Some(ref gb) if gb.is_cgb() => ("GBC", Color32::from_rgb(120, 200, 255)),
+                        Some(_) => ("GB", Color32::from_rgb(150, 220, 150)),
+                        None => ("GBA", Color32::from_rgb(190, 160, 255)),
+                    };
+                    ui.label(RichText::new(badge).color(badge_col).small().strong());
+
                     ui.label(RichText::new(&self.loaded_rom_name).color(Color32::LIGHT_GRAY).small());
                 });
             });
@@ -1055,9 +1273,14 @@ impl eframe::App for GbaApp {
                 let available_size = ui.available_size();
                 let target_size = self.aspect_ratio.calculate_target_size(available_size, self.scale_mode);
 
+                let frame = if self.gb.is_some() {
+                    &*self.gb_framebuffer
+                } else {
+                    self.gba.get_framebuffer()
+                };
                 let tex = self.screen_renderer.update_framebuffer(
                     ctx,
-                    self.gba.get_framebuffer(),
+                    frame,
                     self.display_filter,
                     self.nvidia_sharpen,
                     self.nvidia_sharpness,
@@ -1070,7 +1293,7 @@ impl eframe::App for GbaApp {
 
                 // Ultrawide Ambient Lighting / Edge Glow Backdrop
                 if self.ultrawide_ambient_glow && x_offset > 16.0 {
-                    let fb = self.gba.get_framebuffer();
+                    let fb = frame;
                     let mut lr = 0u32; let mut lg = 0u32; let mut lb = 0u32;
                     let mut rr = 0u32; let mut rg = 0u32; let mut rb = 0u32;
                     for step in 0..16 {
@@ -1328,13 +1551,13 @@ impl eframe::App for GbaApp {
                             if meta.exists {
                                 ui.label(RichText::new(format!("{} ({} KB)", meta.modified_str, meta.size_bytes / 1024)).color(Color32::LIGHT_GREEN));
                                 if ui.button("Load").clicked() {
-                                    match self.save_manager.load_slot(slot, &mut self.gba, &self.loaded_rom_name) {
+                                    match self.load_active_slot(slot) {
                                         Ok(()) => action_toast = Some(format!("Loaded Slot {}", slot)),
                                         Err(e) => action_toast = Some(e),
                                     }
                                 }
                                 if ui.button("Overwrite").clicked() {
-                                    match self.save_manager.save_slot(slot, &self.gba, &self.loaded_rom_name) {
+                                    match self.save_active_slot(slot) {
                                         Ok(()) => action_toast = Some(format!("Overwrote Slot {}", slot)),
                                         Err(e) => action_toast = Some(e),
                                     }
@@ -1346,7 +1569,7 @@ impl eframe::App for GbaApp {
                             } else {
                                 ui.label(RichText::new("[Empty]").weak());
                                 if ui.button("Save").clicked() {
-                                    match self.save_manager.save_slot(slot, &self.gba, &self.loaded_rom_name) {
+                                    match self.save_active_slot(slot) {
                                         Ok(()) => action_toast = Some(format!("Saved to Slot {}", slot)),
                                         Err(e) => action_toast = Some(e),
                                     }
