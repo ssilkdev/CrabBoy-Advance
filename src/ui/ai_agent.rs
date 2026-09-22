@@ -14,6 +14,7 @@
 use crate::gba::keypad::Key;
 use crate::gba::Gba;
 use crate::gba::{SCREEN_HEIGHT, SCREEN_WIDTH};
+use crate::ui::game_guide::{GuideKind, GuideLibrary};
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -100,6 +101,10 @@ pub struct AgentConfig {
     pub allow_human_coop: bool,
     /// Append every decision to `recordings/ai_session_*.jsonl`.
     pub log_transcript: bool,
+    /// How many guide excerpts to retrieve per decision.
+    pub guide_excerpts: usize,
+    /// Character ceiling on the retrieved guide block in the prompt.
+    pub guide_char_budget: usize,
 }
 
 impl Default for AgentConfig {
@@ -125,6 +130,11 @@ impl Default for AgentConfig {
             max_action_frames: 120,
             allow_human_coop: false,
             log_transcript: true,
+            // Four excerpts at ~900 chars each plus headers fits comfortably
+            // inside a 4k-token prompt alongside the image and still gives the
+            // model a real section of the walkthrough to work from.
+            guide_excerpts: 4,
+            guide_char_budget: 4000,
         }
     }
 }
@@ -174,6 +184,12 @@ pub struct AgentPlan {
     pub actions: Vec<AgentAction>,
     pub latency_ms: u64,
     pub source: PlanSource,
+    /// Free-text note addressed to the user, shown in the chat box.
+    pub say: String,
+    /// Model's self-report on the active mission: progress notes and whether
+    /// it considers the mission finished.
+    pub mission_progress: String,
+    pub mission_complete: bool,
 }
 
 /// One inference request handed to the worker thread.
@@ -181,6 +197,8 @@ struct AgentRequest {
     png: Vec<u8>,
     context: String,
     config: AgentConfig,
+    /// Guide excerpts retrieved for this decision, already formatted.
+    guide_context: Option<String>,
 }
 
 enum AgentResponse {
@@ -207,6 +225,81 @@ impl AgentStatus {
             AgentStatus::Error(e) => format!("Error: {}", e),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Missions & chat
+// ---------------------------------------------------------------------------
+
+/// Who said a line in the chat transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatRole {
+    /// The human, issuing an instruction.
+    User,
+    /// The agent, reporting what it sees/plans.
+    Agent,
+    /// Emulator/system notice (mission accepted, completed, errors).
+    System,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub text: String,
+    /// Emulated frame the line was produced at.
+    pub frame: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissionState {
+    Active,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// A user instruction such as "Complete the first trainer badge".
+///
+/// A mission is stronger than the standing objective: while one is active it
+/// is the agent's primary goal, it drives guide retrieval, and the model is
+/// asked to report when it is finished so the UI can close it out.
+#[derive(Clone, Debug)]
+pub struct Mission {
+    pub text: String,
+    pub state: MissionState,
+    pub started_frame: u64,
+    pub decisions: u32,
+    /// Model's own running notes on progress, refreshed each decision.
+    pub progress: String,
+}
+
+impl Mission {
+    pub fn new(text: String, frame: u64) -> Self {
+        Self {
+            text,
+            state: MissionState::Active,
+            started_frame: frame,
+            decisions: 0,
+            progress: String::new(),
+        }
+    }
+}
+
+/// Progress of a background web-guide import.
+#[derive(Clone, Debug)]
+pub enum WebImportProgress {
+    Fetching { done: usize, total: usize, label: String },
+    Done(Box<crate::ui::web_guide::WebGuide>),
+    Failed(String),
+}
+
+/// Handle to an in-flight web-guide import.
+pub struct WebImport {
+    pub url: String,
+    pub done: usize,
+    pub total: usize,
+    pub label: String,
+    rx: std::sync::mpsc::Receiver<WebImportProgress>,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +341,20 @@ pub struct AiAgent {
     pub last_probe: Option<Result<String, String>>,
     probe_result: Arc<Mutex<Option<Result<String, String>>>>,
     probe_in_flight: bool,
+
+    // -- Missions, chat and guide knowledge ------------------------------
+    /// Uploaded walkthroughs, indexed for retrieval.
+    pub guides: GuideLibrary,
+    /// In-flight web-guide download, if any.
+    pub web_import: Option<WebImport>,
+    /// Oldest-first conversation with the user.
+    pub chat: Vec<ChatMessage>,
+    /// The instruction currently being pursued, if any.
+    pub mission: Option<Mission>,
+    /// Missions already closed out, newest last.
+    pub mission_history: Vec<Mission>,
+    /// Guide excerpt citations used for the most recent decision.
+    pub last_guide_citations: Vec<String>,
 }
 
 impl Default for AiAgent {
@@ -283,6 +390,255 @@ impl AiAgent {
             last_probe: None,
             probe_result: Arc::new(Mutex::new(None)),
             probe_in_flight: false,
+            guides: GuideLibrary::new(),
+            web_import: None,
+            chat: Vec::new(),
+            mission: None,
+            mission_history: Vec::new(),
+            last_guide_citations: Vec::new(),
+        }
+    }
+
+    // -- Chat & missions ---------------------------------------------------
+
+    fn push_chat(&mut self, role: ChatRole, text: impl Into<String>, frame: u64) {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.chat.push(ChatMessage {
+            role,
+            text,
+            frame,
+        });
+        // The chat is a rolling window: it is rendered every frame and fed
+        // (in part) back into the prompt, so it must not grow without bound.
+        while self.chat.len() > 200 {
+            self.chat.remove(0);
+        }
+    }
+
+    /// Records a system notice in the chat.
+    pub fn system_note(&mut self, text: impl Into<String>, frame: u64) {
+        self.push_chat(ChatRole::System, text, frame);
+    }
+
+    /// Accepts a user instruction such as "Complete the first trainer badge"
+    /// and makes it the agent's active mission.
+    ///
+    /// Any in-flight plan is dropped so the new instruction takes effect on
+    /// the very next decision instead of after the old queue drains.
+    pub fn submit_instruction(&mut self, text: &str, frame: u64) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.push_chat(ChatRole::User, text, frame);
+
+        if let Some(prev) = self.mission.take() {
+            if prev.state == MissionState::Active {
+                let mut prev = prev;
+                prev.state = MissionState::Cancelled;
+                self.push_chat(
+                    ChatRole::System,
+                    format!("Superseded previous mission: {}", prev.text),
+                    frame,
+                );
+                self.mission_history.push(prev);
+            }
+        }
+
+        self.mission = Some(Mission::new(text.to_string(), frame));
+        self.push_chat(ChatRole::System, format!("Mission accepted: {}", text), frame);
+
+        // Re-plan immediately against the new instruction.
+        self.queue.clear();
+        self.current = None;
+        self.frames_since_decision = u32::MAX;
+
+        if !self.enabled {
+            self.push_chat(
+                ChatRole::System,
+                "Agent is stopped — press ▶ Start Agent to begin work on this mission.",
+                frame,
+            );
+        }
+    }
+
+    pub fn cancel_mission(&mut self, frame: u64) {
+        if let Some(mut m) = self.mission.take() {
+            m.state = MissionState::Cancelled;
+            self.push_chat(ChatRole::System, format!("Mission cancelled: {}", m.text), frame);
+            self.mission_history.push(m);
+            self.queue.clear();
+            self.current = None;
+        }
+    }
+
+    pub fn mission_label(&self) -> Option<String> {
+        self.mission.as_ref().map(|m| m.text.clone())
+    }
+
+    /// Starts a background fetch of a web guide.
+    ///
+    /// Runs on a worker thread: a multi-part wiki walkthrough is ~22 HTTP
+    /// requests, which would freeze the emulator for seconds if done inline.
+    pub fn start_web_guide_import(&mut self, url: String, follow_subpages: bool, max_pages: usize) {
+        if self.web_import.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let timeout = self.config.request_timeout_secs.max(10);
+        let fetch_url = url.clone();
+        std::thread::Builder::new()
+            .name("guide-import".into())
+            .spawn(move || {
+                let tx2 = tx.clone();
+                let res = crate::ui::web_guide::import_web_guide(
+                    &fetch_url,
+                    timeout,
+                    follow_subpages,
+                    max_pages,
+                    |done, total, label| {
+                        let _ = tx2.send(WebImportProgress::Fetching {
+                            done,
+                            total,
+                            label: label.to_string(),
+                        });
+                    },
+                );
+                let _ = tx.send(match res {
+                    Ok(g) => WebImportProgress::Done(Box::new(g)),
+                    Err(e) => WebImportProgress::Failed(e),
+                });
+            })
+            .ok();
+
+        self.web_import = Some(WebImport {
+            url,
+            done: 0,
+            total: 1,
+            label: "Fetching…".to_string(),
+            rx,
+        });
+    }
+
+    /// Drains import progress. Returns a user-facing message when it finishes.
+    pub fn poll_web_import(&mut self, frame: u64) -> Option<Result<String, String>> {
+        let Some(imp) = &mut self.web_import else {
+            return None;
+        };
+        let mut finished: Option<Result<String, String>> = None;
+
+        loop {
+            match imp.rx.try_recv() {
+                Ok(WebImportProgress::Fetching { done, total, label }) => {
+                    imp.done = done;
+                    imp.total = total;
+                    imp.label = label;
+                }
+                Ok(WebImportProgress::Done(guide)) => {
+                    finished = Some(self.load_web_guide(*guide, frame));
+                    break;
+                }
+                Ok(WebImportProgress::Failed(e)) => {
+                    finished = Some(Err(e));
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    finished = Some(Err("import worker stopped unexpectedly".to_string()));
+                    break;
+                }
+            }
+        }
+
+        if let Some(res) = finished {
+            self.web_import = None;
+            if let Err(e) = &res {
+                self.push_chat(
+                    ChatRole::System,
+                    format!("Guide import failed: {}", e),
+                    frame,
+                );
+            }
+            return Some(res);
+        }
+        None
+    }
+
+    /// Indexes an already-fetched web guide.
+    ///
+    /// Fetching happens on a worker thread (see `start_web_guide_import`);
+    /// this is the cheap indexing half that runs on the UI thread.
+    pub fn load_web_guide(
+        &mut self,
+        guide: crate::ui::web_guide::WebGuide,
+        frame: u64,
+    ) -> Result<String, String> {
+        let sections: Vec<(String, String, String)> = guide
+            .pages
+            .iter()
+            .map(|p| (p.title.clone(), p.hint.clone(), p.text.clone()))
+            .collect();
+        let page_count = sections.len();
+
+        let id = self.guides.add_sections(
+            guide.title.clone(),
+            GuideKind::Web,
+            Some(guide.root_url.clone()),
+            &sections,
+        )?;
+        let doc = self
+            .guides
+            .docs
+            .iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| "guide vanished after indexing".to_string())?;
+
+        let msg = format!(
+            "Learned guide “{}” from the web ({} page{}, {} chars, {} sections indexed). \
+             I'll consult it while playing.",
+            doc.name,
+            page_count,
+            if page_count == 1 { "" } else { "s" },
+            doc.chars,
+            doc.chunks
+        );
+        self.push_chat(ChatRole::System, msg.clone(), frame);
+        Ok(msg)
+    }
+
+    /// Loads a PDF/text walkthrough into the knowledge base.
+    pub fn load_guide(&mut self, path: &std::path::Path, frame: u64) -> Result<String, String> {
+        let id = self.guides.add_file(path)?;
+        let doc = self
+            .guides
+            .docs
+            .iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| "guide vanished after indexing".to_string())?;
+        let msg = format!(
+            "Learned guide “{}” ({}, {} chars, {} sections indexed). I'll consult it while playing.",
+            doc.name,
+            doc.kind.label(),
+            doc.chars,
+            doc.chunks
+        );
+        self.push_chat(ChatRole::System, msg.clone(), frame);
+        Ok(msg)
+    }
+
+    pub fn forget_guide(&mut self, doc_id: usize, frame: u64) {
+        let name = self
+            .guides
+            .docs
+            .iter()
+            .find(|d| d.id == doc_id)
+            .map(|d| d.name.clone());
+        self.guides.remove(doc_id);
+        if let Some(n) = name {
+            self.push_chat(ChatRole::System, format!("Forgot guide “{}”.", n), frame);
         }
     }
 
@@ -478,10 +834,40 @@ impl AiAgent {
 
         let context = self.build_context(rom_name, gba.frame_counter, stalled);
 
+        // Retrieve guide knowledge for THIS decision. The query blends the
+        // mission (what the user asked for) with the last observation (where
+        // we actually are), so retrieval tracks progress instead of returning
+        // the same opening section forever.
+        let guide_context = if self.guides.is_empty() {
+            self.last_guide_citations.clear();
+            None
+        } else {
+            let mut query = String::new();
+            if let Some(m) = &self.mission {
+                query.push_str(&m.text);
+                query.push(' ');
+                query.push_str(&m.progress);
+                query.push(' ');
+            }
+            query.push_str(&self.config.objective);
+            query.push(' ');
+            query.push_str(&self.last_observation);
+            query.push(' ');
+            query.push_str(&self.last_goal);
+            let block = self.guides.context_block(
+                &query,
+                self.config.guide_excerpts,
+                self.config.guide_char_budget,
+            );
+            self.last_guide_citations = self.guides.last_citations.clone();
+            block
+        };
+
         let req = AgentRequest {
             png,
             context,
             config: self.config.clone(),
+            guide_context,
         };
 
         self.ensure_worker();
@@ -504,6 +890,51 @@ impl AiAgent {
         s.push_str(&format!("Game: {}\n", rom_name));
         s.push_str(&format!("Emulated frame: {}\n", frame));
         s.push_str(&format!("Your standing objective: {}\n", self.config.objective));
+
+        // The active mission outranks the standing objective.
+        if let Some(m) = &self.mission {
+            s.push_str(&format!(
+                "\nCURRENT MISSION FROM THE USER (this is your priority): {}\n",
+                m.text
+            ));
+            s.push_str(&format!(
+                "You have spent {} decisions and {} emulated frames on it so far.\n",
+                m.decisions,
+                frame.saturating_sub(m.started_frame)
+            ));
+            if !m.progress.is_empty() {
+                s.push_str(&format!("Your own progress notes: {}\n", m.progress));
+            }
+            s.push_str(
+                "Report progress in \"mission_progress\" every turn, and set \
+                 \"mission_complete\": true ONLY when the mission is genuinely \
+                 finished and you can see the evidence on screen.\n",
+            );
+        }
+
+        // Recent conversation so the model can answer follow-up instructions.
+        let recent_chat: Vec<String> = self
+            .chat
+            .iter()
+            .rev()
+            .take(8)
+            .filter(|m| m.role != ChatRole::System)
+            .map(|m| {
+                let who = match m.role {
+                    ChatRole::User => "USER",
+                    ChatRole::Agent => "YOU",
+                    ChatRole::System => "SYSTEM",
+                };
+                format!("{}: {}", who, m.text)
+            })
+            .collect();
+        if !recent_chat.is_empty() {
+            s.push_str("\nRecent conversation (newest first):\n");
+            for line in recent_chat {
+                s.push_str(&format!("  {}\n", line));
+            }
+        }
+
         if !self.last_goal.is_empty() {
             s.push_str(&format!("Your previous goal: {}\n", self.last_goal));
         }
@@ -525,6 +956,55 @@ impl AiAgent {
         }
         s.push_str("\nLook at the screenshot and decide the next inputs.");
         s
+    }
+
+    /// Runs ONE decision synchronously against the configured model, including
+    /// guide retrieval, and applies the resulting plan.
+    ///
+    /// This is the same code path as the async `maybe_request`/`poll` pair,
+    /// minus the worker thread, so it is what headless runs and integration
+    /// tests use to exercise the real model without racing the UI loop. It
+    /// BLOCKS for up to `request_timeout_secs`; never call it from the render
+    /// loop of a running emulator.
+    pub fn decide_now(&mut self, gba: &Gba, rom_name: &str) -> Result<AgentPlan, String> {
+        let fb = gba.get_framebuffer();
+        let png = encode_png(fb, self.config.image_scale)
+            .map_err(|e| format!("frame encode failed: {}", e))?;
+        let context = self.build_context(rom_name, gba.frame_counter, false);
+
+        let guide_context = if self.guides.is_empty() {
+            None
+        } else {
+            let mut query = String::new();
+            if let Some(m) = &self.mission {
+                query.push_str(&m.text);
+                query.push(' ');
+                query.push_str(&m.progress);
+                query.push(' ');
+            }
+            query.push_str(&self.config.objective);
+            query.push(' ');
+            query.push_str(&self.last_observation);
+            let block = self.guides.context_block(
+                &query,
+                self.config.guide_excerpts,
+                self.config.guide_char_budget,
+            );
+            self.last_guide_citations = self.guides.last_citations.clone();
+            block
+        };
+
+        let req = AgentRequest {
+            png,
+            context,
+            config: self.config.clone(),
+            guide_context,
+        };
+        let started = Instant::now();
+        let mut plan = run_inference(&req)?;
+        plan.latency_ms = started.elapsed().as_millis() as u64;
+        self.accept_plan(plan.clone(), gba.frame_counter);
+        Ok(plan)
     }
 
     /// Drains worker results. Call once per UI update.
@@ -590,6 +1070,35 @@ impl AiAgent {
         self.last_goal = plan.goal.clone();
         self.last_latency_ms = plan.latency_ms;
         self.last_source = Some(plan.source);
+
+        // Surface the model's note to the user, and fold its self-report into
+        // the active mission.
+        if !plan.say.is_empty() {
+            self.push_chat(ChatRole::Agent, plan.say.clone(), frame_counter);
+        }
+        let mut completed: Option<String> = None;
+        if let Some(m) = &mut self.mission {
+            m.decisions = m.decisions.saturating_add(1);
+            if !plan.mission_progress.is_empty() {
+                m.progress = plan.mission_progress.clone();
+            }
+            if plan.mission_complete {
+                m.state = MissionState::Done;
+                completed = Some(m.text.clone());
+            }
+        }
+        if let Some(text) = completed {
+            // Completion is terminal: retire the mission so the agent does not
+            // keep re-planning against a goal it has already met.
+            if let Some(done) = self.mission.take() {
+                self.mission_history.push(done);
+            }
+            self.push_chat(
+                ChatRole::System,
+                format!("✅ Mission complete: {}", text),
+                frame_counter,
+            );
+        }
         if matches!(self.status, AgentStatus::Error(_)) {
             self.status = AgentStatus::Acting;
         }
@@ -635,6 +1144,11 @@ impl AiAgent {
             "source": match plan.source { PlanSource::Model => "model", PlanSource::Heuristic => "heuristic" },
             "observation": plan.observation,
             "goal": plan.goal,
+            "say": plan.say,
+            "mission": self.mission.as_ref().map(|m| m.text.clone()),
+            "mission_progress": plan.mission_progress,
+            "mission_complete": plan.mission_complete,
+            "guide_citations": self.last_guide_citations,
             "actions": actions,
         });
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -734,6 +1248,11 @@ impl AiAgent {
             actions,
             latency_ms: 0,
             source: PlanSource::Heuristic,
+            // The heuristic brain is blind: it cannot read a guide, chat, or
+            // judge a mission, so it never speaks and never claims completion.
+            say: String::new(),
+            mission_progress: String::new(),
+            mission_complete: false,
         }
     }
 }
@@ -750,6 +1269,9 @@ Reply with ONLY a JSON object, no prose and no markdown fences:
 {
   \"observation\": \"<what is on screen right now, one sentence>\",
   \"goal\": \"<what you are trying to do next, one sentence>\",
+  \"say\": \"<a short message to the user; keep it brief or empty>\",
+  \"mission_progress\": \"<progress on the user's mission, one sentence>\",
+  \"mission_complete\": false,
   \"actions\": [ {\"buttons\": [\"A\"], \"frames\": 4}, {\"buttons\": [], \"frames\": 20} ]
 }
 
@@ -758,23 +1280,48 @@ Rules:
 - \"buttons\": [] means hold nothing (a wait). Multiple buttons are pressed simultaneously.
 - \"frames\" is how long to hold, in 60ths of a second. A menu tap is 3-6 frames. Walking is 20-60.
 - Return 1 to 6 actions. Always end movement with a short wait so the screen can update.
-- Never invent buttons and never return an empty actions list.";
+- Never invent buttons and never return an empty actions list.
+- When the user has given you a MISSION, it outranks the standing objective. Work
+  towards it step by step and keep \"mission_progress\" honest about where you are.
+- Set \"mission_complete\": true ONLY when the screen shows the mission is actually
+  done (for example the badge/item is obtained). Never claim completion speculatively.
+- If GAME GUIDE EXCERPTS are supplied, they come from a walkthrough the user
+  uploaded. Use them for names, locations, level requirements and route order.
+  The screenshot is ground truth: if the guide disagrees with what you see,
+  believe the screen and say so in \"say\".";
 
 fn run_inference(req: &AgentRequest) -> Result<AgentPlan, String> {
     let data_url = format!("data:image/png;base64,{}", base64_encode(&req.png));
+
+    // Guide excerpts are appended to the SINGLE system message rather than
+    // sent as a second one. Many chat templates (Qwen's among them) hard-fail
+    // with "System message must be at the beginning" when a second system turn
+    // appears, so a separate message makes the request unusable on exactly the
+    // local servers this feature targets. A labelled section inside the one
+    // system prompt keeps the retrieved text just as clearly separated from
+    // the live observation.
+    let system_content = match &req.guide_context {
+        Some(guide) => format!("{}\n\n{}", SYSTEM_PROMPT, guide),
+        None => SYSTEM_PROMPT.to_string(),
+    };
+
+    let messages = vec![
+        serde_json::json!({ "role": "system", "content": system_content }),
+        serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": req.context },
+                { "type": "image_url", "image_url": { "url": data_url } }
+            ]
+        }),
+    ];
 
     let payload = serde_json::json!({
         "model": req.config.model,
         "temperature": req.config.temperature,
         "max_tokens": req.config.max_tokens,
         "stream": false,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": [
-                { "type": "text", "text": req.context },
-                { "type": "image_url", "image_url": { "url": data_url } }
-            ]}
-        ]
+        "messages": messages
     });
 
     let body = serde_json::to_vec(&payload).map_err(|e| format!("payload encode: {}", e))?;
@@ -888,12 +1435,40 @@ pub fn parse_plan(content: &str) -> Result<AgentPlan, String> {
         ));
     }
 
+    let say = v["say"]
+        .as_str()
+        .or_else(|| v["message"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mission_progress = v["mission_progress"]
+        .as_str()
+        .or_else(|| v["progress"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // Accept both a bool and the strings models like to emit instead.
+    let mission_complete = v["mission_complete"].as_bool().unwrap_or_else(|| {
+        matches!(
+            v["mission_complete"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "true" | "yes" | "done" | "complete" | "completed"
+        )
+    });
+
     Ok(AgentPlan {
         observation,
         goal,
         actions,
         latency_ms: 0,
         source: PlanSource::Model,
+        say,
+        mission_progress,
+        mission_complete,
     })
 }
 

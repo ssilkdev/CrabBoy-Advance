@@ -5,13 +5,23 @@
 //!   * `show_panel`  — the always-visible spectator side panel showing what the
 //!     agent sees, wants, and is pressing, so the user can watch it play.
 
-use super::ai_agent::{AgentStatus, AiAgent, Brain, PlanSource, KEY_NAMES};
+use super::ai_agent::{AgentStatus, AiAgent, Brain, ChatRole, PlanSource, KEY_NAMES};
 use egui::{Color32, RichText, Window};
 
 #[derive(Default)]
 pub struct AiAgentDialog {
     pub is_open: bool,
     pub show_panel: bool,
+    /// Guide + instruction chat window.
+    pub chat_open: bool,
+    /// Text currently typed into the instruction box.
+    pub chat_input: String,
+    /// URL currently typed into the web-guide box.
+    pub url_input: String,
+    /// Follow sub-pages of a multi-part wiki walkthrough.
+    pub follow_subpages: bool,
+    /// Upper bound on sub-pages fetched per import.
+    pub max_pages: usize,
 }
 
 impl AiAgentDialog {
@@ -19,6 +29,11 @@ impl AiAgentDialog {
         Self {
             is_open: false,
             show_panel: true,
+            chat_open: false,
+            chat_input: String::new(),
+            url_input: String::new(),
+            follow_subpages: true,
+            max_pages: 25,
         }
     }
 
@@ -92,7 +107,18 @@ impl AiAgentDialog {
                 });
 
                 ui.add_space(4.0);
-                ui.checkbox(&mut self.show_panel, "Show live spectator panel");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.show_panel, "Show live spectator panel");
+                    if ui
+                        .button("💬 Guides & Instructions…")
+                        .on_hover_text(
+                            "Upload a PDF/text game guide and tell the agent what to do",
+                        )
+                        .clicked()
+                    {
+                        self.chat_open = true;
+                    }
+                });
 
                 ui.separator();
 
@@ -247,6 +273,288 @@ impl AiAgentDialog {
             });
 
         self.is_open = open;
+    }
+
+    /// Guide library + chat: upload walkthroughs and give the agent orders.
+    ///
+    /// Rendered as its own window so it can sit beside the game while the
+    /// agent plays. Returns nothing; all state changes go through `agent`.
+    pub fn show_chat(
+        &mut self,
+        ctx: &egui::Context,
+        agent: &mut AiAgent,
+        frame_counter: u64,
+        toast: &mut Option<String>,
+    ) {
+        if !self.chat_open {
+            return;
+        }
+        let mut open = self.chat_open;
+
+        Window::new("💬 AI Coach — Game Guides & Instructions")
+            .open(&mut open)
+            .default_width(460.0)
+            .default_height(560.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                // --- Guide library ---------------------------------------
+                ui.label(RichText::new("Game Guide Knowledge").strong());
+                ui.label(
+                    RichText::new(
+                        "Upload a walkthrough (PDF or .txt) or point the agent at an online \
+                         wiki guide. It is parsed, indexed, and the most relevant sections \
+                         are fed to the agent with every decision.",
+                    )
+                    .weak()
+                    .small(),
+                );
+
+                ui.horizontal(|ui| {
+                    if ui.button("📄 Upload Guide (PDF / TXT)…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Game guides", &["pdf", "txt", "md", "text"])
+                            .add_filter("All files", &["*"])
+                            .pick_file()
+                        {
+                            match agent.load_guide(&path, frame_counter) {
+                                Ok(msg) => *toast = Some(msg),
+                                Err(e) => {
+                                    let msg = format!("Guide import failed: {}", e);
+                                    agent.system_note(msg.clone(), frame_counter);
+                                    *toast = Some(msg);
+                                }
+                            }
+                        }
+                    }
+                    if !agent.guides.docs.is_empty()
+                        && ui.button("🗑 Forget all").on_hover_text("Clear the guide library").clicked()
+                    {
+                        agent.guides.clear();
+                        agent.system_note("Guide library cleared.", frame_counter);
+                    }
+                });
+
+                // --- Web guide import ------------------------------------
+                let importing = agent.web_import.is_some();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("🌐");
+                    let hint = "https://bulbapedia.bulbagarden.net/wiki/Walkthrough:...";
+                    let resp = ui.add_enabled(
+                        !importing,
+                        egui::TextEdit::singleline(&mut self.url_input)
+                            .hint_text(hint)
+                            .desired_width((ui.available_width() - 90.0).max(120.0)),
+                    );
+                    let submitted =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let clicked = ui
+                        .add_enabled(!importing, egui::Button::new("Import"))
+                        .on_hover_text("Fetch and index this online guide")
+                        .clicked();
+
+                    if (submitted || clicked) && !importing {
+                        let url = self.url_input.trim().to_string();
+                        if url.is_empty() {
+                            *toast = Some("Enter a guide URL first.".to_string());
+                        } else {
+                            // Accept a bare host by assuming https.
+                            let url = if url.starts_with("http://") || url.starts_with("https://") {
+                                url
+                            } else {
+                                format!("https://{}", url)
+                            };
+                            agent.start_web_guide_import(url, self.follow_subpages, self.max_pages);
+                            self.url_input.clear();
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        !importing,
+                        egui::Checkbox::new(&mut self.follow_subpages, "Follow sub-pages"),
+                    )
+                    .on_hover_text(
+                        "Wiki walkthroughs are usually split across /Part_1 … /Part_N pages. \
+                         With this on the whole guide is imported, not just the contents page.",
+                    );
+                    ui.add_enabled(
+                        !importing,
+                        egui::DragValue::new(&mut self.max_pages)
+                            .range(1..=40)
+                            .prefix("max "),
+                    )
+                    .on_hover_text("Upper bound on pages fetched per import");
+                });
+
+                if let Some(imp) = &agent.web_import {
+                    let frac = if imp.total > 0 {
+                        imp.done as f32 / imp.total as f32
+                    } else {
+                        0.0
+                    };
+                    let label = imp.label.rsplit('/').next().unwrap_or("").replace('_', " ");
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .text(format!("{}/{}  {}", imp.done, imp.total, label))
+                            .desired_height(14.0),
+                    );
+                    // Keep repainting so the bar advances while fetching.
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(120));
+                }
+
+                if agent.guides.docs.is_empty() {
+                    ui.label(
+                        RichText::new("No guides loaded — the agent is playing blind.")
+                            .weak()
+                            .small(),
+                    );
+                } else {
+                    let mut forget: Option<usize> = None;
+                    for doc in agent.guides.docs.iter_mut() {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut doc.enabled, "");
+                            ui.label(
+                                RichText::new(format!("{} [{}]", doc.name, doc.kind.label()))
+                                    .small()
+                                    .strong(),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} sections", doc.chunks))
+                                    .weak()
+                                    .small(),
+                            )
+                            .on_hover_text(match &doc.source_url {
+                                Some(u) => format!("Imported from {}", u),
+                                None => format!("{} characters indexed", doc.chars),
+                            });
+                            if ui.small_button("✖").clicked() {
+                                forget = Some(doc.id);
+                            }
+                        });
+                    }
+                    if let Some(id) = forget {
+                        agent.forget_guide(id, frame_counter);
+                    }
+                    if !agent.last_guide_citations.is_empty() {
+                        ui.label(
+                            RichText::new(format!(
+                                "Last consulted: {}",
+                                agent.last_guide_citations.join(", ")
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                    }
+                }
+
+                ui.separator();
+
+                // --- Active mission --------------------------------------
+                // Copy what the UI needs out of the mission first: the cancel
+                // button needs `&mut agent`, which cannot coexist with a live
+                // borrow of `agent.mission`.
+                let active_mission: Option<(String, String, u32)> = agent
+                    .mission
+                    .as_ref()
+                    .map(|m| (m.text.clone(), m.progress.clone(), m.decisions));
+                if let Some((text, progress, decisions)) = active_mission {
+                    ui.label(
+                        RichText::new(format!("🎯 Mission: {}", text))
+                            .color(Color32::from_rgb(255, 210, 90))
+                            .strong(),
+                    );
+                    if !progress.is_empty() {
+                        ui.label(RichText::new(progress).small());
+                    }
+                    let mut cancel = false;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{} decisions spent", decisions))
+                                .weak()
+                                .small(),
+                        );
+                        if ui.small_button("✖ Cancel mission").clicked() {
+                            cancel = true;
+                        }
+                    });
+                    if cancel {
+                        agent.cancel_mission(frame_counter);
+                    }
+                    ui.separator();
+                }
+
+                // --- Chat transcript -------------------------------------
+                let input_height = 64.0;
+                let avail = ui.available_height();
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .max_height((avail - input_height).max(120.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if agent.chat.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Tell the agent what to do, e.g. \
+                                     “Complete the first trainer badge”.",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        }
+                        for msg in agent.chat.iter() {
+                            let (who, color) = match msg.role {
+                                ChatRole::User => ("You", Color32::from_rgb(150, 210, 255)),
+                                ChatRole::Agent => ("Agent", Color32::from_rgb(160, 235, 170)),
+                                ChatRole::System => ("System", Color32::from_gray(150)),
+                            };
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new(format!("{}:", who)).color(color).strong().small());
+                                ui.label(RichText::new(&msg.text).small());
+                            });
+                        }
+                    });
+
+                ui.separator();
+
+                // --- Instruction input -----------------------------------
+                let mut submit = false;
+                ui.horizontal(|ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_input)
+                            .desired_width(ui.available_width() - 76.0)
+                            .hint_text("Complete the first trainer badge"),
+                    );
+                    // Enter submits, but only when the box actually has focus:
+                    // otherwise pressing A in the game would fire the field.
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit = true;
+                    }
+                    if ui.button("Send ▶").clicked() {
+                        submit = true;
+                    }
+                });
+
+                if submit && !self.chat_input.trim().is_empty() {
+                    let text = std::mem::take(&mut self.chat_input);
+                    agent.submit_instruction(&text, frame_counter);
+                    *toast = Some(format!("🎯 Mission set: {}", text));
+                }
+
+                ui.label(
+                    RichText::new(
+                        "Instructions become the agent's top-priority mission. It reports \
+                         progress each turn and closes the mission when the screen shows \
+                         it is done.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+
+        self.chat_open = open;
     }
 
     /// Live spectator panel: the user's window into the agent's head.

@@ -8,6 +8,7 @@ pub mod cheats_dialog;
 pub mod controls;
 pub mod debug;
 pub mod emu_core;
+pub mod game_guide;
 pub mod gif_recorder;
 pub mod guide_dialog;
 pub mod link_dialog;
@@ -22,6 +23,7 @@ pub mod tas;
 pub mod tas_dialog;
 pub mod updater;
 pub mod updater_dialog;
+pub mod web_guide;
 
 use ai_agent::AiAgent;
 use ai_agent_dialog::AiAgentDialog;
@@ -403,20 +405,49 @@ impl GbaApp {
 
 impl eframe::App for GbaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle drag and drop ROM files
-        ctx.input(|i| {
-            if let Some(file) = i.raw.dropped_files.first() {
-                if let Some(ref path) = file.path {
-                    self.load_rom_from_path(path);
+        // Handle drag and drop: ROMs load into the emulator, guides (PDF/text)
+        // go into the AI agent's knowledge base. Dropping a walkthrough used to
+        // be interpreted as a ROM and fail with a confusing cartridge error.
+        let dropped: Option<std::path::PathBuf> =
+            ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
+        if let Some(path) = dropped {
+            let ext = path
+                .extension()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if matches!(ext.as_str(), "pdf" | "txt" | "md" | "text") {
+                let frame = self.active_frame_counter();
+                match self.ai_agent.load_guide(&path, frame) {
+                    Ok(msg) => {
+                        self.ai_agent_dialog.chat_open = true;
+                        self.set_toast(msg);
+                    }
+                    Err(e) => self.set_toast(format!("Guide import failed: {}", e)),
                 }
+            } else {
+                self.load_rom_from_path(&path);
             }
-        });
+        }
 
         // Keypad inputs (Keyboard + 8BitDo / XInput Gamepad)
+        //
+        // A focused text field (the AI Coach instruction box, cheat codes, the
+        // endpoint fields) must swallow the keyboard: without this guard,
+        // typing "Complete the first trainer badge" also mashes B, A, START…
+        // into the running game. Gamepad input is unaffected — only the
+        // keyboard half is suppressed — so a controller still works while the
+        // user types.
+        let typing = ctx.wants_keyboard_input();
         let mut key_events = Vec::new();
         handle_input(ctx, &self.key_bindings, &mut self.gamepad_manager, &mut |key: Key, pressed: bool| {
             key_events.push((key, pressed));
         });
+        if typing {
+            // Release everything the keyboard was holding, otherwise a button
+            // held at the moment focus moved into the box would stay stuck
+            // down for as long as the user is typing.
+            key_events.retain(|(_, pressed)| !*pressed);
+        }
         for (k, p) in key_events {
             match self.gb {
                 Some(ref mut gb) => {
@@ -543,6 +574,9 @@ impl eframe::App for GbaApp {
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::A) {
                 self.ai_agent_dialog.is_open = !self.ai_agent_dialog.is_open;
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::G) {
+                self.ai_agent_dialog.chat_open = !self.ai_agent_dialog.chat_open;
             }
             if i.key_pressed(egui::Key::F1) || (i.modifiers.ctrl && i.key_pressed(egui::Key::H)) {
                 self.guide_dialog.is_open = !self.guide_dialog.is_open;
@@ -999,6 +1033,13 @@ impl eframe::App for GbaApp {
                     }
                     if ui.button("🤖 AI Agent Player — Watch an AI Play (Ctrl+A)...").clicked() {
                         self.ai_agent_dialog.is_open = true;
+                        ui.close_menu();
+                    }
+                    if ui
+                        .button("💬 AI Coach — Upload Game Guide & Give Orders (Ctrl+G)...")
+                        .clicked()
+                    {
+                        self.ai_agent_dialog.chat_open = true;
                         ui.close_menu();
                     }
                     if ui.button("🎮 Hardware Sensors (Solar/Tilt/Rumble)...").clicked() {
@@ -1656,6 +1697,20 @@ impl eframe::App for GbaApp {
         self.audio_mixer_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.tas_dialog.show(ctx, &mut self.tas_engine, &mut self.gba, &mut dialog_toast);
         self.ai_agent_dialog.show_dialog(ctx, &mut self.ai_agent, &self.loaded_rom_name, &mut dialog_toast);
+        {
+            // Borrow the frame counter before handing out `&mut self.ai_agent`.
+            let frame = self.active_frame_counter();
+            // Drain any background guide download first so the progress bar
+            // and the finished library render in the same frame.
+            if let Some(res) = self.ai_agent.poll_web_import(frame) {
+                dialog_toast = Some(match res {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Guide import failed: {}", e),
+                });
+            }
+            self.ai_agent_dialog
+                .show_chat(ctx, &mut self.ai_agent, frame, &mut dialog_toast);
+        }
         self.guide_dialog.show(ctx, &mut dialog_toast);
         self.updater_dialog.show(ctx, &self.updater, &mut dialog_toast);
 

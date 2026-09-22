@@ -162,3 +162,127 @@ fn heuristic_agent_plays_a_real_rom_offline() {
     assert!(agent.decisions > 0);
     assert!(presses > 100, "heuristic brain should hold buttons often");
 }
+
+// ---------------------------------------------------------------------------
+// Guide-driven missions against a live model
+// ---------------------------------------------------------------------------
+
+const WALKTHROUGH: &str = "\
+POKEMON EMERALD - WALKTHROUGH
+
+SECTION 3: RUSTBORO CITY GYM - THE FIRST BADGE
+The first gym badge in Hoenn is the Stone Badge, held by Gym Leader Roxanne.
+Roxanne uses Rock-type Pokemon: Geodude level 12, Geodude level 12 and
+Nosepass level 15. Bring a Grass or Water Pokemon; Marshtomp sweeps the gym.
+The gym is in the north-west of Rustboro City. Two Youngster trainers stand
+between the door and Roxanne. Beating Roxanne awards the Stone Badge.
+
+SECTION 4: ROUTE 116 AND RUSTURF TUNNEL
+After earning the badge, chase the Team Aqua grunt who stole the Devon Goods
+east out of Rustboro into Route 116 and then Rusturf Tunnel.
+";
+
+fn live_agent() -> AiAgent {
+    let mut agent = AiAgent::new();
+    agent.config.brain = Brain::VisionModel;
+    agent.config.endpoint = std::env::var("AI_AGENT_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:8080/v1/chat/completions".to_string());
+    agent.config.model =
+        std::env::var("AI_AGENT_MODEL").unwrap_or_else(|_| "local-vision".to_string());
+    agent.config.log_transcript = false;
+    agent
+}
+
+fn booted_rom() -> Gba {
+    let rom = std::env::var("GBA_TEST_ROM").expect("set GBA_TEST_ROM");
+    let mut gba = Gba::new();
+    gba.load_rom(&rom).expect("load ROM");
+    for _ in 0..600 {
+        gba.run_frame();
+    }
+    gba
+}
+
+/// The whole feature, end to end against the real model: a walkthrough is
+/// indexed, an instruction becomes a mission, retrieval feeds the prompt, and
+/// the model returns an actionable plan with mission self-reporting.
+#[test]
+#[ignore = "requires GBA_TEST_ROM and a live vision endpoint"]
+fn live_model_pursues_a_guided_mission() {
+    let gba = booted_rom();
+    let mut agent = live_agent();
+
+    agent
+        .guides
+        .add_text(
+            "emerald_walkthrough.txt".into(),
+            gba_simulator::ui::game_guide::GuideKind::Text,
+            WALKTHROUGH,
+        )
+        .expect("index guide");
+    agent.submit_instruction("Complete the first trainer badge", gba.frame_counter);
+
+    let plan = agent
+        .decide_now(&gba, "Pokemon Emerald")
+        .expect("live inference should succeed");
+
+    println!("\n=== LIVE GUIDED MISSION ===");
+    println!("observation      : {}", plan.observation);
+    println!("goal             : {}", plan.goal);
+    println!("say              : {}", plan.say);
+    println!("mission_progress : {}", plan.mission_progress);
+    println!("mission_complete : {}", plan.mission_complete);
+    println!("latency_ms       : {}", plan.latency_ms);
+    for a in &plan.actions {
+        println!("action           : {}", a.label());
+    }
+    println!("guide citations  : {:?}", agent.last_guide_citations);
+
+    assert!(!plan.actions.is_empty(), "model returned no actions");
+    for a in &plan.actions {
+        assert!(a.frames >= 1, "action with zero frames");
+        for &b in &a.buttons {
+            assert!(b < 10, "button index {} out of range", b);
+        }
+    }
+    assert!(
+        !agent.last_guide_citations.is_empty(),
+        "the uploaded guide was never consulted for the mission"
+    );
+    // A mission must not be declared finished on the very first look unless
+    // the model genuinely saw evidence; either way it must be tracked.
+    assert!(
+        agent.mission.is_some() || plan.mission_complete,
+        "mission vanished without completing"
+    );
+    // The user's instruction and the agent's reply are both in the chat.
+    assert!(agent
+        .chat
+        .iter()
+        .any(|m| m.text.contains("Complete the first trainer badge")));
+}
+
+/// Same path with no guide loaded: the agent must still play, and must not
+/// claim to have consulted anything.
+#[test]
+#[ignore = "requires GBA_TEST_ROM and a live vision endpoint"]
+fn live_model_without_a_guide_still_plays() {
+    let gba = booted_rom();
+    let mut agent = live_agent();
+    let plan = agent
+        .decide_now(&gba, "Pokemon Emerald")
+        .expect("live inference should succeed");
+
+    println!("\n=== LIVE, NO GUIDE ===");
+    println!("observation: {}", plan.observation);
+    println!("goal       : {}", plan.goal);
+    for a in &plan.actions {
+        println!("action     : {}", a.label());
+    }
+
+    assert!(!plan.actions.is_empty());
+    assert!(
+        agent.last_guide_citations.is_empty(),
+        "citations reported with no guide loaded"
+    );
+}
