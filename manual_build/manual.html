@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>The Player&rsquo;s Manual &mdash; CrabBoy Advance</title>
+<style>
+:root{
+  --ink:#1a1f2b; --ink2:#3c4453; --muted:#6b7385; --faint:#9aa3b2;
+  --paper:#f6f7f9; --card:#ffffff; --line:#e4e7ec;
+  --accent:#0f6f5c; --accent2:#0a4c40; --accent-soft:#e7f2ee;
+  --warn:#8a5a00; --warn-soft:#fdf3df;
+}
+*{box-sizing:border-box;}
+html{-webkit-print-color-adjust:exact; print-color-adjust:exact; overflow-x:hidden;}
+body{
+  margin:0; color:var(--ink); background:var(--paper);
+  font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:10.5pt; line-height:1.62; overflow-x:hidden;}
+.page{max-width:760px; margin:0 auto; padding:46px 40px 40px; overflow-x:hidden;}
+.mono{font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace;
+  font-size:0.92em; background:var(--accent-soft); color:var(--accent2);
+  padding:1px 5px; border-radius:5px; white-space:normal; word-break:break-word;}
+pre.code{background:#0d1117; color:#d7e0ea; border-radius:9px; padding:12px 16px;
+  font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; font-size:9.3pt;
+  line-height:1.55; margin:4px 0 16px; white-space:pre-wrap; overflow-x:hidden;}
+p.q{font-weight:700; color:var(--ink); margin:20px 0 4px; font-size:10.6pt;}
+
+/* cover */
+.cover{min-height:78vh; display:flex; flex-direction:column; justify-content:center;
+  border-bottom:1px solid var(--line); page-break-after:always; margin-bottom:8px;}
+.cover .brand{font-size:13pt; letter-spacing:.34em; text-transform:uppercase;
+  color:var(--accent); font-weight:700; margin-bottom:22px;}
+.cover h1{font-size:40pt; line-height:1.05; margin:0 0 10px; font-weight:800;
+  letter-spacing:-.02em; color:var(--ink);}
+.cover .tag{font-size:13pt; color:var(--ink2); max-width:52ch; line-height:1.55; margin:0 0 40px;}
+.cover .meta{display:flex; gap:34px; flex-wrap:wrap;}
+.cover .meta div{font-size:9.5pt;}
+.cover .meta .k{color:var(--faint); text-transform:uppercase; letter-spacing:.12em;
+  font-size:8pt; margin-bottom:3px;}
+.cover .meta .v{color:var(--ink); font-weight:600;}
+
+/* TOC */
+.toc{page-break-after:always; margin-bottom:10px;}
+.toc h2{font-size:11pt; text-transform:uppercase; letter-spacing:.22em; color:var(--faint);
+  margin:0 0 20px;}
+.toc ol{list-style:none; counter-reset:s; margin:0; padding:0;}
+.toc li{counter-increment:s; display:flex; gap:12px; align-items:baseline;
+  padding:7px 0; border-bottom:1px solid var(--line); font-size:10pt;}
+.toc li::before{content:counter(s,decimal-leading-zero); color:var(--accent);
+  font-weight:700; font-variant-numeric:tabular-nums; min-width:26px;}
+.toc li .t{color:var(--ink2); font-weight:500;}
+
+/* headings */
+h2{font-size:19pt; font-weight:800; letter-spacing:-.015em; margin:44px 0 6px;
+  padding-bottom:10px; border-bottom:2px solid var(--accent); page-break-after:avoid;}
+h2 .num{color:var(--accent); font-size:11pt; letter-spacing:.2em; display:block;
+  text-transform:uppercase; margin-bottom:4px; font-weight:700;}
+h3{font-size:12.5pt; font-weight:700; color:var(--ink); margin:26px 0 8px; page-break-after:avoid;}
+p{margin:0 0 12px;}
+.lead{font-size:11.5pt; color:var(--ink2); line-height:1.7; margin-bottom:14px;}
+ul,ol{margin:0 0 14px; padding-left:22px;}
+li{margin:0 0 7px;}
+li::marker{color:var(--accent);}
+a{color:var(--accent); text-decoration:none;}
+hr{border:none; border-top:1px solid var(--line); margin:30px 0;}
+
+/* callouts */
+.callout{background:var(--card); border:1px solid var(--line); border-left:4px solid var(--accent);
+  border-radius:9px; padding:14px 18px; margin:0 0 18px; page-break-inside:avoid;}
+.callout.tip{border-left-color:var(--accent); background:var(--accent-soft);}
+.callout .label{display:block; font-size:8.5pt; text-transform:uppercase;
+  letter-spacing:.14em; font-weight:700; margin-bottom:5px;}
+.callout.tip .label{color:var(--accent2);}
+.callout.warn{border-left-color:#e0a020; background:var(--warn-soft);}
+.callout.warn .label{color:var(--warn);}
+.callout p{margin:0;}
+
+/* tables */
+table{width:100%; border-collapse:collapse; margin:6px 0 20px; font-size:9.8pt;
+  page-break-inside:auto;}
+thead th{background:var(--ink); color:#fff; text-align:left; font-weight:600;
+  font-size:8.6pt; text-transform:uppercase; letter-spacing:.08em; padding:9px 13px;
+  border-bottom:2px solid var(--accent);}
+tbody td{padding:9px 13px; border-bottom:1px solid var(--line); vertical-align:top; color:var(--ink2);}
+tbody tr:nth-child(even){background:#fbfcfd;}
+tbody tr:last-child td{border-bottom:1px solid var(--line);}
+td .k{font-weight:600; color:var(--ink);}
+tbody td:first-child{color:var(--ink); font-weight:600;}
+
+/* screenshots */
+.figure{background:var(--card); border:1px solid var(--line); border-radius:12px;
+  padding:16px; margin:6px 0 22px; page-break-inside:avoid; box-shadow:0 1px 3px rgba(20,25,35,.05);}
+.figure .shot{display:flex; justify-content:center; background:#0d1117; border-radius:8px;
+  padding:14px; margin-bottom:12px;}
+.figure img{width:280px; height:auto; image-rendering:pixelated; border-radius:4px;
+  box-shadow:0 2px 10px rgba(0,0,0,.45);}
+.figure .cap{text-align:center; font-size:9pt; color:var(--muted); font-style:italic; margin:0;}
+.figure .cap b{color:var(--ink2); font-style:normal; font-weight:600;}
+
+/* footer */
+.foot{margin-top:40px; padding-top:16px; border-top:1px solid var(--line);
+  font-size:8.5pt; color:var(--faint); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;}
+@media print{
+  .page{padding:0; max-width:none;}
+  body{background:#fff;}
+  .figure{box-shadow:none;}
+}
+</style></head><body>
+<div class="page">
+  <div class="cover">
+    <div class="brand">CrabBoy Advance</div>
+    <h1>The Player&rsquo;s<br>Manual</h1>
+    <p class="tag">Everything you need to play your Game Boy Advance games on your computer
+    &mdash; written in plain, friendly language, with no technical background required.</p>
+    <div class="meta">
+      <div><div class="k">Edition</div><div class="v">v0.5.0</div></div>
+      <div><div class="k">Release</div><div class="v">August 2026</div></div>
+      <div><div class="k">Platform</div><div class="v">Linux &middot; Windows</div></div>
+      <div><div class="k">Audience</div><div class="v">Everyone</div></div>
+    </div>
+  </div>
+
+  <div class="toc">
+    <h2>In this manual</h2>
+    <ol><li><span class="t">What Is This?</span></li><li><span class="t">Getting Started</span></li><li><span class="t">Your First Game</span></li><li><span class="t">Playing: The Controls</span></li><li><span class="t">Saving Your Progress</span></li><li><span class="t">Undo Mistakes with Live Rewind</span></li><li><span class="t">Making It Look Great</span></li><li><span class="t">Making It Sound Great</span></li><li><span class="t">Pause, Fast-Forward, and Speed</span></li><li><span class="t">Fun Extras</span></li><li><span class="t">Keeping Up to Date</span></li><li><span class="t">Where Things Are Saved</span></li><li><span class="t">Troubleshooting</span></li><li><span class="t">Glossary of Friendly Terms</span></li></ol>
+  </div>
+
+  <h2><span class="num">Section 1</span>What Is This?</h2>
+<p>CrabBoy Advance lets you play <strong>Game Boy Advance</strong> (and classic Game Boy / Game Boy Color) games on a modern computer — on <strong>Linux</strong> and <strong>Windows</strong>.</p>
+<p>Think of it as a faithful, high-fidelity Game Boy Advance living inside a window on your desktop. Everything a real console does — the games, the sound, the link cable, even the little light-sensor tricks in some cartridges — works here, and it does so with excellent speed and accuracy.</p>
+<p>Beyond faithful reproduction, it adds conveniences no original console had:</p>
+<ul><li><strong>Instant snapshots</strong> of your game at any moment (save states)</li><li><strong>Time travel</strong> — rewind a few seconds of gameplay to fix a mistake</li><li><strong>Big, beautiful screen</strong> — crisp or smooth HD upscaling on modern displays</li><li><strong>Rich sound</strong> — 5.1 surround or 3D headphone audio</li><li><strong>An AI player</strong> that can hold the controller and play the game for you</li><li><strong>Multiplayer over a link cable</strong>, entirely on your computer</li></ul>
+<p>You don&#x27;t need to know any of that to start. You just need your game files.</p>
+<div class="callout warn"><p><strong>About your games:</strong> CrabBoy Advance is the *player*, not the *library*. It plays game files (called <strong>ROMs</strong>, with names ending in <code class="mono">.gba</code>, <code class="mono">.gb</code>, or <code class="mono">.gbc</code>) that you own. Like real handhelds, the software doesn&#x27;t include any games — you load the ones you already have.</p></div>
+<hr>
+<h2><span class="num">Section 2</span>Getting Started</h2>
+<h3>You downloaded the ready-to-run program (most people)</h3>
+<p class="q"><strong>Linux:</strong></p>
+<ol><li>Put the downloaded archive somewhere permanent (for example, your home</li></ol>
+<p>folder).</p>
+<ol><li>Right-click it and choose <strong>Extract / Open</strong>, or open a terminal and run:</li></ol>
+<pre class="code">   tar -xzf crabboy-advance-*.tar.gz</pre>
+<ol><li>Enter the extracted folder and double-click <code class="mono">crabboy-advance</code> to start.</li><li>*(Optional, recommended)* Run the included installer once so the app</li></ol>
+<p>appears in your menu and double-clicking game files opens them directly: ``<code class="mono"> ./packaging/linux/install.sh </code>``</p>
+<p class="q"><strong>Windows:</strong></p>
+<ol><li>Find the <code class="mono">crabboy-advance.exe</code> file (it may be in a downloaded folder or</li></ol>
+<p>archive — extract it first if it&#x27;s in one).</p>
+<ol><li>Double-click it to start.</li><li>*(Optional)* Create a shortcut on your desktop or Start menu to it.</li></ol>
+<h3>You have the developer&#x27;s copy</h3>
+<p>If you built the program yourself, it lives at <code class="mono">target/release/crabboy-advance</code> (Linux) or <code class="mono">target\release\crabboy-advance.exe</code> (Windows). Double-click it — the rest is identical.</p>
+<h3>Starting up</h3>
+<p>When you launch CrabBoy Advance you&#x27;ll see a window with:</p>
+<ul><li>A <strong>menu bar across the top</strong> — every feature of the app lives here, in</li></ul>
+<p>plain-English menus (File, Emulation, Video, Audio, Tools, Help, and more).</p>
+<ul><li>A <strong>large central area</strong> — this is where your game appears.</li></ul>
+<p>That&#x27;s all you need. Let&#x27;s load a game.</p>
+<hr>
+<h2><span class="num">Section 3</span>Your First Game</h2><div class="figure"><div class="shot"><img src="assets/frame_300.png" alt="Game Boy Advance boot screen"></div><p class="cap"><b>CrabBoy in action.</b> The moment a game boots, you&rsquo;ll see real, fully-rendered game screens just like this.</p></div><h2></h2>
+<p>There are two easy ways to start a game:</p>
+<p class="q"><strong>Method A — Double-click the game file</strong></p>
+<p>(works after running the installer on Linux, or after creating a shortcut on Windows): find your <code class="mono">.gba</code> file in your file manager and double-click it.</p>
+<p class="q"><strong>Method B — Open from the menu (works everywhere)</strong></p>
+<ol><li>In the menu bar, click <strong>File</strong>, then <strong>Open ROM…</strong></li><li>In the file picker, browse to the game file you want to play</li></ol>
+<p>(a <code class="mono">.gba</code>, <code class="mono">.gb</code>, or <code class="mono">.gbc</code> file) and select it.</p>
+<ol><li>The game boots exactly like it would on a real console — title screen,</li></ol>
+<p>music, and all.</p>
+<p>From here on, everything is play.</p>
+<div class="callout warn"><p><strong>Tip:</strong> You can leave one game loaded and switch to another at any time with <strong>File → Open ROM…</strong> — the new game simply takes over the screen.</p></div>
+<hr>
+<h2><span class="num">Section 4</span>Playing: The Controls</h2>
+<h3>Keyboard (the defaults)</h3>
+<p>You don&#x27;t need a gamepad. The keyboard maps naturally to a Game Boy Advance:</p>
+<table><thead><tr><th>On the console</th><th>On your keyboard</th></tr></thead><tbody><tr><td class="k"><strong>D-Pad</strong> (Up / Down / Left / Right)</td><td>The <strong>Arrow Keys</strong></td></tr><tr><td class="k"><strong>A</strong> button (the main action)</td><td><strong>Z</strong></td></tr><tr><td class="k"><strong>B</strong> button (cancel / secondary)</td><td><strong>X</strong></td></tr><tr><td class="k"><strong>L</strong> shoulder button</td><td><strong>A</strong></td></tr><tr><td class="k"><strong>R</strong> shoulder button</td><td><strong>S</strong></td></tr><tr><td class="k"><strong>Start</strong> (confirm, open menus)</td><td><strong>Enter</strong></td></tr><tr><td class="k"><strong>Select</strong> (back, secondary menu)</td><td><strong>Backspace</strong></td></tr></tbody></table>
+<p>If any of these clash with a habit of yours, or you&#x27;d like to play with a gamepad instead, open <strong>Controls → Configure Controls &amp; Gamepad…</strong> and reassign anything. Gamepads are supported automatically — plug one in and it will be recognized.</p>
+<h3>While the game is running, a few keys manage the *app*</h3>
+<table><thead><tr><th>Key</th><th>What it does</th></tr></thead><tbody><tr><td class="k"><strong>P</strong></td><td>Pause / resume the game (like turning the console off and on)</td></tr><tr><td class="k"><strong>Space (hold)</strong></td><td>Turbo: play at 4× speed — great for skipping long walks</td></tr><tr><td class="k"><strong>F5</strong></td><td>Snapshot — save this exact moment (see [Saving](#5-saving-your-progress))</td></tr><tr><td class="k"><strong>F8</strong></td><td>Restore your most recent snapshot</td></tr><tr><td class="k"><strong>Ctrl + R</strong></td><td>Start the game over from its very beginning</td></tr><tr><td class="k"><strong>F11</strong> or <strong>Alt+Enter</strong></td><td>Fullscreen / windowed (in fullscreen, the menu bar hides — move your mouse to the top edge of the screen to bring it back)</td></tr><tr><td class="k"><strong>F12</strong></td><td>Save a picture of the current screen</td></tr><tr><td class="k"><strong>F1</strong></td><td>Open the built-in illustrated guide (for Pokémon games)</td></tr></tbody></table>
+<hr>
+<h2><span class="num">Section 5</span>Saving Your Progress</h2>
+<p>There are <strong>two different kinds of saving</strong>, and both work together. It&#x27;s worth a moment to understand the difference, because it answers almost every &quot;why did my save disappear?&quot; question.</p>
+<h3>Kind 1 — The game&#x27;s own save (what you always had on a real console)</h3>
+<p>This is the save the *game* makes — &quot;Save completed&quot; in Pokémon, &quot;Game saved&quot; in your favorite RPG. It&#x27;s stored in a small file (<code class="mono">.sav</code> or similar) that sits <strong>next to your game file</strong> on your computer.</p>
+<ul><li>It works automatically. When the game says &quot;Save,&quot; it saves.</li><li><strong>Important:</strong> this file must live in the *same folder* as the game file.</li></ul>
+<p>If you move the game file, move the save file with it.</p>
+<ul><li>If you ever worry a save didn&#x27;t stick (for example, you&#x27;re about to close</li></ul>
+<p>the program mid-battle), use <strong>File → Save Battery (.sav)</strong> to force it onto disk.</p>
+<h3>Kind 2 — Instant snapshots (the emulator&#x27;s gift)</h3>
+<p>A <strong>snapshot</strong> (called a &quot;save state&quot; in emulator-speak) is a frozen picture of the *entire* game at one instant — where you are, your stats, even the exact frame on screen. Press <strong>F5</strong> and it&#x27;s captured; press <strong>F8</strong> and you&#x27;re back there, exactly, milliseconds later.</p>
+<p>You get <strong>ten snapshot slots</strong> (Slot 0 through Slot 9):</p>
+<ul><li><strong>F5 / F8</strong> always use your currently *active* slot (Slot 0 by default).</li><li>To switch slots, use <strong>Emulation → Active Save Slot</strong> and pick a number —</li></ul>
+<p>handy for keeping &quot;before the boss&quot; in Slot 1 while playing normally.</p>
+<ul><li><strong>File → Save State Manager (Ctrl+S)</strong> opens the full manager: browse all</li></ul>
+<p>ten slots, see when each was made, load any of them.</p>
+<p class="q"><strong>Everyday pattern that works well:</strong></p>
+<ol><li>Before anything risky (a boss, a hard platforming section, a trade),</li></ol>
+<p>press <strong>F5</strong>.</p>
+<ol><li>Fail? Press <strong>F8</strong> — you&#x27;re back at the safe moment. No restart.</li></ol>
+<div class="callout warn"><p><strong>Snapshot vs. game save — a one-line rule:</strong> use the *game&#x27;s own save* for your long-term progress (it&#x27;s what the game expects), and use *snapshots* as your safety net within a session. They don&#x27;t replace each other — they complement each other.</p></div>
+<hr>
+<h2><span class="num">Section 6</span>Undo Mistakes with Live Rewind</h2><div class="figure"><div class="shot"><img src="assets/frame_900.png" alt="In-game scene"></div><p class="cap"><b>Walked into trouble?</b> Live Rewind lets you step back through the last few seconds and try the same moment again &mdash; no reloading, no waiting.</p></div><h2></h2>
+<p>Snapshots need a moment to set up. <strong>Live Rewind</strong> is faster: the emulator keeps a rolling memory of the last several seconds of gameplay, and you can walk back through it.</p>
+<ul><li><strong>Hold <code class="mono">Tab</code></strong> — the game starts rewinding, faster the longer you hold it.</li><li><strong>Release</strong> — the game resumes forward from wherever you stopped.</li><li>Playing with a gamepad? Hold the <strong>L3</strong> stick-click (left stick pressed</li></ul>
+<p>down) to rewind.</p>
+<p>It&#x27;s perfect for that split-second where you fumbled a jump or a battle action. Rewind, release, and try it again — the game doesn&#x27;t know you ever missed.</p>
+<div class="callout warn"><p>Rewind memory is cleared if you press <strong>Ctrl+R</strong> (Reset) — a fresh start comes with a fresh, empty rewind buffer.</p></div>
+<hr>
+<h2><span class="num">Section 7</span>Making It Look Great</h2>
+<p>The GBA&#x27;s native screen is small and pixel-art style. CrabBoy Advance can present it beautifully on any modern display. All of this lives under the <strong>Video</strong> menu.</p>
+<h3>Choosing how the picture is scaled</h3>
+<p>The single most important choice is <strong>Filter / Scaler</strong>:</p>
+<table><thead><tr><th>Option</th><th>What you&#x27;ll see</th><th>Good for</th></tr></thead><tbody><tr><td class="k"><strong>Crisp Pixel (Nearest)</strong></td><td>Perfect, sharp, square pixels at any size</td><td>Faithful look, fast on any computer — <strong>the safe default</strong></td></tr><tr><td class="k"><strong>xBRZ High-Definition</strong></td><td>AI-smoothed edges — softer, more &quot;HD&quot; look</td><td>Making pixel art look modern; pick a scale (4× is recommended)</td></tr><tr><td class="k"><strong>Smooth (Bilinear)</strong></td><td>Gently blurred, classic &quot;soft&quot; scaling</td><td>A quick middle ground</td></tr><tr><td class="k"><strong>Retro LCD Grid</strong></td><td>A subtle grid, like a real handheld screen</td><td>Nostalgia</td></tr><tr><td class="k"><strong>CRT Scanlines</strong></td><td>Old-TV scanline effect</td><td>Vintage vibe</td></tr></tbody></table>
+<h3>Size on screen</h3>
+<p>Under <strong>Scale Preset</strong>, you control how big the picture is:</p>
+<ul><li><strong>Auto Integer (Pixel-Perfect)</strong> — the best choice for almost everyone.</li></ul>
+<p>The image scales up in whole-number steps so pixels stay perfectly square.</p>
+<ul><li><strong>Fit to Window</strong> — stretch to fill the window you&#x27;ve made.</li><li>Specific sizes (2× through 14×) — for particular monitors.</li></ul>
+<p>Then use <strong>F11</strong> for fullscreen whenever you want the whole room.</p>
+<h3>Personal touches</h3>
+<ul><li><strong>NVIDIA Adaptive Sharpening</strong> — a slider that adds crispness to edges.</li></ul>
+<p>Nudge it until the picture feels right to *you* (0 = off).</p>
+<ul><li><strong>Authentic GBA LCD Color Correction</strong> — warms the palette to match how a</li></ul>
+<p>real GBA screen looked. Lovely for authenticity.</p>
+<ul><li><strong>Ultrawide Ambient Edge Glow</strong> — soft light spill on ultrawide monitors.</li><li><strong>Console Bezel</strong> — frame the screen with a classic GBA shell (Indigo</li></ul>
+<p>Purple, Glacier Ice, SP Flame Red) or a Game Boy Player. Pure charm; the on-screen buttons even light up as you press them.</p>
+<ul><li><strong>Aspect Ratio</strong> — cycle through with <strong>F3</strong> if a game wants a different</li></ul>
+<p>shape than the default 3:2.</p>
+<p><strong>A good starting recipe:</strong> *Crisp Pixel + Auto Integer + F11 fullscreen.* Then try the other filters whenever curiosity strikes — nothing here is permanent, and every choice can be changed in a click.</p>
+<hr>
+<h2><span class="num">Section 8</span>Making It Sound Great</h2>
+<p>The GBA&#x27;s sound is stereo, but CrabBoy Advance can make it *feel* bigger. Everything lives under the <strong>Audio</strong> menu.</p>
+<h3>The simple choices</h3>
+<ul><li><strong>Volume slider</strong> and <strong>Mute</strong> — right at the top.</li><li><strong>3D Binaural Headphone Spatializer</strong> — if you&#x27;re wearing headphones,</li></ul>
+<p>this creates a natural sense of space in the sound. Comfortable for long sessions; often the best choice at home with cans on.</p>
+<ul><li><strong>5.1 Surround Sound Matrix Upmixer</strong> — if you have a real surround</li></ul>
+<p>receiver/speakers, this spreads the game across all six channels with a proper sub-bass channel.</p>
+<ul><li><strong>Direct Stereo (2.0)</strong> — the plain, untouched original sound. The</li></ul>
+<p>reference choice.</p>
+<p>The menu also shows you how many audio channels your computer actually detected, so you can see whether surround will really do anything.</p>
+<h3>The fancy stuff (all optional)</h3>
+<ul><li><strong>Subwoofer Bass Boost</strong> and <strong>Surround Ambience Width</strong> sliders — taste</li></ul>
+<p>settings; leave them where they are until you want to play.</p>
+<ul><li><strong>6-Channel Sound Mixer (Ctrl+M)</strong> — a per-channel mixer that can solo or</li></ul>
+<p>mute each of the six GBA sound channels, plus a &quot;turbo&quot; mode that keeps the pitch natural while you fast-forward. For tinkerers.</p>
+<p><strong>Recommendation:</strong> headphones → *3D Binaural*; speaker setup with a surround receiver → *5.1 Surround*; everything else → *Direct Stereo*.</p>
+<div class="callout warn"><p><strong>Fast-forward and sound:</strong> if the game sounds &quot;chippy&quot; when you hold Space, that&#x27;s the audio keeping up at 4× speed. Open the mixer (<strong>Ctrl+M</strong>) and enable the pitch-preserving turbo DSP to smooth it out.</p></div>
+<hr>
+<h2><span class="num">Section 9</span>Pause, Fast-Forward, and Speed</h2>
+<table><thead><tr><th>Action</th><th>How</th></tr></thead><tbody><tr><td class="k">Pause the game</td><td><strong>P</strong> or <strong>Emulation → Pause</strong></td></tr><tr><td class="k">Resume</td><td><strong>P</strong> again</td></tr><tr><td class="k">Advance one tiny step at a time (while paused)</td><td><strong>F</strong></td></tr><tr><td class="k">Skip long boring sections</td><td><strong>Hold Space</strong> (4× turbo) — release to return to normal speed</td></tr><tr><td class="k">Permanently play at 2× or 4×</td><td><strong>Emulation → Speed</strong> (1×, 2×, or 4×)</td></tr><tr><td class="k">Restart the whole game</td><td><strong>Ctrl+R</strong></td></tr></tbody></table>
+<p>A few notes:</p>
+<ul><li><strong>Turbo (Space) is a game skimmer, not a bug.</strong> Music will be faster and</li></ul>
+<p>higher-pitched while it&#x27;s active — that&#x27;s the audio trying to keep up. Release the key and everything returns to normal.</p>
+<ul><li><strong>Speed settings</strong> are useful for games with long walking segments or</li></ul>
+<p>farm-chore loops. Not every game handles 4× gracefully; if one looks odd, drop to 2×.</p>
+<ul><li><strong>Restarting (Ctrl+R)</strong> takes the game back to its very first frame. Your</li></ul>
+<p>*game saves* and *snapshots* are untouched — you can snapshot before a restart and come back to it later.</p>
+<hr>
+<h2><span class="num">Section 10</span>Fun Extras</h2>
+<p>These live under <strong>Tools</strong>. None of them are required — they&#x27;re the reasons this emulator is a little magic.</p>
+<h3>🤖 AI Agent Player — watch an AI play (*Ctrl+A*)</h3>
+<p>Hand the virtual controller to an AI and watch it try to play the game. The agent looks at the screen, decides what to press, and a side panel streams what it *sees*, what it *wants to do*, and which buttons it&#x27;s holding — in real time.</p>
+<ul><li>Open with <strong>Ctrl+A</strong> or <strong>Tools → AI Agent Player</strong>.</li><li>It works with a &quot;vision&quot; AI model you run on your own computer (or one it</li></ul>
+<p>can reach); there&#x27;s also a simple built-in autopilot that needs nothing at all.</p>
+<ul><li><strong>Test Connection</strong> inside the dialog confirms everything is wired up</li></ul>
+<p>before you start.</p>
+<ul><li>You can even <strong>co-op</strong>: with co-op mode on, your keypresses join the</li></ul>
+<p>agent&#x27;s instead of overriding it — nudge it out of trouble and let it drive the rest.</p>
+<p>It&#x27;s wonderfully entertaining on menu-driven games (Pokémon included), and a great party trick.</p>
+<h3>📜 Cheats &amp; RAM Searcher (*Ctrl+C*)</h3>
+<p>Paste in cheat codes (GameShark, Action Replay, CodeBreaker) or search the game&#x27;s memory for values like &quot;gold = 9999&quot; and lock them in place. If you&#x27;ve ever used a cheat code on a console, this works just like that — the code goes in the box, you press add, done.</p>
+<h3>🔗 Link Cable &amp; Multiplayer (*Ctrl+L*)</h3>
+<p>Play a link-cable multiplayer game (think Pokémon trading or battle) with a second copy of the emulator, with the &quot;cable&quot; wired up inside your computer. The dialog walks you through starting two instances and connecting them.</p>
+<h3>🎥 Record an Animated GIF (*Ctrl+F12*)</h3>
+<p>Press it once to start recording your gameplay as a looping GIF, press it again to stop — the finished file lands in a <code class="mono">recordings</code> folder next to the program. Perfect for sharing a clip of a hard-won battle.</p>
+<h3>📸 Screenshot (*F12*)</h3>
+<p>One key, one picture of the current screen, saved to disk. (You can choose in the Video menu whether the picture is the enhanced version you&#x27;re seeing or the raw 1× original.)</p>
+<h3>🎮 Hardware Sensors (Solar / Tilt / Rumble)</h3>
+<p>Some GBA games include a light sensor, a tilt sensor, or a rumble pack in the cartridge. This emulator emulates all three, with a visual bubble-level for the tilt. Open <strong>Tools → Hardware Sensors</strong> to see and adjust them. Games that use these features just work — you don&#x27;t usually need to touch this menu.</p>
+<h3>🐾 Pokémon Gen 3 Companion (*Ctrl+P*)</h3>
+<p>A friendly side panel for Pokémon Ruby, Sapphire, and Emerald that reads your in-game party and related data live, so you can glance at your team without digging through menus.</p>
+<h3>⏱ TAS Speedrun Engine (*Ctrl+Y*)</h3>
+<p>For the obsessive: record frame-perfect input sequences, replay them perfectly, and share them with the speedrunning world. You don&#x27;t need this for normal play — but it&#x27;s there if ambition strikes.</p>
+<h3>📖 Built-in Illustrated Guide (*F1*)</h3>
+<p>An 8-page illustrated Pokémon field guide and trainer&#x27;s manual, built right into the program — chapters on quick start, controls, visual filters, the companion panel, sensors, multiplayer, and troubleshooting. Browse it with <strong>Help → Jump to Chapter</strong>, or export it to a PDF with <strong>Help → Export PDF Manual to Disk…</strong>.</p>
+<hr>
+<h2><span class="num">Section 11</span>Keeping Up to Date</h2><div class="figure"><div class="shot"><img src="assets/frame_600.png" alt="A forest scene in game"></div><p class="cap"><b>Exploring the open world.</b> Scenes like this are where the Pok&eacute;mon Companion, the AI Agent Player, and your own creativity all come together.</p></div><h2></h2>
+<p>CrabBoy Advance checks for new versions in the background when it starts, and tells you in the <strong>Update</strong> tab in the menu bar when something new is available.</p>
+<ul><li><strong>Update → Check for Updates Now</strong> — check on demand.</li><li>When a new version appears, the tab lights up with <strong>🔄 Update (New!)</strong> —</li></ul>
+<p>click <strong>Update Now</strong>, watch the download, then click <strong>Restart</strong> when it&#x27;s ready. Your settings and saved games are not affected.</p>
+<ul><li>Downloads are verified before they&#x27;re installed, so you always know the</li></ul>
+<p>file is genuine.</p>
+<hr>
+<h2><span class="num">Section 12</span>Where Things Are Saved</h2>
+<p>Everything stays in predictable, findable places:</p>
+<table><thead><tr><th>Thing</th><th>Where it lives</th></tr></thead><tbody><tr><td class="k"><strong>Game files (.gba/.gb/.gbc)</strong></td><td>Wherever you keep them — e.g. a <code class="mono">Games</code> folder</td></tr><tr><td class="k"><strong>Game&#x27;s own save files (.sav etc.)</strong></td><td>Automatically created *next to the game file*</td></tr><tr><td class="k"><strong>Snapshots (save states)</strong></td><td>A <code class="mono">saves</code> folder next to the program (files like <code class="mono">YourGame_slot0.state</code>)</td></tr><tr><td class="k"><strong>GIF recordings &amp; AI session logs</strong></td><td>A <code class="mono">recordings</code> folder next to the program</td></tr><tr><td class="k"><strong>Screenshots</strong></td><td>A screenshots folder created by the app (a toast message tells you the exact name and location every time)</td></tr></tbody></table>
+<p><strong>Before moving or deleting things:</strong> keep the <code class="mono">saves</code>, <code class="mono">recordings</code> folders and any <code class="mono">.sav</code> files with their games. Those *are* your progress.</p>
+<hr>
+<h2><span class="num">Section 13</span>Troubleshooting</h2>
+<p class="q"><strong>&quot;The screen is black / the game froze after a scene transition.&quot;</strong></p>
+<p>Restart the game (<strong>Ctrl+R</strong>). If it happens in the same spot every time, check <strong>Update → Check for Updates Now</strong> — many of these exact situations have been fixed in recent versions. If it persists, a snapshot taken just before the trouble spot (F5) lets you retry from there.</p>
+<p class="q"><strong>&quot;My save is gone.&quot;</strong></p>
+<p>Two usual causes:</p>
+<ol><li>You moved the game file — the save file lives *next to it* and didn&#x27;t</li></ol>
+<p>come along. Move it back together.</p>
+<ol><li>You were relying on a snapshot (F8) instead of the game&#x27;s own save, or</li></ol>
+<p>vice versa. Remember: <strong>the game&#x27;s save is long-term; snapshots are session safety nets.</strong> Use <strong>File → Save Battery (.sav)</strong> to force the game&#x27;s save to disk when in doubt.</p>
+<p class="q"><strong>&quot;No sound.&quot;</strong></p>
+<ul><li>Check the <strong>Audio</strong> menu: is Mute on? Is the volume slider at zero?</li><li>Check your computer&#x27;s own system volume — the emulator only controls its</li></ul>
+<p>share of the mix.</p>
+<ul><li>If you just loaded a snapshot that was taken before sound started, let the</li></ul>
+<p>game&#x27;s scene run a couple of seconds; audio resumes with the game.</p>
+<p class="q"><strong>&quot;Sound is weird when I fast-forward.&quot;</strong></p>
+<p>Expected — the game is running 4× as fast. Release Space to return to normal, or enable the pitch-preserving turbo in the mixer (<strong>Ctrl+M</strong>).</p>
+<p class="q"><strong>&quot;The picture looks blurry or stretched.&quot;</strong></p>
+<p>In <strong>Video</strong>: set Filter to <strong>Crisp Pixel (Nearest)</strong> and Scale Preset to <strong>Auto Integer (Pixel-Perfect)</strong>. That combination is pixel-perfect by construction.</p>
+<p class="q"><strong>&quot;A gamepad doesn&#x27;t work / the wrong button is pressed.&quot;</strong></p>
+<p>Open <strong>Controls → Configure Controls &amp; Gamepad…</strong>, make sure the correct device is selected, and re-map any button that feels off.</p>
+<p class="q"><strong>&quot;I want to play a Game Boy / Game Boy Color game.&quot;</strong></p>
+<p>They work — just open the <code class="mono">.gb</code> or <code class="mono">.gbc</code> file the same way. The <strong>Game Boy</strong> menu tells you which system is currently running and can force classic Game Boy mode if a Game Boy Color game wants it.</p>
+<p class="q"><strong>&quot;The AI player says it can&#x27;t reach the server / shows an error.&quot;</strong></p>
+<p>The AI needs a vision-capable AI model to talk to. In the dialog, click <strong>Test Connection</strong> — it will tell you plainly whether the endpoint answered and which model responded. The built-in <strong>heuristic autopilot</strong> works with no server at all, so you can still watch the agent play.</p>
+<p class="q"><strong>&quot;Is there a version for my other computer / platform?&quot;</strong></p>
+<p>Official builds are for <strong>Linux x64</strong> and <strong>Windows x64</strong>. The Update center automatically picks the right one for the computer it&#x27;s running on.</p>
+<p class="q"><strong>&quot;Something else is off.&quot;</strong></p>
+<p>A few universal rescues, in order:</p>
+<ol><li><strong>P</strong> (pause), then <strong>Ctrl+R</strong> (restart the game from the top).</li><li><strong>F8</strong> (back to your last snapshot) — if you made one.</li><li><strong>File → Save Battery (.sav)</strong>, then close and reopen the program.</li><li>Check for updates.</li></ol>
+<p>That sequence resolves the overwhelming majority of &quot;the game is stuck&quot; situations.</p>
+<hr>
+<h2><span class="num">Section 14</span>Glossary of Friendly Terms</h2>
+<table><thead><tr><th>Term</th><th>Plain meaning</th></tr></thead><tbody><tr><td class="k"><strong>ROM</strong></td><td>Your game file — a <code class="mono">.gba</code>, <code class="mono">.gb</code>, or <code class="mono">.gbc</code> file that the emulator plays</td></tr><tr><td class="k"><strong>Save / .sav</strong></td><td>The *game&#x27;s own* progress file, kept next to the game</td></tr><tr><td class="k"><strong>Snapshot / save state</strong></td><td>An instant frozen picture of the whole game (F5/F8) — your undo button</td></tr><tr><td class="k"><strong>Slot</strong></td><td>One of the ten separate snapshot spots you can save into</td></tr><tr><td class="k"><strong>Turbo / fast-forward</strong></td><td>Holding Space to play at 4× speed</td></tr><tr><td class="k"><strong>Rewind</strong></td><td>Holding Tab to walk backwards through the last few seconds</td></tr><tr><td class="k"><strong>Cheat code</strong></td><td>A short string (like <code class="mono">30021000 00000064</code>) that changes a value in the game — health, gold, a level</td></tr><tr><td class="k"><strong>Link cable</strong></td><td>The old way of connecting two consoles for multiplayer; here it&#x27;s virtual and inside your computer</td></tr><tr><td class="k"><strong>xBRZ</strong></td><td>A &quot;make pixel art look HD&quot; picture filter</td></tr><tr><td class="k"><strong>Bezel</strong></td><td>A decorative console frame drawn around the screen</td></tr><tr><td class="k"><strong>TAS</strong></td><td>&quot;Tool-Assisted Speedrun&quot; — frame-perfect input recording and replay</td></tr><tr><td class="k"><strong>AI Agent Player</strong></td><td>A mode where an AI watches the screen and plays the game, with a side panel narrating its thoughts</td></tr></tbody></table>
+<hr>
+<h2>A final word</h2>
+<p>CrabBoy Advance is deliberately *more* than a Game Boy Advance — but it is first and foremost a Game Boy Advance. If you forget every menu in this manual, remember only three things:</p>
+<ul><li><strong>Arrows + Z + X + Enter</strong> is a complete controller.</li><li><strong>F5 before scary things, F8 after them.</strong></li><li><strong>Everything else is optional fun.</strong></li></ul>
+<div class="figure"><div class="shot"><img src="assets/frame_1200.png" alt="A forest path in game"></div><p class="cap"><b>Your adventure, on your terms.</b> CrabBoy gives you the tools &mdash; the journey is yours to take.</p></div><p>Happy playing. 🦀</p>
+<hr>
+<p>*CrabBoy Advance is an open-source Game Boy Advance emulator written in Rust. This manual covers version 0.5.0. For the full technical specifications, see the project&#x27;s README; for in-game strategy, the built-in Trainer&#x27;s Guide (<strong>F1</strong>).*</p>
+
+  <div class="foot">
+    <span>The Player&rsquo;s Manual &middot; CrabBoy Advance v0.5.0</span>
+    <span>Free &amp; open source &middot; Built with care</span>
+  </div>
+</div>
+</body></html>

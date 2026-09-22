@@ -128,9 +128,9 @@ it is missing).
 
 #### Package a release tarball
 ```bash
-./scripts/package_release.sh 0.5.0
+./scripts/package_release.sh 5.1.0
 ```
-Produces a reproducible `target/crabboy-advance-v0.5.0-linux-x86_64.tar.gz`
+Produces a reproducible `target/crabboy-advance-v5.1.0-linux-x86_64.tar.gz`
 plus `SHA256SUMS.txt`.
 
 ### Windows
