@@ -15,6 +15,7 @@ pub mod game_guide;
 pub mod gif_recorder;
 pub mod guide_dialog;
 pub mod link_dialog;
+pub mod memmap_dialog;
 pub mod platform;
 pub mod pokemon_companion;
 pub mod rewind;
@@ -30,6 +31,7 @@ pub mod updater_dialog;
 pub mod web_guide;
 
 use accessibility_dialog::AccessibilityDialog;
+use memmap_dialog::MemoryMapDialog;
 use ai_agent::AiAgent;
 use ai_agent_dialog::AiAgentDialog;
 use audio_mixer_dialog::AudioMixerDialog;
@@ -103,6 +105,8 @@ pub struct GbaApp {
     pub updater_dialog: UpdaterDialog,
     pub save_sync_dialog: SaveSyncDialog,
     pub accessibility_dialog: AccessibilityDialog,
+    /// Per-game memory map and guided variable discovery (ROADMAP M11).
+    pub memmap_dialog: MemoryMapDialog,
     /// Colorblind filter, slow motion, sticky buttons, one-handed layout and
     /// UI scale, per game (ROADMAP M10).
     pub accessibility: crate::gba::accessibility::AccessibilityManager,
@@ -276,6 +280,7 @@ impl GbaApp {
             updater_dialog: UpdaterDialog::new(),
             save_sync_dialog: SaveSyncDialog::new(),
             accessibility_dialog: AccessibilityDialog::new(),
+            memmap_dialog: MemoryMapDialog::new(),
             accessibility,
             run_ahead,
             run_ahead_config,
@@ -391,6 +396,9 @@ impl GbaApp {
                         if let Some(cart) = self.gba.mmu.cartridge.as_ref() {
                             let (code, title) = (cart.game_code.clone(), cart.title.clone());
                             self.accessibility.load_for_game(&code, &title);
+                            if let Some(msg) = self.memmap_dialog.on_game_loaded(&code, &title) {
+                                log::info!("{msg}");
+                            }
                         }
                         self.sync_saves();
                         self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
@@ -473,7 +481,11 @@ impl GbaApp {
     fn reset_active(&mut self) {
         match self.gb {
             Some(ref mut gb) => gb.reset(),
-            None => self.gba.reset(),
+            None => {
+                self.gba.reset();
+                // A reset re-randomizes relocating game data: new session.
+                self.memmap_dialog.on_reset();
+            }
         }
     }
 
@@ -945,6 +957,9 @@ impl eframe::App for GbaApp {
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::P) {
                 self.pokemon_companion.is_open = !self.pokemon_companion.is_open;
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::J) {
+                self.memmap_dialog.is_open = !self.memmap_dialog.is_open;
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::U) {
                 self.accessibility_dialog.is_open = !self.accessibility_dialog.is_open;
@@ -1771,6 +1786,7 @@ impl eframe::App for GbaApp {
                     ui.checkbox(&mut self.debug_windows.show_audio, "APU Audio Inspector & Oscilloscope (F7)");
                     ui.checkbox(&mut self.debug_windows.show_ppu, "PPU Layers & OAM Inspector (F6)");
                     ui.checkbox(&mut self.debug_windows.show_memory, "Memory Hex Viewer & Watchpoints (Ctrl+M)");
+                    ui.checkbox(&mut self.memmap_dialog.is_open, "🧠 Memory Map & Variable Discovery (Ctrl+J)");
                     ui.checkbox(&mut self.debug_windows.show_cpu, "ARM7TDMI CPU Inspector");
                     ui.checkbox(&mut self.debug_windows.show_palette, "Palette RAM Viewer");
                     ui.separator();
@@ -2272,7 +2288,7 @@ impl eframe::App for GbaApp {
         self.cheats_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.link_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.sensors_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
-        self.pokemon_companion.show(ctx, &self.gba);
+        self.pokemon_companion.show(ctx, &self.gba, &self.memmap_dialog.map);
         self.audio_mixer_dialog.show(ctx, &mut self.gba, &mut dialog_toast);
         self.tas_dialog.show(ctx, &mut self.tas_engine, &mut self.gba, &mut dialog_toast);
         self.ai_agent_dialog.show_dialog(ctx, &mut self.ai_agent, &self.loaded_rom_name, &mut dialog_toast);
@@ -2305,6 +2321,8 @@ impl eframe::App for GbaApp {
         if (ctx.zoom_factor() - zoom).abs() > 0.001 && !ctx.input(|i| i.pointer.any_down()) {
             ctx.set_zoom_factor(zoom);
         }
+
+        self.memmap_dialog.show(ctx, &mut self.gba, &mut self.debug_windows.mem_state.watch_list, &mut dialog_toast);
 
         let local_dirs = self.local_save_directories();
         self.save_sync_dialog.show(

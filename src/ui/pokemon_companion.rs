@@ -248,7 +248,9 @@ impl PokemonCompanion {
         })
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, _gba: &Gba) {
+    /// `map` is the game's discovered memory map (ROADMAP M11); its
+    /// variables are shown live under the party.
+    pub fn show(&mut self, ctx: &egui::Context, gba: &Gba, map: &crate::gba::memmap::MemoryMap) {
         if !self.is_open {
             return;
         }
@@ -263,6 +265,20 @@ impl PokemonCompanion {
                 ui.heading("Trainer Party & Stat Inspector");
                 ui.label(RichText::new("Live memory decryption of active party Pokémon in EWRAM.").weak().small());
                 ui.separator();
+
+                if !map.variables.is_empty() {
+                    ui.collapsing(format!("🧠 Discovered variables ({})", map.variables.len()), |ui| {
+                        egui::Grid::new("companion_memmap").striped(true).show(ui, |ui| {
+                            for v in &map.variables {
+                                ui.label(RichText::new(&v.name).strong());
+                                let value = v.read_live(&gba.mmu).map(|x| x.to_string()).unwrap_or_else(|| "—".into());
+                                ui.label(RichText::new(value).monospace().color(Color32::LIGHT_GREEN));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
 
                 if self.party.is_empty() {
                     ui.label(RichText::new("No active Pokémon party found in memory.").italics());
