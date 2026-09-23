@@ -1074,6 +1074,14 @@ mod tests {
         let mut cpu = Arm7Tdmi::new();
         let mut mmu = Mmu::new();
 
+        // All four instructions are written up front: the ARM7TDMI prefetches
+        // two instructions ahead, so writing the next opcode just before
+        // executing it would (correctly) run the stale one.
+        mmu.write32(0x0300_0000, 0xE121_F003); // msr cpsr_c, r3
+        mmu.write32(0x0300_0004, 0xE121_F002); // msr cpsr_c, r2
+        mmu.write32(0x0300_0008, 0xE128_F001); // msr cpsr_f, r1
+        mmu.write32(0x0300_000C, 0xE321_F01F); // msr cpsr_c, #0x1F
+
         // 1. msr cpsr_c, r3 (control only) where r3 = 0x1F (System mode)
         // Opcode: 0xE121F003
         // cond = E, I = 0, R = 0, field = 0001 (c), Rd = F, Rm = 3

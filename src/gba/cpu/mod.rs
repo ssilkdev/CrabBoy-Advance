@@ -73,6 +73,14 @@ pub struct Arm7Tdmi {
     pub cycles: u64,
     /// Whether CPU is currently executing an IRQ handler
     pub in_irq: bool,
+    /// Prefetch pipeline (ROADMAP M1). The ARM7TDMI fetches two instructions
+    /// ahead, so code that overwrites the next one or two instructions still
+    /// runs the old ones (jsmolka nes.gba test #1). `pipe` holds the already
+    /// fetched opcodes at `pipe_addr` and the one after it; `pipe_valid` is
+    /// cleared by any branch, mode switch, exception or state load.
+    pub pipe: [u32; 2],
+    pub pipe_addr: u32,
+    pub pipe_valid: bool,
 }
 
 impl Default for Arm7Tdmi {
@@ -107,6 +115,9 @@ impl Arm7Tdmi {
             spsr_und: 0,
             halted: false,
             irq_pending: false,
+            pipe: [0; 2],
+            pipe_addr: 0,
+            pipe_valid: false,
             cycles: 0,
             in_irq: false,
         };

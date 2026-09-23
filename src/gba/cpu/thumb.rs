@@ -4,9 +4,29 @@ use super::alu::{add_with_carry, barrel_shift, sub_with_borrow, ShiftType};
 use super::{Arm7Tdmi, FLAG_C, FLAG_N, FLAG_T, FLAG_V, FLAG_Z};
 use crate::gba::mmu::Mmu;
 
+/// Execute one THUMB instruction through the two-stage prefetch pipeline
+/// (see `step_arm`).
 pub fn step_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     let pc = cpu.regs[15];
-    let instr = mmu.read16(pc);
+    let (instr, next) = if cpu.pipe_valid && cpu.pipe_addr == pc {
+        (cpu.pipe[0] as u16, cpu.pipe[1])
+    } else {
+        (mmu.read16(pc), mmu.read16(pc.wrapping_add(2)) as u32)
+    };
+    let fetched = mmu.read16(pc.wrapping_add(4)) as u32;
+    let cycles = execute_thumb(cpu, mmu, instr);
+    if cpu.regs[15] == pc.wrapping_add(2) && cpu.is_thumb() {
+        cpu.pipe = [next, fetched];
+        cpu.pipe_addr = cpu.regs[15];
+        cpu.pipe_valid = true;
+    } else {
+        cpu.pipe_valid = false;
+    }
+    cycles
+}
+
+fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
+    let pc = cpu.regs[15];
     cpu.regs[15] = pc.wrapping_add(2);
 
     // Format 19: Long Branch with Link (BL)
