@@ -15,8 +15,10 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     } else {
         (mmu.read32(pc), mmu.read32(pc.wrapping_add(4)))
     };
-    // Fetch stage: PC+8 is read before this instruction executes.
+    // Fetch stage: PC+8 is read before this instruction executes. It is
+    // also what the data bus holds, so it's the open-bus value.
     let fetched = mmu.read32(pc.wrapping_add(8));
+    mmu.open_bus = fetched;
     let cycles = execute_arm(cpu, mmu, instr);
     // Keep the pipeline only for straight-line ARM execution.
     if cpu.regs[15] == pc.wrapping_add(4) && !cpu.is_thumb() {
@@ -70,6 +72,15 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
     }
 
     // Block Data Transfer (LDM, STM)
+    //
+    // ARM7TDMI quirks (ROADMAP M1, jsmolka arm.gba 500-5xx):
+    // - Addresses are force-aligned and never rotated, but writeback uses
+    //   the unaligned base +/- 4*n.
+    // - Empty register list: transfers R15 only and moves the base by 0x40.
+    // - STM with the base in the list: the first register stored stores the
+    //   old base; any later position stores the written-back base.
+    // - LDM with the base in the list: the loaded value wins (no writeback).
+    // - S bit without R15 in an LDM (or on any STM): user-bank registers.
     if (instr & 0x0E00_0000) == 0x0800_0000 {
         let p = (instr & (1 << 24)) != 0;
         let u = (instr & (1 << 23)) != 0;
@@ -77,51 +88,66 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
         let w = (instr & (1 << 21)) != 0;
         let l = (instr & (1 << 20)) != 0;
         let rn = ((instr >> 16) & 0xF) as usize;
-        let reg_list = instr & 0xFFFF;
+        let empty = instr & 0xFFFF == 0;
+        let reg_list = if empty { 1 << 15 } else { instr & 0xFFFF };
 
-        let addr = cpu.regs[rn];
+        let base = cpu.regs[rn];
         let num_regs = reg_list.count_ones();
-        let total_bytes = num_regs * 4;
+        let total_bytes = if empty { 0x40 } else { num_regs * 4 };
 
         let start_addr = if u {
-            if p { addr.wrapping_add(4) } else { addr }
+            if p { base.wrapping_add(4) } else { base }
+        } else if p {
+            base.wrapping_sub(total_bytes)
         } else {
-            if p { addr.wrapping_sub(total_bytes) } else { addr.wrapping_sub(total_bytes).wrapping_add(4) }
+            base.wrapping_sub(total_bytes).wrapping_add(4)
         };
+        let final_addr = if u { base.wrapping_add(total_bytes) } else { base.wrapping_sub(total_bytes) };
 
-        let final_addr = if u { addr.wrapping_add(total_bytes) } else { addr.wrapping_sub(total_bytes) };
-
-        let mut cur_addr = start_addr;
         let pc_in_list = (reg_list & (1 << 15)) != 0;
-
-        for r in 0..16 {
-            if (reg_list & (1 << r)) != 0 {
-                if l {
-                    let val = mmu.read32(cur_addr);
-                    if r == 15 {
-                        if s {
-                            let spsr = cpu.get_spsr();
-                            cpu.set_cpsr(spsr);
-                            cpu.in_irq = false;
-                            if (spsr & FLAG_T) != 0 {
-                                cpu.regs[15] = val & !1;
-                            } else {
-                                cpu.regs[15] = val & !3;
-                            }
-                        } else {
-                            cpu.regs[15] = val & !3;
-                        }
-                    } else {
-                        cpu.regs[r] = val;
-                    }
-                } else {
-                    let val = if r == 15 { pc.wrapping_add(12) } else { cpu.regs[r] };
-                    mmu.write32(cur_addr, val);
-                }
-                cur_addr = cur_addr.wrapping_add(4);
-            }
+        let user_bank = s && !(l && pc_in_list);
+        let orig_mode = cpu.get_mode();
+        if user_bank {
+            cpu.set_mode(super::CpuMode::System);
         }
 
+        let lowest = reg_list.trailing_zeros() as usize;
+        let mut cur_addr = start_addr;
+        for r in 0..16 {
+            if (reg_list & (1 << r)) == 0 {
+                continue;
+            }
+            let aligned = cur_addr & !3;
+            if l {
+                let val = mmu.read32(aligned);
+                if r == 15 {
+                    if s {
+                        let spsr = cpu.get_spsr();
+                        cpu.set_cpsr(spsr);
+                        cpu.in_irq = false;
+                        cpu.regs[15] = if (spsr & FLAG_T) != 0 { val & !1 } else { val & !3 };
+                    } else {
+                        cpu.regs[15] = val & !3;
+                    }
+                } else {
+                    cpu.regs[r] = val;
+                }
+            } else {
+                let val = if r == 15 {
+                    pc.wrapping_add(12)
+                } else if r == rn && w && r != lowest && !user_bank {
+                    final_addr
+                } else {
+                    cpu.regs[r]
+                };
+                mmu.write32(aligned, val);
+            }
+            cur_addr = cur_addr.wrapping_add(4);
+        }
+
+        if user_bank {
+            cpu.set_mode(orig_mode);
+        }
         if w && (!l || (reg_list & (1 << rn)) == 0) {
             cpu.regs[rn] = final_addr;
         }
@@ -229,9 +255,9 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
 
         if l {
             let val = match op {
-                1 => mmu.read16(target_addr) as u32,
+                1 => super::load_halfword(mmu, target_addr),
                 2 => (mmu.read8(target_addr) as i8) as i32 as u32,
-                3 => (mmu.read16(target_addr) as i16) as i32 as u32,
+                3 => super::load_signed_halfword(mmu, target_addr),
                 _ => 0,
             };
             if rd == 15 {
@@ -520,6 +546,16 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
             cpu.set_flag(FLAG_Z, res == 0);
             cpu.set_flag(FLAG_C, carry_out);
             cpu.set_flag(FLAG_V, overflow);
+        }
+
+        // TST/TEQ/CMP/CMN with Rd = PC (the old 26-bit "P" forms) copy SPSR
+        // into CPSR on the ARM7TDMI, which can switch mode, but do not
+        // branch or flush the pipeline. jsmolka arm.gba tests 234-235.
+        if is_test && rd == 15 && cpu.get_mode() != super::CpuMode::User
+            && cpu.get_mode() != super::CpuMode::System
+        {
+            let spsr = cpu.get_spsr();
+            cpu.set_cpsr(spsr);
         }
 
         return if branched { 3 } else { 1 };

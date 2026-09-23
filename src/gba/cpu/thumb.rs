@@ -4,6 +4,23 @@ use super::alu::{add_with_carry, barrel_shift, sub_with_borrow, ShiftType};
 use super::{Arm7Tdmi, FLAG_C, FLAG_N, FLAG_T, FLAG_V, FLAG_Z};
 use crate::gba::mmu::Mmu;
 
+/// THUMB open bus depends on the region the code runs from (GBATEK
+/// "Unpredictable Things"): 16-bit buses repeat the fetched halfword, while
+/// BIOS/OAM and 32-bit IWRAM combine it with the neighbouring one.
+fn thumb_open_bus(pc: u32, next: u32, fetched: u32) -> u32 {
+    let (next, fetched) = (next & 0xFFFF, fetched & 0xFFFF);
+    match pc >> 24 {
+        // BIOS, OAM: [$+6]:[$+4]; approximated by the prefetched pair.
+        0x00 | 0x07 => fetched << 16 | next,
+        // IWRAM (32-bit bus): the aligned word containing $+4.
+        0x03 => {
+            if pc & 2 == 0 { next << 16 | fetched } else { fetched << 16 | next }
+        }
+        // EWRAM, palette, VRAM, ROM: 16-bit buses.
+        _ => fetched << 16 | fetched,
+    }
+}
+
 /// Execute one THUMB instruction through the two-stage prefetch pipeline
 /// (see `step_arm`).
 pub fn step_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
@@ -14,6 +31,7 @@ pub fn step_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
         (mmu.read16(pc), mmu.read16(pc.wrapping_add(2)) as u32)
     };
     let fetched = mmu.read16(pc.wrapping_add(4)) as u32;
+    mmu.open_bus = thumb_open_bus(pc, next, fetched);
     let cycles = execute_thumb(cpu, mmu, instr);
     if cpu.regs[15] == pc.wrapping_add(2) && cpu.is_thumb() {
         cpu.pipe = [next, fetched];
@@ -73,27 +91,46 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
     }
 
     // Format 15: Multiple Load/Store (LDMIA, STMIA)
+    //
+    // ARM7TDMI quirks (ROADMAP M1, jsmolka thumb.gba 227-230), as in ARM
+    // mode: an empty list transfers R15 and adds 0x40 to the base; STMIA
+    // with the base in the list stores the old base only if it's first;
+    // addresses are force-aligned without rotation.
     if (instr & 0xF000) == 0xC000 {
         let l = (instr & (1 << 11)) != 0;
         let rb = ((instr >> 8) & 7) as usize;
         let reg_list = (instr & 0xFF) as u8;
+        let base = cpu.regs[rb];
 
-        let mut addr = cpu.regs[rb];
+        if reg_list == 0 {
+            if l {
+                cpu.regs[15] = mmu.read32(base & !3) & !1;
+            } else {
+                // The stored PC is the instruction address + 6.
+                mmu.write32(base & !3, pc.wrapping_add(6));
+            }
+            cpu.regs[rb] = base.wrapping_add(0x40);
+            return 3;
+        }
+
         let num_regs = reg_list.count_ones();
-
+        let final_addr = base.wrapping_add(num_regs * 4);
+        let lowest = reg_list.trailing_zeros() as usize;
+        let mut addr = base;
         for r in 0..8 {
             if (reg_list & (1 << r)) != 0 {
                 if l {
-                    cpu.regs[r] = mmu.read32(addr);
+                    cpu.regs[r] = mmu.read32(addr & !3);
                 } else {
-                    mmu.write32(addr, cpu.regs[r]);
+                    let val = if r == rb && r != lowest { final_addr } else { cpu.regs[r] };
+                    mmu.write32(addr & !3, val);
                 }
                 addr = addr.wrapping_add(4);
             }
         }
 
         if !l || (reg_list & (1 << rb)) == 0 {
-            cpu.regs[rb] = addr;
+            cpu.regs[rb] = final_addr;
         }
         return num_regs + 2;
     }
@@ -112,12 +149,12 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
 
             for r in 0..8 {
                 if (reg_list & (1 << r)) != 0 {
-                    mmu.write32(sp, cpu.regs[r]);
+                    mmu.write32(sp & !3, cpu.regs[r]);
                     sp = sp.wrapping_add(4);
                 }
             }
             if r_bit {
-                mmu.write32(sp, cpu.regs[14]); // Store LR
+                mmu.write32(sp & !3, cpu.regs[14]); // Store LR
             }
             return num + 2;
         } else {
@@ -127,12 +164,12 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
 
             for r in 0..8 {
                 if (reg_list & (1 << r)) != 0 {
-                    cpu.regs[r] = mmu.read32(sp);
+                    cpu.regs[r] = mmu.read32(sp & !3);
                     sp = sp.wrapping_add(4);
                 }
             }
             if r_bit {
-                let target = mmu.read32(sp);
+                let target = mmu.read32(sp & !3);
                 sp = sp.wrapping_add(4);
                 cpu.regs[15] = target & !1;
             }
@@ -184,7 +221,7 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
         let rd = (instr & 7) as usize;
         let addr = cpu.regs[rb].wrapping_add(offset);
         if l {
-            cpu.regs[rd] = mmu.read16(addr) as u32;
+            cpu.regs[rd] = super::load_halfword(mmu, addr);
         } else {
             mmu.write16(addr, (cpu.regs[rd] & 0xFFFF) as u16);
         }
@@ -228,9 +265,9 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
 
         match (s, h) {
             (false, false) => mmu.write16(addr, (cpu.regs[rd] & 0xFFFF) as u16), // STRH
-            (false, true) => cpu.regs[rd] = mmu.read16(addr) as u32,             // LDRH
+            (false, true) => cpu.regs[rd] = super::load_halfword(mmu, addr),     // LDRH
             (true, false) => cpu.regs[rd] = (mmu.read8(addr) as i8) as i32 as u32, // LDSB
-            (true, true) => cpu.regs[rd] = (mmu.read16(addr) as i16) as i32 as u32, // LDSH
+            (true, true) => cpu.regs[rd] = super::load_signed_halfword(mmu, addr), // LDSH
         }
         return 2;
     }
