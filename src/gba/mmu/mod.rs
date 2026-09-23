@@ -504,7 +504,7 @@ impl Mmu {
             0x10A => self.timers.timers[2].cnt_h,
             0x10C => self.timers.read_counter(3, self.now().saturating_sub(TIMER_READ_LATENCY)),
             0x10E => self.timers.timers[3].cnt_h,
-            0x120..=0x12E | 0x134 => self.sio.read_io16(addr & 0x3FE),
+            0x120..=0x12A | 0x134 | 0x140 | 0x150..=0x158 => self.sio.read_io16(addr & 0x3FE),
             0x130 => self.keypad.read_keyinput(),
             0x132 => self.keypad.keycnt,
             0x200 => self.ie,
@@ -688,7 +688,7 @@ impl Mmu {
                 let now = self.now();
                 self.timers.write_control(3, val, now);
             }
-            0x120..=0x12E | 0x134 => self.sio.write_io16(addr & 0x3FE, val),
+            0x120..=0x12A | 0x134 | 0x140 | 0x150..=0x158 => self.sio.write_io16(addr & 0x3FE, val),
             0x130 => {} // KEYINPUT is read only
             0x132 => self.keypad.keycnt = val,
             0x200 => self.ie = val,

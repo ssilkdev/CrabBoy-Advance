@@ -197,8 +197,8 @@ const MGBA_BASELINE: &[u32] = &[
     52,   // Multiply long     /72
     609,  // BIOS math         /615
     1032, // DMA               /1244
-    25,   // SIO register R/W  /90
-    0,    // SIO timing        /4
+    90,   // SIO register R/W  /90
+    0,    // SIO timing        /8
     1,    // Misc. edge case   /12
 ];
 

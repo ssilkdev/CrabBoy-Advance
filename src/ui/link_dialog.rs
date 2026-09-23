@@ -77,11 +77,14 @@ impl LinkDialog {
                 ui.separator();
                 ui.label(RichText::new("GBA SIO Hardware State:").strong());
                 let siocnt = gba.mmu.sio.siocnt;
-                let mode_str = match (siocnt >> 12) & 3 {
-                    0 => "8-bit / 32-bit Normal",
-                    1 => "Multi-Player Link Cable",
-                    2 => "UART",
-                    _ => "JOY BUS",
+                use crate::gba::mmu::sio::SioMode;
+                let mode_str = match gba.mmu.sio.mode() {
+                    SioMode::Normal8Bit => "8-bit Normal",
+                    SioMode::Normal32Bit => "32-bit Normal",
+                    SioMode::MultiPlayer => "Multi-Player Link Cable",
+                    SioMode::Uart => "UART",
+                    SioMode::GeneralPurpose => "General Purpose",
+                    SioMode::JoyBus => "JOY BUS",
                 };
                 ui.label(format!("SIOCNT: 0x{:04X} ({})", siocnt, mode_str));
                 ui.label(format!("RCNT: 0x{:04X}", gba.mmu.sio.rcnt));

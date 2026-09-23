@@ -487,15 +487,16 @@ mod tests {
         let mut sio = Sio::new();
         assert_eq!(sio.role, MultiplayerRole::SinglePlayer);
 
-        // Test register writes and reads
+        // SIODATA32 is writable in 32-bit normal mode (SIOCNT bits 12-13 = 1).
+        sio.write_io16(0x128, 0x1000);
         sio.write_io16(0x120, 0x1234);
         sio.write_io16(0x122, 0x5678);
         assert_eq!(sio.read_io16(0x120), 0x1234);
         assert_eq!(sio.read_io16(0x122), 0x5678);
 
         // SIOCNT write and read
-        sio.write_io16(0x128, 0x0083); // 32-bit mode, start transfer
-        assert_eq!(sio.read_io16(0x128) & 0x0083, 0x0083);
+        sio.write_io16(0x128, 0x1083); // 32-bit mode, start transfer
+        assert_eq!(sio.read_io16(0x128) & 0x1083, 0x1083);
 
         // Role switching
         sio.set_role(MultiplayerRole::Player1Host);
