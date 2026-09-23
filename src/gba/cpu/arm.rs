@@ -4,9 +4,33 @@ use super::alu::{add_with_carry, barrel_shift, sub_with_borrow, ShiftType};
 use super::{Arm7Tdmi, FLAG_C, FLAG_N, FLAG_T, FLAG_V, FLAG_Z};
 use crate::gba::mmu::Mmu;
 
+/// Execute one ARM instruction through the two-stage prefetch pipeline.
+///
+/// Steady state costs one memory read per instruction (the fetch of PC+8),
+/// the same as fetching PC directly. After a branch the pipeline refills.
 pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     let pc = cpu.regs[15];
-    let instr = mmu.read32(pc);
+    let (instr, next) = if cpu.pipe_valid && cpu.pipe_addr == pc {
+        (cpu.pipe[0], cpu.pipe[1])
+    } else {
+        (mmu.read32(pc), mmu.read32(pc.wrapping_add(4)))
+    };
+    // Fetch stage: PC+8 is read before this instruction executes.
+    let fetched = mmu.read32(pc.wrapping_add(8));
+    let cycles = execute_arm(cpu, mmu, instr);
+    // Keep the pipeline only for straight-line ARM execution.
+    if cpu.regs[15] == pc.wrapping_add(4) && !cpu.is_thumb() {
+        cpu.pipe = [next, fetched];
+        cpu.pipe_addr = cpu.regs[15];
+        cpu.pipe_valid = true;
+    } else {
+        cpu.pipe_valid = false;
+    }
+    cycles
+}
+
+fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
+    let pc = cpu.regs[15];
     cpu.regs[15] = pc.wrapping_add(4);
 
     let cond = (instr >> 28) & 0xF;
@@ -376,7 +400,13 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
         let rn = ((instr >> 16) & 0xF) as usize;
         let rd = ((instr >> 12) & 0xF) as usize;
 
-        let op1 = if rn == 15 { pc.wrapping_add(8) } else { cpu.regs[rn] };
+        // With a register-specified shift, the ARM7TDMI spends an extra
+        // internal cycle fetching Rs, so PC reads as instruction + 12 instead
+        // of + 8 (for both Rn and Rm). jsmolka arm.gba tests 224/225.
+        let is_reg_shift = !i && (instr & (1 << 4)) != 0;
+        let pc_operand = pc.wrapping_add(if is_reg_shift { 12 } else { 8 });
+
+        let op1 = if rn == 15 { pc_operand } else { cpu.regs[rn] };
 
         let (op2, shifter_carry) = if i {
             let imm = instr & 0xFF;
@@ -388,10 +418,8 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
             }
         } else {
             let rm = (instr & 0xF) as usize;
-            let val = if rm == 15 { pc.wrapping_add(8) } else { cpu.regs[rm] };
+            let val = if rm == 15 { pc_operand } else { cpu.regs[rm] };
             let shift_type = ShiftType::from_u32((instr >> 5) & 3);
-            let is_reg_shift = (instr & (1 << 4)) != 0;
-
             let shift_amt = if is_reg_shift {
                 let rs = ((instr >> 8) & 0xF) as usize;
                 cpu.regs[rs] & 0xFF
