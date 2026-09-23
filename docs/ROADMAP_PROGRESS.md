@@ -95,3 +95,39 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
 - Remaining accuracy gaps (not blockers; the ratchet will record any
   progress): cycle-level Timing cases (bus-contention details), timer IRQ
   edge timing, multiply-long carry flag, DMA edge cases, SIO timing.
+
+### M2. Deterministic core and fast save states ✅
+
+- ✅ **Host-independent core** (`01f573d`): core audio runs at a fixed
+  48 kHz with an integer sample clock; resampling to the device, rate
+  control and fast-forward muting moved to `AudioOutput` (output side
+  only). The RTC has a controllable clock:
+  `Gba::set_deterministic_clock(Some(unix))` starts it at `unix` and
+  advances it with emulated time (CPU cycles). `Gba::new_headless` makes a
+  core that never opens an audio device (`4e74fca`).
+- ✅ **Complete save states** (`01f573d`, format v3, v1/v2 still load):
+  `gba/state.rs` (`StateWriter`/`StateReader`, `Snapshot` trait, decoding
+  never panics) plus a `Snapshot` impl next to every component: CPU
+  pipeline, PPU registers and scanline position, APU (DirectSound FIFOs,
+  PSG channels, frame sequencer, sample clock, filters), timer anchors,
+  bus timing and prefetch, SIO, keypad, cartridge (save chip contents and
+  protocol, RTC, sensors), MMU latches.
+- ✅ **Tests**:
+  - `tests/determinism.rs` (needs an Emerald ROM, skips without):
+    identical frames and audio across two runs (1200 frames); save → play
+    → load → replay is bit-identical (used to diverge at frame 789);
+    save → load → save is byte-identical; save+load = ~20 µs, 515 KiB.
+  - `tests/replay.rs` (`4e74fca`, runs everywhere incl. CI): a
+    hand-assembled test program (BIOS IRQ/IntrWait, keys, timer, DMA, PPU,
+    PSG) driven by a 900-frame movie in the `.tas` text format. Two runs
+    match; a run saved at frame 450 and resumed in a fresh core matches;
+    output matches `tests/data/replay_golden.txt` (`CRABBOY_BLESS=1` to
+    rewrite). Sensitivity checked: a 1-cycle IRQ timing change fails it.
+- ✅ **Platforms**: Linux locally; Linux + Windows via the existing CI
+  `cargo test` jobs; Android verified on the emulator with
+  `examples/replay_report.rs` — x86_64 and arm64 (translated) builds both
+  print output byte-identical to the golden file.
+- **"Done when" check:** replay passes on Linux, Windows (CI) and Android
+  ✅; save + restore ≈ 20 µs, about 0.1% of a 16.7 ms frame ✅.
+- Note: the Windows result comes from CI, which runs on push; nothing has
+  been pushed yet, so that job hasn't run on this code.
