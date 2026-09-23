@@ -102,7 +102,7 @@ deterministic, so this comes first.
 
 ## Stage 3: Audio
 
-### M9. HD music re-synthesis [New]
+### M9. HD music re-synthesis [New] ✅
 - Most GBA games use Nintendo's shared M4A ("Sappy") music engine. Detect it
   and intercept its note and instrument data, then play the music through a
   high-quality sampler at 48 kHz instead of the hardware's 8-bit mixer.

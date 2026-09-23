@@ -386,3 +386,79 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
     - `test_hd_mode7_widescreen_combined_rendering`: verifies HD Mode 7 (scale 2x/4x) combined with widescreen expansion.
     - `test_hd_pack_widescreen_replacement_rendering`: verifies M7 HD replacement art injection and recoloring in widescreen margins.
 - **"Done when" check:** at least three games run in widescreen with no visual errors (Mario Kart, F-Zero, Metroid Fusion verified) ✅.
+
+---
+
+## Stage 3: Audio
+
+### M9. HD music re-synthesis [New] ✅
+
+- ✅ **M4A / "Sappy" Sound Engine Interception & Auto-Detection** (`src/gba/m4a/mod.rs`, `74a1b9c`):
+  - Signature scanning for Nintendo's shared 48-byte `CLOCK_TABLE` (`[0x01, 0x02, ..., 0x60]`) across ROM bytes.
+  - Candidate song table heuristic scanner identifying valid GBA ROM pointers and track counts.
+  - Verified per-game database profiles with accurate song table offsets and song counts:
+    - **Pokémon Emerald** (`BPEE`, `BPEP`, `BPEJ`, `BPED`, `BPEF`, `BPES`, `BPEI`): Song table at `0x6B49F0` (610 songs).
+    - **Pokémon FireRed & LeafGreen** (`BPRE`, `BPGE`): Song table at `0x4A32CC` / `0x4A2A2C` (500 songs).
+    - **Pokémon Ruby & Sapphire** (`AXVE`, `AXPE`): Song table at `0x4548E0` / `0x454508` (450 songs).
+    - **The Legend of Zelda: The Minish Cap** (`BZME`, `BZMP`, `BZMJ`): Song table at `0xA11DBC` / `0xB1D414` (546 songs).
+    - **Fire Emblem: The Sacred Stones** (`BE8E`, `BE8P`, `BE8J`): Song table at `0x224470` / `0x42FFB0` (1000 songs).
+    - **Fire Emblem: The Blazing Blade** (`AE7E`, `AE7X`, `AE7J`): Song table at `0x69D6D8` / `0x6805F4` (1001 songs).
+    - **Fire Emblem: The Binding Blade** (`AFEJ`): Song table at `0x3994D8` (621 songs).
+    - **Metroid Fusion & Zero Mission** (`AMFE`, `BMXE`): Song tables at `0x71794C` / `0x794020` (300 songs).
+    - **Castlevania: Aria of Sorrow** (`AANE`): Song table at `0x4FA908` (200 songs).
+    - **Golden Sun & The Lost Age** (`AGSE`, `AGFE`): Song tables at `0x153A00` / `0x127A00` (300 songs).
+  - Runtime WRAM scanner anchoring on active `MusicPlayerInfo` (`ident == 0x68736D53` / `'Smsh'`) in EWRAM and IWRAM to intercept live game playback without hardcoded RAM addresses.
+- ✅ **WaveData & ToneData Decoders** (`src/gba/m4a/voice.rs`, `74a1b9c`):
+  - 8-bit signed PCM `WaveData` parsing: format flag, loop flags, loop start offset, sample length, and frequency calculation (`freq / 4096.0` base rate).
+  - 12-byte `ToneData` instrument headers: DirectSound PCM (type 0), CGB PSG channels 1-4, key splits (type 0x40), and rhythm/drum tables (type 0x80).
+  - 48 kHz scaled ADSR envelope decoding: Attack rate, Decay rate, Sustain level, Release rate.
+- ✅ **High-Quality 48 kHz Stereo Floating-Point Sampler** (`src/gba/m4a/sampler.rs`, `74a1b9c`):
+  - Full 32-bit floating-point mixing pipeline eliminating 8-bit hardware quantization noise and harsh 60 Hz envelope stepping.
+  - Three interpolation algorithms selectable at runtime:
+    - `Linear`: Fast 2-point linear interpolation.
+    - `CubicHermite`: 4-point Catmull-Rom cubic Hermite spline ensuring smooth $C^1$ continuity (recommended default).
+    - `Sinc`: 8-point Hann-windowed band-limited Sinc interpolation for studio-grade reconstruction.
+  - High-precision per-sample ADSR envelope generator with anti-click ramps.
+  - CGB PSG synthesis for legacy square, wave, and noise channels blended into 48 kHz stream.
+  - Equal-power stereo panning laws ($L = \cos \theta$, $R = \sin \theta$).
+  - 4-comb stereo reverberation unit with stereo decorrelation and configurable wet/dry send level.
+  - Oldest/lowest release voice stealing for configurable polyphony (up to 64 voices).
+  - Smooth tanh soft limiting on master mix bus.
+- ✅ **Standard MIDI File (.mid) Type 1 Binary Serializer** (`src/gba/m4a/midi_export.rs`, `74a1b9c`):
+  - SMF Type 1 generator with `MThd` header and multiple `MTrk` chunks.
+  - Conductor track with tempo changes (`0xFF 0x51 0x03`), time signature, and song title meta-events.
+  - Music tracks with delta-time VLQ encoding, Note On/Off, Pitch Bend, Pan (CC 10), Expression/Volume (CC 7 / CC 11), Program Change, and End of Track (`0xFF 0x2F 0x00`).
+- ✅ **Multi-Track 48 kHz WAV Stem Renderer** (`src/gba/m4a/stem_export.rs`, `74a1b9c`):
+  - Renders isolated per-instrument stereo WAV files alongside a time-aligned master mix file.
+  - Standard 44-byte RIFF/WAVE header writer supporting 16-bit PCM stereo at 48000 Hz.
+- ✅ **Audio Mixer, Save State Sync, & Seamless Fallback** (`src/gba/apu/mod.rs`, `src/gba/mod.rs`, `74a1b9c`):
+  - `AudioEngineMode` toggle: `HdReSynthesis` vs `HardwareOnly`.
+  - When enabled, `mix_and_push_sample()` dynamically blends high-resolution 48 kHz re-synthesized music with native DMG PSG sound effects.
+  - Games without M4A automatically fall back to native APU DirectSound audio with zero overhead.
+  - Full save-state & rewind synchronization: WRAM state captures music sequence position, and `load_state()` resets the 48 kHz buffer for immediate jitter-free resynchronization.
+- ✅ **UI Controls & CLI Tools** (`src/ui/audio_mixer_dialog.rs`, `src/ui/config.rs`, `src/main.rs`, `74a1b9c`):
+  - Audio Mixer dialog features:
+    - HD Audio status badge and mode switcher.
+    - Radio buttons for Linear, Cubic Hermite spline, and Band-limited Sinc interpolation.
+    - Stereo reverb toggle and send level slider.
+    - Integrated Jukebox with song selector, Play, Stop, and active profile details.
+    - File dialogs for MIDI (.mid) and multi-track WAV stem export.
+  - CLI flags:
+    - `--hd-audio` and `--hardware-audio`: toggle audio engine mode on startup.
+    - `--export-midi <ROM> [--song N] [--output P]`: headless MIDI exporter.
+    - `--export-stems <ROM> [--song N] [--output D] [--seconds S]`: headless 48 kHz multi-track stem renderer.
+  - Settings persisted in `config.json` under `audio`.
+- ✅ **Tests** (`tests/m4a_audio.rs`, `74a1b9c`):
+  - 11 comprehensive integration tests covering:
+    - `test_m4a_database_lookups_and_profiles`: verifies profiles across Emerald, Minish Cap, Fire Emblem (FE6/FE7/FE8), Metroid, Castlevania, and Golden Sun.
+    - `test_m4a_universal_signature_auto_detection`: verifies `CLOCK_TABLE` pattern scanning and candidate table detection.
+    - `test_m4a_voice_and_sample_parsing`: verifies WaveData (8-bit PCM, loop points, sample rates) and ToneData parsing.
+    - `test_m4a_sampler_interpolation_and_adsr`: verifies Linear, Cubic Hermite, and Sinc interpolation, ADSR transitions, and decay.
+    - `test_m4a_polyphony_voice_stealing`: verifies voice allocation limits and oldest-voice stealing.
+    - `test_m4a_sequencer_bytecode_dispatch`: verifies Sappy bytecode processing (TEMPO, VOICE, VOL, PAN, BEND, NoteOn/Off, FINE).
+    - `test_m4a_midi_export`: verifies SMF format 1 generation, track headers, events, and termination.
+    - `test_m4a_stem_export_and_wav_writer`: verifies multi-track stem generation and RIFF/WAVE 48 kHz file serialization.
+    - `test_m4a_non_m4a_graceful_fallback_and_mode_toggle`: verifies fallback to native hardware audio for non-M4A titles.
+    - `test_m4a_pokemon_emerald_playback_and_export`: live test on real Pokémon Emerald ROM verifying BGM playback, 48 kHz sample generation, MIDI export, and stem export.
+    - `test_m4a_save_state_synchronization`: verifies save-state save/restore roundtrip with zero phase desync or audio glitching.
+- **"Done when" check:** Emerald, Minish Cap and Fire Emblem play re-synthesized music with correct tempo, looping and sound effects, and the audio mixer can switch between HD and hardware audio ✅.
