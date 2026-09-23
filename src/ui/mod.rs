@@ -950,6 +950,15 @@ impl eframe::App for GbaApp {
             }),
             _ => {}
         }
+        // CRABBOY_UI_SNAPSHOT_SUBMENU=<category>: then hover that category
+        // inside the open menu so its submenu shows too.
+        if let Ok(sub) = std::env::var("CRABBOY_UI_SNAPSHOT_SUBMENU") {
+            if frame == 8 {
+                if let Some(r) = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("menu_rect", sub.as_str())))) {
+                    raw.events.push(egui::Event::PointerMoved(r.center()));
+                }
+            }
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1395,405 +1404,441 @@ impl eframe::App for GbaApp {
                 let kb = self.key_bindings.for_layout(self.accessibility.active.one_handed_desktop);
                 let has_rom = self.gb.is_some() || self.gba.mmu.cartridge.is_some();
 
-                remember_menu(ctx, "File", ui.menu_button("File", |ui| {
-                    ui.set_min_width(280.0);
-                    if menu_item(ui, "📂 Open ROM…", "") {
-                        ui.close_menu();
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Game ROM", &["gba", "gb", "gbc", "bin"])
-                            .add_filter("GBA ROM", &["gba", "bin"])
-                            .add_filter("Game Boy / Color", &["gb", "gbc"])
-                            .pick_file()
-                        {
-                            self.load_rom_from_path(&path);
-                        }
-                    }
-                    let reload = self.loaded_rom_path.clone();
-                    if ui.add_enabled(reload.is_some(), egui::Button::new("🔁 Reload ROM")).clicked() {
-                        ui.close_menu();
-                        if let Some(p) = reload {
-                            self.load_rom_from_path(&p);
-                        }
-                    }
-                    ui.separator();
-                    let slot = self.save_manager.active_slot;
-                    ui.add_enabled_ui(has_rom, |ui| {
-                        if menu_item(ui, format!("💾 Save state (slot {slot})"), &key(kb.quick_save)) {
+                // One menu holds every category; the bar itself only has
+                // the few actions used all the time.
+                remember_menu(ctx, "Menu", ui.menu_button(RichText::new("☰ Menu").strong(), |ui| {
+                    ui.set_min_width(190.0);
+                    remember_menu(ctx, "File", ui.menu_button("📂 File", |ui| {
+                        ui.set_min_width(280.0);
+                        if menu_item(ui, "📂 Open ROM…", "") {
                             ui.close_menu();
-                            match self.save_active_slot(slot) {
-                                Ok(()) => self.set_toast(format!("Saved to Slot {}", slot)),
-                                Err(e) => self.set_toast(e),
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Game ROM", &["gba", "gb", "gbc", "bin"])
+                                .add_filter("GBA ROM", &["gba", "bin"])
+                                .add_filter("Game Boy / Color", &["gb", "gbc"])
+                                .pick_file()
+                            {
+                                self.load_rom_from_path(&path);
                             }
                         }
-                        if menu_item(ui, format!("📥 Load state (slot {slot})"), &key(kb.quick_load)) {
+                        let reload = self.loaded_rom_path.clone();
+                        if ui.add_enabled(reload.is_some(), egui::Button::new("🔁 Reload ROM")).clicked() {
                             ui.close_menu();
-                            match self.load_active_slot(slot) {
-                                Ok(()) => self.set_toast(format!("Loaded Slot {}", slot)),
-                                Err(e) => self.set_toast(e),
+                            if let Some(p) = reload {
+                                self.load_rom_from_path(&p);
                             }
                         }
-                    });
-                    ui.menu_button(format!("🔢 Slot: {slot}"), |ui| {
-                        for n in 0..=9 {
-                            if ui.radio_value(&mut self.save_manager.active_slot, n, format!("Slot {n}")).clicked() {
+                        ui.separator();
+                        let slot = self.save_manager.active_slot;
+                        ui.add_enabled_ui(has_rom, |ui| {
+                            if menu_item(ui, format!("💾 Save state (slot {slot})"), &key(kb.quick_save)) {
                                 ui.close_menu();
+                                match self.save_active_slot(slot) {
+                                    Ok(()) => self.set_toast(format!("Saved to Slot {}", slot)),
+                                    Err(e) => self.set_toast(e),
+                                }
                             }
+                            if menu_item(ui, format!("📥 Load state (slot {slot})"), &key(kb.quick_load)) {
+                                ui.close_menu();
+                                match self.load_active_slot(slot) {
+                                    Ok(()) => self.set_toast(format!("Loaded Slot {}", slot)),
+                                    Err(e) => self.set_toast(e),
+                                }
+                            }
+                        });
+                        ui.menu_button(format!("🔢 Slot: {slot}"), |ui| {
+                            for n in 0..=9 {
+                                if ui.radio_value(&mut self.save_manager.active_slot, n, format!("Slot {n}")).clicked() {
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if menu_item(ui, "🗂 Save states…", &ctrl("S")) {
+                            ui.close_menu();
+                            self.show_save_manager_dialog = true;
                         }
-                    });
-                    if menu_item(ui, "🗂 Save states…", &ctrl("S")) {
-                        ui.close_menu();
-                        self.show_save_manager_dialog = true;
-                    }
-                    ui.separator();
-                    if ui.add_enabled(has_rom, egui::Button::new("🔋 Write battery save now")).on_hover_text("Saves are written automatically; this forces it right away.").clicked() {
-                        ui.close_menu();
-                        match self.gb {
-                            Some(ref mut gb) => {
-                                gb.mmu.cart.sync_to_disk();
-                                self.set_toast("Battery Save Synced to Disk");
-                            }
-                            None => {
-                                if let Some(ref mut cart) = self.gba.mmu.cartridge {
-                                    cart.save.sync_to_disk();
-                                    self.sync_saves();
+                        ui.separator();
+                        if ui.add_enabled(has_rom, egui::Button::new("🔋 Write battery save now")).on_hover_text("Saves are written automatically; this forces it right away.").clicked() {
+                            ui.close_menu();
+                            match self.gb {
+                                Some(ref mut gb) => {
+                                    gb.mmu.cart.sync_to_disk();
                                     self.set_toast("Battery Save Synced to Disk");
                                 }
+                                None => {
+                                    if let Some(ref mut cart) = self.gba.mmu.cartridge {
+                                        cart.save.sync_to_disk();
+                                        self.sync_saves();
+                                        self.set_toast("Battery Save Synced to Disk");
+                                    }
+                                }
                             }
                         }
-                    }
-                    if menu_item(ui, "☁ Save sync…", "") {
-                        ui.close_menu();
-                        self.save_sync_dialog.is_open = true;
-                    }
-                    ui.separator();
-                    if menu_item(ui, "🚪 Exit", "") {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                }).response);
+                        if menu_item(ui, "☁ Save sync…", "") {
+                            ui.close_menu();
+                            self.save_sync_dialog.is_open = true;
+                        }
+                        ui.separator();
+                        if menu_item(ui, "🚪 Exit", "") {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }).response);
 
-                remember_menu(ctx, "Emulation", ui.menu_button("Emulation", |ui| {
-                    ui.set_min_width(280.0);
-                    let pause_label = if self.is_paused { "▶ Resume" } else { "⏸ Pause" };
-                    if menu_item(ui, pause_label, &key(kb.pause)) {
-                        self.is_paused = !self.is_paused;
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(self.is_paused, egui::Button::new("⏭ Step one frame").shortcut_text(RichText::new(key(kb.frame_step)).color(ui.visuals().weak_text_color()))).clicked() {
-                        self.run_active_frame();
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(has_rom, egui::Button::new("🔄 Reset").shortcut_text(RichText::new(ctrl(&key(kb.reset))).color(ui.visuals().weak_text_color()))).clicked() {
-                        ui.close_menu();
-                        self.reset_active();
-                        self.rewind_manager.clear();
-                        self.set_toast("Emulation Reset");
-                    }
-                    ui.separator();
-                    let speed_label = settings_window::speed_name(self.speed_multiplier, &self.accessibility.active.slow_motion);
-                    ui.menu_button(format!("⏩ Speed: {speed_label}"), |ui| {
-                        let sm = self.accessibility.active.slow_motion;
-                        let current = if self.speed_multiplier > 1 { self.speed_multiplier * 100 } else if sm.enabled { (sm.speed_factor * 100.0).round() as u32 } else { 100 };
-                        for (pct, label) in [(400, "4× fast"), (200, "2× fast"), (100, "Normal"), (75, "75%"), (50, "50%"), (25, "25%"), (10, "10%")] {
-                            if ui.radio(current == pct, label).clicked() {
-                                let sm = &mut self.accessibility.active.slow_motion;
-                                if pct >= 100 {
-                                    self.speed_multiplier = pct / 100;
-                                    sm.enabled = false;
-                                } else {
-                                    self.speed_multiplier = 1;
-                                    sm.enabled = true;
-                                    sm.speed_factor = pct as f32 / 100.0;
+                    remember_menu(ctx, "Emulation", ui.menu_button("⏱ Emulation", |ui| {
+                        ui.set_min_width(280.0);
+                        let pause_label = if self.is_paused { "▶ Resume" } else { "⏸ Pause" };
+                        if menu_item(ui, pause_label, &key(kb.pause)) {
+                            self.is_paused = !self.is_paused;
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(self.is_paused, egui::Button::new("⏭ Step one frame").shortcut_text(RichText::new(key(kb.frame_step)).color(ui.visuals().weak_text_color()))).clicked() {
+                            self.run_active_frame();
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(has_rom, egui::Button::new("🔄 Reset").shortcut_text(RichText::new(ctrl(&key(kb.reset))).color(ui.visuals().weak_text_color()))).clicked() {
+                            ui.close_menu();
+                            self.reset_active();
+                            self.rewind_manager.clear();
+                            self.set_toast("Emulation Reset");
+                        }
+                        ui.separator();
+                        let speed_label = settings_window::speed_name(self.speed_multiplier, &self.accessibility.active.slow_motion);
+                        ui.menu_button(format!("⏩ Speed: {speed_label}"), |ui| {
+                            let sm = self.accessibility.active.slow_motion;
+                            let current = if self.speed_multiplier > 1 { self.speed_multiplier * 100 } else if sm.enabled { (sm.speed_factor * 100.0).round() as u32 } else { 100 };
+                            for (pct, label) in [(400, "4× fast"), (200, "2× fast"), (100, "Normal"), (75, "75%"), (50, "50%"), (25, "25%"), (10, "10%")] {
+                                if ui.radio(current == pct, label).clicked() {
+                                    let sm = &mut self.accessibility.active.slow_motion;
+                                    if pct >= 100 {
+                                        self.speed_multiplier = pct / 100;
+                                        sm.enabled = false;
+                                    } else {
+                                        self.speed_multiplier = 1;
+                                        sm.enabled = true;
+                                        sm.speed_factor = pct as f32 / 100.0;
+                                    }
+                                    if self.accessibility.commit() {
+                                        self.config_dirty = true;
+                                    }
+                                    ui.close_menu();
                                 }
-                                if self.accessibility.commit() {
+                            }
+                        });
+                        let ra = self.run_ahead.frames;
+                        ui.menu_button(format!("⚡ Run-ahead: {}", match ra { 0 => "Off".to_string(), 1 => "1 frame".into(), n => format!("{n} frames") }), |ui| {
+                            for (f, label) in [(0, "Off"), (1, "1 frame"), (2, "2 frames")] {
+                                if ui.radio(self.run_ahead.frames == f, label).clicked() {
+                                    self.set_run_ahead_frames(f);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if menu_item(ui, "⚙ Emulation settings…", "") {
+                            self.settings_window.open_at(Page::Speed);
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "🕒 Real-time clock…", "") {
+                            ui.close_menu();
+                            self.show_rtc_dialog = true;
+                        }
+                        if menu_item(ui, "♿ Accessibility…", &ctrl("U")) {
+                            self.accessibility_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                    }).response);
+
+                    remember_menu(ctx, "Video", ui.menu_button("🖥 Video", |ui| {
+                        ui.set_min_width(280.0);
+                        ui.menu_button(format!("🎨 Filter: {}", settings_window::filter_name(self.display_filter)), |ui| {
+                            for f in settings_window::FILTERS {
+                                if ui.radio_value(&mut self.display_filter, f, settings_window::filter_name(f)).clicked() {
                                     self.config_dirty = true;
+                                    ui.close_menu();
                                 }
-                                ui.close_menu();
+                            }
+                        });
+                        ui.menu_button(format!("🌗 Blending: {}", settings_window::blend_name(self.frame_blend_mode)), |ui| {
+                            for b in settings_window::BLENDS {
+                                if ui.radio_value(&mut self.frame_blend_mode, b, settings_window::blend_name(b)).clicked() {
+                                    self.config_dirty = true;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.menu_button(format!("📐 Aspect: {}", self.aspect_ratio.display_name()), |ui| {
+                            for &ar in &AspectRatio::ALL {
+                                if ui.radio_value(&mut self.aspect_ratio, ar, ar.display_name()).clicked() {
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if ui.checkbox(&mut self.color_correction, "GBA color correction").changed() {
+                            self.config_dirty = true;
+                        }
+                        let mut ws = self.gba.is_widescreen_enabled();
+                        if ui.checkbox(&mut ws, "Widescreen").changed() {
+                            self.gba.set_widescreen_enabled(ws);
+                            self.widescreen_config.enabled = ws;
+                            self.config_dirty = true;
+                        }
+                        ui.separator();
+                        let fs_label = if self.is_fullscreen { "🗗 Exit fullscreen" } else { "⛶ Fullscreen" };
+                        if menu_item(ui, fs_label, &key(kb.fullscreen)) {
+                            ui.close_menu();
+                            self.is_fullscreen = !self.is_fullscreen;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+                        }
+                        if ui.add_enabled(has_rom, egui::Button::new("📸 Screenshot").shortcut_text(RichText::new(key(kb.screenshot)).color(ui.visuals().weak_text_color()))).clicked() {
+                            ui.close_menu();
+                            self.take_screenshot();
+                        }
+                        ui.separator();
+                        if menu_item(ui, "⚙ Display settings…", "") {
+                            self.settings_window.open_at(Page::Picture);
+                            ui.close_menu();
+                        }
+                    }).response);
+
+                    remember_menu(ctx, "Audio", ui.menu_button("🔊 Audio", |ui| {
+                        ui.set_min_width(280.0);
+                        let out = self.active_audio_output();
+                        let mut on = !out.muted;
+                        if ui.checkbox(&mut on, "Sound on").changed() {
+                            out.muted = !on;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Volume");
+                            ui.add(egui::Slider::new(&mut out.volume, 0.0..=1.0).show_value(false));
+                        });
+                        let mode = out.surround_mode();
+                        ui.menu_button(format!("🎧 Output: {}", settings_window::surround_name(mode)), |ui| {
+                            for m in settings_window::SURROUNDS {
+                                if ui.radio(mode == m, settings_window::surround_name(m)).clicked() {
+                                    self.active_audio_output().set_surround_mode(m);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if menu_item(ui, "🎛 Mixer & HD music…", &ctrl("M")) {
+                            self.audio_mixer_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "⚙ Audio settings…", "") {
+                            self.settings_window.open_at(Page::Sound);
+                            ui.close_menu();
+                        }
+                    }).response);
+
+                    remember_menu(ctx, "Game Boy", ui.menu_button("🕹 Game Boy", |ui| {
+                        ui.set_min_width(280.0);
+                        match self.gb {
+                            Some(ref gb) => {
+                                let model = if gb.is_cgb() { "Game Boy Color" } else { "Game Boy (DMG)" };
+                                ui.label(RichText::new(model).strong());
+                                ui.label(RichText::new(format!("{} · {:?}", gb.mmu.cart.title, gb.mmu.cart.mbc)).color(ui.visuals().weak_text_color()));
+                                ui.label(RichText::new(format!(
+                                    "{} ROM banks · {} KiB RAM{}{}",
+                                    gb.mmu.cart.rom_banks,
+                                    gb.mmu.cart.ram.len() / 1024,
+                                    if gb.mmu.cart.has_battery { " · battery" } else { "" },
+                                    if gb.mmu.double_speed { " · double speed" } else { "" },
+                                )).color(ui.visuals().weak_text_color()));
+                            }
+                            None => {
+                                ui.label(RichText::new("No Game Boy game loaded").color(ui.visuals().weak_text_color()));
                             }
                         }
-                    });
-                    let ra = self.run_ahead.frames;
-                    ui.menu_button(format!("⚡ Run-ahead: {}", match ra { 0 => "Off".to_string(), 1 => "1 frame".into(), n => format!("{n} frames") }), |ui| {
-                        for (f, label) in [(0, "Off"), (1, "1 frame"), (2, "2 frames")] {
-                            if ui.radio(self.run_ahead.frames == f, label).clicked() {
-                                self.set_run_ahead_frames(f);
-                                ui.close_menu();
+                        ui.separator();
+                        if ui
+                            .checkbox(&mut self.gb_force_dmg, "Force original Game Boy mode")
+                            .on_hover_text("Run Color-enhanced cartridges in black-and-white mode. Applies when the ROM is (re)loaded.")
+                            .changed()
+                        {
+                            self.set_toast(if self.gb_force_dmg { "Original Game Boy mode: reload the ROM to apply" } else { "Color mode: reload the ROM to apply" });
+                        }
+                        let reload = self.loaded_rom_path.clone().filter(|_| self.gb.is_some());
+                        if ui.add_enabled(reload.is_some(), egui::Button::new("🔁 Reload ROM to apply")).clicked() {
+                            ui.close_menu();
+                            if let Some(p) = reload {
+                                self.load_rom_from_path(&p);
                             }
                         }
-                    });
-                    ui.separator();
-                    if menu_item(ui, "⚙ Emulation settings…", "") {
-                        self.settings_window.open_at(Page::Speed);
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "🕒 Real-time clock…", "") {
-                        ui.close_menu();
-                        self.show_rtc_dialog = true;
-                    }
-                    if menu_item(ui, "♿ Accessibility…", &ctrl("U")) {
-                        self.accessibility_dialog.is_open = true;
-                        ui.close_menu();
-                    }
+                    }).response);
+
+                    remember_menu(ctx, "Tools", ui.menu_button("🛠 Tools", |ui| {
+                        ui.set_min_width(300.0);
+                        ui.label(RichText::new("GAME").size(11.5).strong().color(ui.visuals().weak_text_color()));
+                        if menu_item(ui, "📜 Cheats & RAM search…", &ctrl("C")) {
+                            self.cheats_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "🐾 Pokémon companion…", &ctrl("P")) {
+                            self.pokemon_companion.is_open = true;
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "🔗 Link cable…", &ctrl("L")) {
+                            self.link_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "🎮 Cartridge sensors…", "") {
+                            self.sensors_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("AI").size(11.5).strong().color(ui.visuals().weak_text_color()));
+                        if menu_item(ui, "🤖 AI player…", &ctrl("A")) {
+                            self.ai_agent_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "💬 AI coach…", &ctrl("G")) {
+                            self.ai_agent_dialog.chat_open = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("RECORD").size(11.5).strong().color(ui.visuals().weak_text_color()));
+                        let rec_label = if self.gif_recorder.is_recording { "⏹ Stop GIF recording" } else { "🎥 Record GIF" };
+                        if menu_item(ui, rec_label, &ctrl("F12")) {
+                            ui.close_menu();
+                            if self.gif_recorder.is_recording {
+                                match self.gif_recorder.stop_and_save(&self.loaded_rom_name) {
+                                    Ok((_p, name)) => self.set_toast(format!("🎥 Encoding GIF: {}…", name)),
+                                    Err(e) => self.set_toast(format!("GIF Error: {}", e)),
+                                }
+                            } else {
+                                self.gif_recorder.start_recording();
+                                self.set_toast("🔴 Recording Animated GIF");
+                            }
+                        }
+                        if menu_item(ui, "⏱ TAS movies…", &ctrl("Y")) {
+                            self.tas_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                    }).response);
+
+                    remember_menu(ctx, "Controls", ui.menu_button("🎮 Controls", |ui| {
+                        ui.set_min_width(260.0);
+                        if menu_item(ui, "🎮 Keyboard & controllers…", "") {
+                            self.controls_dialog.open();
+                            ui.close_menu();
+                        }
+                        let layout = self.accessibility.active.one_handed_desktop;
+                        ui.menu_button(format!("🖐 Layout: {}", layout.display_name()), |ui| {
+                            for h in crate::gba::accessibility::Handedness::ALL {
+                                if ui.radio(layout == h, h.display_name()).clicked() {
+                                    self.accessibility.active.one_handed_desktop = h;
+                                    self.accessibility.commit();
+                                    self.config_dirty = true;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }).response);
+
+                    remember_menu(ctx, "Help", ui.menu_button("📖 Help", |ui| {
+                        ui.set_min_width(280.0);
+                        if menu_item(ui, "📖 Manual & strategy guide", "F1") {
+                            self.guide_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        ui.menu_button("📑 Jump to chapter", |ui| {
+                            let chapters = [
+                                ("Cover", 0),
+                                ("1  Welcome & quick start", 1),
+                                ("2  Controls", 2),
+                                ("3  Filters & shaders", 3),
+                                ("4  Pokémon companion", 4),
+                                ("5  Clock & sensors", 5),
+                                ("6  Link cable & audio", 6),
+                                ("7  TAS & troubleshooting", 7),
+                            ];
+                            for (title, page) in chapters {
+                                if ui.button(title).clicked() {
+                                    self.guide_dialog.open_at_page(page);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if menu_item(ui, "📥 Open manual as PDF", "") {
+                            ui.close_menu();
+                            match self.guide_dialog.open_external_pdf() {
+                                Ok(_) => self.set_toast("📖 Opened the manual in your PDF viewer"),
+                                Err(e) => self.set_toast(format!("Error: {}", e)),
+                            }
+                        }
+                        if menu_item(ui, "💾 Export manual…", "") {
+                            ui.close_menu();
+                            match self.guide_dialog.export_pdf_as() {
+                                Ok(Some(path)) => self.set_toast(format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy())),
+                                Ok(None) => {}
+                                Err(e) => self.set_toast(format!("Export error: {}", e)),
+                            }
+                        }
+                        ui.separator();
+                        if menu_item(ui, "🔄 Check for updates…", "") {
+                            self.updater_dialog.is_open = true;
+                            ui.close_menu();
+                        }
+                        if menu_item(ui, "ℹ About CrabBoy Advance", "") {
+                            self.show_about_dialog = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).small().color(ui.visuals().weak_text_color()));
+                    }).response);
+
+                    remember_menu(ctx, "Debug", ui.menu_button("🔬 Debug", |ui| {
+                        ui.set_min_width(300.0);
+                        fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str, sc: &str) {
+                            let text = if *on { format!("✔ {label}") } else { format!("     {label}") };
+                            if menu_item(ui, text, sc) {
+                                *on = !*on;
+                            }
+                        }
+                        let d = &mut self.debug_windows;
+                        toggle(ui, &mut d.show_diagnostics, "🔬 Diagnostics", "F8");
+                        toggle(ui, &mut d.show_cpu, "CPU", "");
+                        toggle(ui, &mut d.show_ppu, "Graphics layers & sprites", "F6");
+                        toggle(ui, &mut d.show_palette, "Palettes", "");
+                        toggle(ui, &mut d.show_audio, "Audio channels", "F7");
+                        toggle(ui, &mut d.show_memory, "Memory viewer", "");
+                        toggle(ui, &mut self.memmap_dialog.is_open, "🧠 Memory map", "Ctrl+J");
+                        ui.separator();
+                        toggle(ui, &mut self.show_fps, "FPS counter", "");
+                    }).response);
                 }).response);
 
-                remember_menu(ctx, "Video", ui.menu_button("Video", |ui| {
-                    ui.set_min_width(280.0);
-                    ui.menu_button(format!("🎨 Filter: {}", settings_window::filter_name(self.display_filter)), |ui| {
-                        for f in settings_window::FILTERS {
-                            if ui.radio_value(&mut self.display_filter, f, settings_window::filter_name(f)).clicked() {
-                                self.config_dirty = true;
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                    ui.menu_button(format!("🌗 Blending: {}", settings_window::blend_name(self.frame_blend_mode)), |ui| {
-                        for b in settings_window::BLENDS {
-                            if ui.radio_value(&mut self.frame_blend_mode, b, settings_window::blend_name(b)).clicked() {
-                                self.config_dirty = true;
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                    ui.menu_button(format!("📐 Aspect: {}", self.aspect_ratio.display_name()), |ui| {
-                        for &ar in &AspectRatio::ALL {
-                            if ui.radio_value(&mut self.aspect_ratio, ar, ar.display_name()).clicked() {
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                    if ui.checkbox(&mut self.color_correction, "GBA color correction").changed() {
-                        self.config_dirty = true;
-                    }
-                    let mut ws = self.gba.is_widescreen_enabled();
-                    if ui.checkbox(&mut ws, "Widescreen").changed() {
-                        self.gba.set_widescreen_enabled(ws);
-                        self.widescreen_config.enabled = ws;
-                        self.config_dirty = true;
-                    }
-                    ui.separator();
-                    let fs_label = if self.is_fullscreen { "🗗 Exit fullscreen" } else { "⛶ Fullscreen" };
-                    if menu_item(ui, fs_label, &key(kb.fullscreen)) {
-                        ui.close_menu();
-                        self.is_fullscreen = !self.is_fullscreen;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
-                    }
-                    if ui.add_enabled(has_rom, egui::Button::new("📸 Screenshot").shortcut_text(RichText::new(key(kb.screenshot)).color(ui.visuals().weak_text_color()))).clicked() {
-                        ui.close_menu();
-                        self.take_screenshot();
-                    }
-                    ui.separator();
-                    if menu_item(ui, "⚙ Display settings…", "") {
-                        self.settings_window.open_at(Page::Picture);
-                        ui.close_menu();
-                    }
-                }).response);
-
-                remember_menu(ctx, "Audio", ui.menu_button("Audio", |ui| {
-                    ui.set_min_width(280.0);
-                    let out = self.active_audio_output();
-                    let mut on = !out.muted;
-                    if ui.checkbox(&mut on, "Sound on").changed() {
-                        out.muted = !on;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Volume");
-                        ui.add(egui::Slider::new(&mut out.volume, 0.0..=1.0).show_value(false));
-                    });
-                    let mode = out.surround_mode();
-                    ui.menu_button(format!("🎧 Output: {}", settings_window::surround_name(mode)), |ui| {
-                        for m in settings_window::SURROUNDS {
-                            if ui.radio(mode == m, settings_window::surround_name(m)).clicked() {
-                                self.active_audio_output().set_surround_mode(m);
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    if menu_item(ui, "🎛 Mixer & HD music…", &ctrl("M")) {
-                        self.audio_mixer_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "⚙ Audio settings…", "") {
-                        self.settings_window.open_at(Page::Sound);
-                        ui.close_menu();
-                    }
-                }).response);
-
-                remember_menu(ctx, "Game Boy", ui.menu_button("Game Boy", |ui| {
-                    ui.set_min_width(280.0);
-                    match self.gb {
-                        Some(ref gb) => {
-                            let model = if gb.is_cgb() { "Game Boy Color" } else { "Game Boy (DMG)" };
-                            ui.label(RichText::new(model).strong());
-                            ui.label(RichText::new(format!("{} · {:?}", gb.mmu.cart.title, gb.mmu.cart.mbc)).color(ui.visuals().weak_text_color()));
-                            ui.label(RichText::new(format!(
-                                "{} ROM banks · {} KiB RAM{}{}",
-                                gb.mmu.cart.rom_banks,
-                                gb.mmu.cart.ram.len() / 1024,
-                                if gb.mmu.cart.has_battery { " · battery" } else { "" },
-                                if gb.mmu.double_speed { " · double speed" } else { "" },
-                            )).color(ui.visuals().weak_text_color()));
-                        }
-                        None => {
-                            ui.label(RichText::new("No Game Boy game loaded").color(ui.visuals().weak_text_color()));
-                        }
-                    }
-                    ui.separator();
-                    if ui
-                        .checkbox(&mut self.gb_force_dmg, "Force original Game Boy mode")
-                        .on_hover_text("Run Color-enhanced cartridges in black-and-white mode. Applies when the ROM is (re)loaded.")
-                        .changed()
+                ui.separator();
+                let open = ui
+                    .add(egui::Button::new("📂 Open").frame(false))
+                    .on_hover_text("Open a ROM (.gba, .gb, .gbc)");
+                if open.clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Game ROM", &["gba", "gb", "gbc", "bin"])
+                        .add_filter("GBA ROM", &["gba", "bin"])
+                        .add_filter("Game Boy / Color", &["gb", "gbc"])
+                        .pick_file()
                     {
-                        self.set_toast(if self.gb_force_dmg { "Original Game Boy mode: reload the ROM to apply" } else { "Color mode: reload the ROM to apply" });
+                        self.load_rom_from_path(&path);
                     }
-                    let reload = self.loaded_rom_path.clone().filter(|_| self.gb.is_some());
-                    if ui.add_enabled(reload.is_some(), egui::Button::new("🔁 Reload ROM to apply")).clicked() {
-                        ui.close_menu();
-                        if let Some(p) = reload {
-                            self.load_rom_from_path(&p);
-                        }
-                    }
-                }).response);
-
-                remember_menu(ctx, "Tools", ui.menu_button("Tools", |ui| {
-                    ui.set_min_width(300.0);
-                    ui.label(RichText::new("GAME").size(11.5).strong().color(ui.visuals().weak_text_color()));
-                    if menu_item(ui, "📜 Cheats & RAM search…", &ctrl("C")) {
-                        self.cheats_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "🐾 Pokémon companion…", &ctrl("P")) {
-                        self.pokemon_companion.is_open = true;
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "🔗 Link cable…", &ctrl("L")) {
-                        self.link_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "🎮 Cartridge sensors…", "") {
-                        self.sensors_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.label(RichText::new("AI").size(11.5).strong().color(ui.visuals().weak_text_color()));
-                    if menu_item(ui, "🤖 AI player…", &ctrl("A")) {
-                        self.ai_agent_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "💬 AI coach…", &ctrl("G")) {
-                        self.ai_agent_dialog.chat_open = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.label(RichText::new("RECORD").size(11.5).strong().color(ui.visuals().weak_text_color()));
-                    let rec_label = if self.gif_recorder.is_recording { "⏹ Stop GIF recording" } else { "🎥 Record GIF" };
-                    if menu_item(ui, rec_label, &ctrl("F12")) {
-                        ui.close_menu();
-                        if self.gif_recorder.is_recording {
-                            match self.gif_recorder.stop_and_save(&self.loaded_rom_name) {
-                                Ok((_p, name)) => self.set_toast(format!("🎥 Encoding GIF: {}…", name)),
-                                Err(e) => self.set_toast(format!("GIF Error: {}", e)),
-                            }
-                        } else {
-                            self.gif_recorder.start_recording();
-                            self.set_toast("🔴 Recording Animated GIF");
-                        }
-                    }
-                    if menu_item(ui, "⏱ TAS movies…", &ctrl("Y")) {
-                        self.tas_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                }).response);
-
-                remember_menu(ctx, "Controls", ui.menu_button("Controls", |ui| {
-                    ui.set_min_width(260.0);
-                    if menu_item(ui, "🎮 Keyboard & controllers…", "") {
-                        self.controls_dialog.open();
-                        ui.close_menu();
-                    }
-                    let layout = self.accessibility.active.one_handed_desktop;
-                    ui.menu_button(format!("🖐 Layout: {}", layout.display_name()), |ui| {
-                        for h in crate::gba::accessibility::Handedness::ALL {
-                            if ui.radio(layout == h, h.display_name()).clicked() {
-                                self.accessibility.active.one_handed_desktop = h;
-                                self.accessibility.commit();
-                                self.config_dirty = true;
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                }).response);
-
-                remember_menu(ctx, "Help", ui.menu_button("Help", |ui| {
-                    ui.set_min_width(280.0);
-                    if menu_item(ui, "📖 Manual & strategy guide", "F1") {
-                        self.guide_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    ui.menu_button("📑 Jump to chapter", |ui| {
-                        let chapters = [
-                            ("Cover", 0),
-                            ("1  Welcome & quick start", 1),
-                            ("2  Controls", 2),
-                            ("3  Filters & shaders", 3),
-                            ("4  Pokémon companion", 4),
-                            ("5  Clock & sensors", 5),
-                            ("6  Link cable & audio", 6),
-                            ("7  TAS & troubleshooting", 7),
-                        ];
-                        for (title, page) in chapters {
-                            if ui.button(title).clicked() {
-                                self.guide_dialog.open_at_page(page);
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                    if menu_item(ui, "📥 Open manual as PDF", "") {
-                        ui.close_menu();
-                        match self.guide_dialog.open_external_pdf() {
-                            Ok(_) => self.set_toast("📖 Opened the manual in your PDF viewer"),
-                            Err(e) => self.set_toast(format!("Error: {}", e)),
-                        }
-                    }
-                    if menu_item(ui, "💾 Export manual…", "") {
-                        ui.close_menu();
-                        match self.guide_dialog.export_pdf_as() {
-                            Ok(Some(path)) => self.set_toast(format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy())),
-                            Ok(None) => {}
-                            Err(e) => self.set_toast(format!("Export error: {}", e)),
-                        }
-                    }
-                    ui.separator();
-                    if menu_item(ui, "🔄 Check for updates…", "") {
-                        self.updater_dialog.is_open = true;
-                        ui.close_menu();
-                    }
-                    if menu_item(ui, "ℹ About CrabBoy Advance", "") {
-                        self.show_about_dialog = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).small().color(ui.visuals().weak_text_color()));
-                }).response);
-
-                remember_menu(ctx, "Debug", ui.menu_button("Debug", |ui| {
-                    ui.set_min_width(300.0);
-                    fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str, sc: &str) {
-                        let text = if *on { format!("✔ {label}") } else { format!("     {label}") };
-                        if menu_item(ui, text, sc) {
-                            *on = !*on;
-                        }
-                    }
-                    let d = &mut self.debug_windows;
-                    toggle(ui, &mut d.show_diagnostics, "🔬 Diagnostics", "F8");
-                    toggle(ui, &mut d.show_cpu, "CPU", "");
-                    toggle(ui, &mut d.show_ppu, "Graphics layers & sprites", "F6");
-                    toggle(ui, &mut d.show_palette, "Palettes", "");
-                    toggle(ui, &mut d.show_audio, "Audio channels", "F7");
-                    toggle(ui, &mut d.show_memory, "Memory viewer", "");
-                    toggle(ui, &mut self.memmap_dialog.is_open, "🧠 Memory map", "Ctrl+J");
-                    ui.separator();
-                    toggle(ui, &mut self.show_fps, "FPS counter", "");
-                }).response);
+                }
+                remember_menu(ctx, "Open", open);
+                let pause_label = if self.is_paused { "▶ Resume" } else { "⏸ Pause" };
+                let pause = ui
+                    .add_enabled(has_rom, egui::Button::new(pause_label).frame(false))
+                    .on_hover_text(format!("Pause or resume ({})", key(kb.pause)));
+                if pause.clicked() {
+                    self.is_paused = !self.is_paused;
+                }
+                remember_menu(ctx, "Pause", pause);
+                let settings = ui
+                    .add(egui::Button::new("⚙ Settings").frame(false))
+                    .on_hover_text("Display, emulation and audio settings");
+                if settings.clicked() {
+                    self.settings_window.is_open = !self.settings_window.is_open;
+                }
+                remember_menu(ctx, "Settings", settings);
 
                 // Update status appears in the bar only when there's news;
                 // the Update Center is always in Help.

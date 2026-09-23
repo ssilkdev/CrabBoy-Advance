@@ -72,6 +72,21 @@ impl Harness {
         self.step();
     }
 
+    /// Hover a button (opens a submenu) without clicking.
+    fn hover(&mut self, label: &str) {
+        let r = self.find(label).unwrap_or_else(|| panic!("no '{label}': {:?}", self.labels()));
+        self.events.push(egui::Event::PointerMoved(r.center()));
+        self.step();
+        self.step();
+        self.step();
+    }
+
+    /// Open ☰ Menu > `category` (the category's submenu shows).
+    fn open_category(&mut self, category: &str) {
+        self.click("☰ Menu");
+        self.hover(&category_label(category));
+    }
+
     fn labels(&self) -> Vec<String> {
         self.tree.iter().filter_map(|(_, n)| n.label().or_else(|| n.value()).map(|s| s.to_string())).collect()
     }
@@ -88,6 +103,25 @@ impl Harness {
     }
 }
 
+/// Category names as shown in ☰ Menu.
+const CATEGORIES: [&str; 9] = ["File", "Emulation", "Video", "Audio", "Game Boy", "Tools", "Controls", "Help", "Debug"];
+
+fn category_label(c: &str) -> String {
+    let icon = match c {
+        "File" => "📂",
+        "Emulation" => "⏱",
+        "Video" => "🖥",
+        "Audio" => "🔊",
+        "Game Boy" => "🕹",
+        "Tools" => "🛠",
+        "Controls" => "🎮",
+        "Help" => "📖",
+        "Debug" => "🔬",
+        _ => "",
+    };
+    format!("{icon} {c}")
+}
+
 fn window_rect(h: &Harness, title: &str) -> Option<egui::Rect> {
     h.tree.iter().find_map(|(_, n)| (n.role() == Role::Window && n.label() == Some(title)).then(|| rect(n)))
 }
@@ -100,8 +134,7 @@ fn on_screen(h: &Harness, r: egui::Rect) -> bool {
 fn settings_window_fits_and_works_on_small_screens() {
     for (w, hgt) in [(1280.0, 720.0), (1024.0, 600.0)] {
         let mut h = Harness::new(w, hgt);
-        h.click("Video");
-        h.click("⚙ Display settings…");
+        h.click("⚙ Settings");
         let win = window_rect(&h, "Settings").expect("window opens");
         assert!(on_screen(&h, win), "{w}x{hgt}: window {win:?} off screen");
         for page in ["🎨 Picture", "✨ Enhance", "🖼 HD & Widescreen", "🖥 Screen & Frame", "⏱ Speed & Latency", "🔊 Sound"] {
@@ -149,11 +182,10 @@ fn settings_window_fits_and_works_on_small_screens() {
 #[test]
 fn every_menu_fits_on_a_720p_screen() {
     let mut h = Harness::new(1280.0, 720.0);
-    let menus = ["File", "Emulation", "Video", "Audio", "Game Boy", "Tools", "Controls", "Help", "Debug"];
     let mut report = Vec::new();
     let mut failures = Vec::new();
-    for m in menus {
-        h.click(m);
+    for m in CATEGORIES {
+        h.open_category(m);
         let (top, bottom) = h.menu_extent();
         report.push(format!("{m}: items span y={top:.0}..{bottom:.0}"));
         if top < 0.0 || bottom > h.size.y {
@@ -178,7 +210,7 @@ fn menus_open_settings_at_their_section_and_settings_apply() {
         ("Emulation", "⚙ Emulation settings…", "⏱ Speed & Latency"),
         ("Audio", "⚙ Audio settings…", "🔊 Sound"),
     ] {
-        h.click(menu);
+        h.open_category(menu);
         h.click(item);
         let shown = h.tree.iter().any(|(_, n)| n.role() == Role::Label && n.value() == Some(heading));
         assert!(shown, "{menu} > {item} should open {heading}");
@@ -214,7 +246,7 @@ fn menus_open_settings_at_their_section_and_settings_apply() {
 #[test]
 fn menu_items_show_shortcuts() {
     let mut h = Harness::new(1280.0, 720.0);
-    h.click("Tools");
+    h.open_category("Tools");
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
         ..Default::default()
@@ -249,10 +281,11 @@ fn menu_bar_status_never_overlaps_the_menus() {
         h.app.loaded_rom_name = "Pokemon - Emerald Version (USA, Europe).gba".into();
         h.step();
         h.step();
-        let menus: Vec<egui::Rect> = ["File", "Emulation", "Video", "Audio", "Game Boy", "Tools", "Controls", "Help", "Debug"]
+        let menus: Vec<egui::Rect> = ["☰ Menu", "📂 Open", "⏸ Pause", "⚙ Settings"]
             .iter()
             .filter_map(|m| h.find(m))
             .collect();
+        assert_eq!(menus.len(), 4, "{w}px: bar should have the menu and three actions: {:?}", h.labels());
         let right_edge = menus.iter().map(|r| r.max.x).fold(0.0, f32::max);
         // Everything else in the bar (y < 24) that isn't a menu button.
         for (_, n) in &h.tree {
@@ -269,4 +302,33 @@ fn menu_bar_status_never_overlaps_the_menus() {
             assert!(r.max.x <= w + 0.5, "{w}px: {:?} runs past the window edge", n.value());
         }
     }
+}
+
+/// The bar is simplified: one menu with every category, plus Open, Pause
+/// and Settings. The categories themselves are not on the bar any more.
+#[test]
+fn toolbar_is_one_menu_plus_quick_actions() {
+    let mut h = Harness::new(1280.0, 720.0);
+    let bar: Vec<String> = h
+        .tree
+        .iter()
+        .filter(|(_, n)| n.role() == Role::Button && n.bounds().is_some_and(|b| b.y1 < 26.0))
+        .filter_map(|(_, n)| n.label().map(String::from))
+        .collect();
+    for c in CATEGORIES {
+        assert!(!bar.iter().any(|b| b == c), "{c} is still on the bar: {bar:?}");
+    }
+    for want in ["☰ Menu", "📂 Open", "⏸ Pause", "⚙ Settings"] {
+        assert!(bar.iter().any(|b| b == want), "{want} missing from the bar: {bar:?}");
+    }
+    // Every category is inside the menu.
+    h.click("☰ Menu");
+    for c in CATEGORIES {
+        assert!(h.find(&category_label(c)).is_some(), "{c} missing from ☰ Menu");
+    }
+    // Settings button toggles the window.
+    h.events.push(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.step();
+    h.click("⚙ Settings");
+    assert!(h.app.settings_window.is_open);
 }
