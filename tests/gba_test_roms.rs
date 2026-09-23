@@ -31,14 +31,37 @@ fn rom_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-/// The verdict of a jsmolka ROM: `Ok(())` or `Err(first_failing_test)`.
+/// Row range (screen lines) where jsmolka's `m_test_eval` prints its
+/// verdict: text at y=76, 8 pixels tall.
+const VERDICT_ROWS: std::ops::Range<usize> = 76..84;
+
+/// Leftmost lit pixel column in the verdict rows, if any.
 ///
-/// Every jsmolka ROM ends in `idle: b idle` after writing its result, so the
-/// run is complete once the PC stops moving between frames.
+/// "All tests passed" is drawn from x=56 and "Failed test NNN" from x=60;
+/// glyphs have a 1-pixel left margin, so the first lit columns are 57 and
+/// 61. That tells the two apart without any font knowledge.
+fn verdict_left_edge(gba: &Gba) -> Option<usize> {
+    let fb = gba.get_framebuffer();
+    let bg = fb[0];
+    (0..240).find(|&x| VERDICT_ROWS.clone().any(|y| fb[y * 240 + x] != bg))
+}
+
+/// The verdict of a jsmolka ROM: `Ok(())` or `Err(reason)`.
+///
+/// Every jsmolka ROM ends in `idle: b idle` after drawing its verdict, so
+/// the run is complete once the PC stops moving between frames. The verdict
+/// is read from the screen, not from r12: a test that leaves the CPU in FIQ
+/// mode has a banked r12, and reading the wrong bank once hid a real failure.
+/// On failure, `m_test_eval` also stores the failing test's digits at
+/// 0x03000000/4/8, which gives the test number.
 fn run_jsmolka(path: &Path) -> Result<(), String> {
     // Copy to a temp dir so `save/*` ROMs don't leave .sav files beside the
     // user's checkout (the cartridge writes `<rom>.sav` next to the ROM).
-    let tmp = std::env::temp_dir().join(format!("crabboy-gba-tests-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!(
+        "crabboy-gba-tests-{}-{}",
+        std::process::id(),
+        path.file_stem().unwrap().to_string_lossy()
+    ));
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let rom = tmp.join(path.file_name().unwrap());
     std::fs::copy(path, &rom).map_err(|e| e.to_string())?;
@@ -48,22 +71,28 @@ fn run_jsmolka(path: &Path) -> Result<(), String> {
 
     let mut last_pc = u32::MAX;
     let mut stable_frames = 0;
+    let mut verdict = Err("did not finish".to_string());
     for _ in 0..600 {
         gba.run_frame();
         let pc = gba.cpu.regs[15];
-        if pc == last_pc {
-            stable_frames += 1;
-            if stable_frames >= 3 {
-                let r12 = gba.cpu.regs[12];
-                let _ = std::fs::remove_file(rom.with_extension("sav"));
-                return if r12 == 0 { Ok(()) } else { Err(format!("failed test #{r12}")) };
-            }
-        } else {
-            stable_frames = 0;
-        }
+        stable_frames = if pc == last_pc { stable_frames + 1 } else { 0 };
         last_pc = pc;
+        // Wait for the idle loop *and* a drawn verdict: the flash tests
+        // spin on the chip's busy status for a while mid-run.
+        if stable_frames >= 3 && verdict_left_edge(&gba).is_some() {
+            verdict = match verdict_left_edge(&gba) {
+                Some(57) => Ok(()),
+                Some(61) => {
+                    let digit = |a: u32| gba.mmu.read32(0x0300_0000 + a);
+                    Err(format!("failed test #{}", digit(0) * 100 + digit(4) * 10 + digit(8)))
+                }
+                other => Err(format!("no verdict on screen (left edge {other:?}, pc={pc:#010x})")),
+            };
+            break;
+        }
     }
-    Err(format!("did not finish (pc={:#010x}, r12={})", gba.cpu.regs[15], gba.cpu.regs[12]))
+    let _ = std::fs::remove_dir_all(&tmp);
+    verdict
 }
 
 /// The jsmolka ROMs, and whether CrabBoy is currently expected to pass each.
@@ -149,8 +178,8 @@ const MGBA_SUITES: &[&str] = &[
 /// any suite drops below its baseline (a regression) or rises above it (so
 /// the baseline gets bumped and the progress is recorded).
 const MGBA_BASELINE: &[u32] = &[
-    989,  // Memory            /1552
-    31,   // I/O read          /130
+    1081, // Memory            /1552
+    124,  // I/O read          /130
     185,  // Timing            /2020
     345,  // Timer count-up    /936
     0,    // Timer IRQ         /90
@@ -159,7 +188,7 @@ const MGBA_BASELINE: &[u32] = &[
     52,   // Multiply long     /72
     310,  // BIOS math         /615
     1032, // DMA               /1244
-    7,    // SIO register R/W  /90
+    25,   // SIO register R/W  /90
     0,    // SIO timing        /4
     1,    // Misc. edge case   /12
 ];
