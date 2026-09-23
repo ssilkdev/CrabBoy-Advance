@@ -112,7 +112,12 @@ impl Cartridge {
                 if rom_offset < self.rom.len() {
                     self.rom[rom_offset]
                 } else {
-                    0
+                    // Past the end of the ROM chip, the cartridge bus returns
+                    // the halfword address it was driven with: (addr / 2) &
+                    // 0xFFFF. Some games and copy protections probe this
+                    // (jsmolka unsafe.gba test #2).
+                    let half = (addr >> 1) & 0xFFFF;
+                    (half >> ((addr & 1) * 8)) as u8
                 }
             }
             0x0E | 0x0F => self.save.read(addr),
