@@ -223,6 +223,8 @@ impl ScreenRenderer {
         &mut self,
         ctx: &egui::Context,
         raw_fb: &[u32; 240 * 160],
+        hd_frame: Option<&crate::gba::ppu::hd_mode7::HdFrame>,
+        ssaa_mode: bool,
         filter: DisplayFilter,
         blend_mode: FrameBlendMode,
         nvidia_sharpen: bool,
@@ -230,8 +232,57 @@ impl ScreenRenderer {
         color_correction: bool,
         xbrz_factor: usize,
     ) -> &TextureHandle {
-        let blended_fb = self.frame_blender.blend(raw_fb, blend_mode);
         let should_sharpen = nvidia_sharpen || filter == DisplayFilter::NvidiaSharpen;
+
+        if let Some(hd) = hd_frame {
+            if hd.scale > 1 && !ssaa_mode {
+                let target_w = hd.width;
+                let target_h = hd.height;
+                if self.image_buffer.size != [target_w, target_h] {
+                    self.image_buffer = ColorImage::new([target_w, target_h], Color32::BLACK);
+                }
+
+                for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(hd.pixels.iter()) {
+                    let mut r = (pixel & 0xFF) as u8;
+                    let mut g = ((pixel >> 8) & 0xFF) as u8;
+                    let mut b = ((pixel >> 16) & 0xFF) as u8;
+                    if color_correction {
+                        let (cr, cg, cb) = apply_gba_color_correction(r, g, b);
+                        r = cr;
+                        g = cg;
+                        b = cb;
+                    }
+                    *dst = Color32::from_rgb(r, g, b);
+                }
+
+                if should_sharpen {
+                    apply_nvidia_adaptive_sharpening_image(&mut self.image_buffer, nvidia_sharpness);
+                }
+
+                let tex_options = match filter {
+                    DisplayFilter::Linear => TextureOptions::LINEAR,
+                    _ => TextureOptions::NEAREST,
+                };
+
+                let tex = self.texture.get_or_insert_with(|| {
+                    ctx.load_texture("gba_screen", self.image_buffer.clone(), tex_options)
+                });
+                tex.set(self.image_buffer.clone(), tex_options);
+                return tex;
+            }
+        }
+
+        let base_fb = if let Some(hd) = hd_frame {
+            if hd.scale > 1 && ssaa_mode {
+                hd.downsample_ssaa()
+            } else {
+                Box::new(*raw_fb)
+            }
+        } else {
+            Box::new(*raw_fb)
+        };
+
+        let blended_fb = self.frame_blender.blend(&base_fb, blend_mode);
 
         if filter == DisplayFilter::Xbrz {
             let factor = xbrz_factor.clamp(2, 6);

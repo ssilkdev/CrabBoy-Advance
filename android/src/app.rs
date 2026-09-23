@@ -10,6 +10,7 @@ use gba_simulator::dmg::mmu::GbKey;
 use gba_simulator::dmg::GameBoy;
 use gba_simulator::gba::frame_blend::{FrameBlendMode, FrameBlender};
 use gba_simulator::gba::keypad::Key;
+use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
 use gba_simulator::gba::shader::{apply_shader, ShaderPreset};
 use gba_simulator::gba::Gba;
 use winit::platform::android::activity::AndroidApp;
@@ -198,6 +199,7 @@ struct CrabBoyApp {
     frame_blender: FrameBlender,
     blend_mode: FrameBlendMode,
     shader_preset: ShaderPreset,
+    hd_mode7: HdMode7Config,
 }
 
 impl CrabBoyApp {
@@ -242,6 +244,7 @@ impl CrabBoyApp {
             frame_blender: FrameBlender::new(),
             blend_mode: FrameBlendMode::Off,
             shader_preset: ShaderPreset::Crisp,
+            hd_mode7: HdMode7Config::default(),
         };
         app.refresh_library();
         app
@@ -272,6 +275,9 @@ impl CrabBoyApp {
         }
         match Core::load(&path) {
             Ok(mut core) => {
+                if let Core::Gba(ref mut gba) = core {
+                    gba.set_hd_mode7_config(self.hd_mode7);
+                }
                 core.set_audio(self.muted, false);
                 let title = display_name(&path);
                 self.toast(format!("Loaded {title}"));
@@ -367,6 +373,43 @@ impl CrabBoyApp {
 
     fn upload_frame(&mut self, ctx: &egui::Context) {
         let Some(game) = self.game.as_ref() else { return };
+
+        // HD Mode 7 Rendering (ROADMAP M6)
+        if let Core::Gba(ref gba) = game.core {
+            if self.hd_mode7.scale != HdScale::Off {
+                if let Some(hd) = gba.render_hd_frame() {
+                    if !self.hd_mode7.ssaa {
+                        let hd_size = [hd.width, hd.height];
+                        let mut hd_bytes = Vec::with_capacity(hd.width * hd.height * 4);
+                        for &pixel in &hd.pixels {
+                            hd_bytes.extend_from_slice(&pixel.to_le_bytes());
+                        }
+                        let image = ColorImage::from_rgba_unmultiplied(hd_size, &hd_bytes);
+                        match self.texture.as_mut() {
+                            Some(t) if t.size() == hd_size => t.set(image, TextureOptions::NEAREST),
+                            _ => self.texture = Some(ctx.load_texture("screen", image, TextureOptions::NEAREST)),
+                        }
+                        return;
+                    } else {
+                        let ssaa_words = hd.downsample_ssaa();
+                        let blended = self.frame_blender.blend(&ssaa_words, self.blend_mode);
+                        let mut post_shader = [0u32; 240 * 160];
+                        apply_shader(blended, &mut post_shader, self.shader_preset, None);
+                        self.rgba.resize(240 * 160 * 4, 0);
+                        for (i, &word) in post_shader.iter().enumerate() {
+                            self.rgba[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                        }
+                        let image = ColorImage::from_rgba_unmultiplied([240, 160], &self.rgba);
+                        match self.texture.as_mut() {
+                            Some(t) if t.size() == [240, 160] => t.set(image, TextureOptions::NEAREST),
+                            _ => self.texture = Some(ctx.load_texture("screen", image, TextureOptions::NEAREST)),
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
         let size = game.core.frame_rgba(&mut self.rgba);
 
         // Apply frame blending and shader pipeline on 240x160 GBA framebuffers (ROADMAP M5)
@@ -535,6 +578,25 @@ impl CrabBoyApp {
                             ShaderPreset::CrtGeom => ShaderPreset::Linear,
                             _ => ShaderPreset::Crisp,
                         };
+                    }
+                    let hd_label = match self.hd_mode7.scale {
+                        HdScale::Off => "Mode 7: Native (Off)",
+                        HdScale::X2 => "Mode 7: 2x HD",
+                        HdScale::X4 => "Mode 7: 4x HD",
+                        HdScale::X8 => "Mode 7: 8x Ultra HD",
+                    };
+                    if ui.button(hd_label).clicked() {
+                        self.hd_mode7.scale = match self.hd_mode7.scale {
+                            HdScale::Off => HdScale::X2,
+                            HdScale::X2 => HdScale::X4,
+                            HdScale::X4 => HdScale::X8,
+                            HdScale::X8 => HdScale::Off,
+                        };
+                        if let Some(ref mut g) = self.game {
+                            if let Core::Gba(ref mut gba) = g.core {
+                                gba.set_hd_mode7_config(self.hd_mode7);
+                            }
+                        }
                     }
                     if ui.button("Reset").clicked() {
                         if let Some(p) = self.game.as_ref().map(|g| g.rom_path.clone()) {

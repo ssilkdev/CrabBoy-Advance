@@ -65,11 +65,15 @@ pub struct LayerDrawCommand {
     pub layer: PpuLayer,
     pub kind: LayerKind,
     pub priority: u8,
+    pub bgcnt: u16,
     pub h_offset: u16,
     pub v_offset: u16,
     pub affine_matrix: [i16; 4],
     pub affine_origin: [i32; 2],
     pub blend_mode: u8,
+    pub bldcnt: u16,
+    pub bldalpha: u16,
+    pub bldy: u16,
     pub window_enabled: bool,
 }
 

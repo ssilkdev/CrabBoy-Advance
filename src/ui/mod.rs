@@ -107,6 +107,7 @@ pub struct GbaApp {
     pub save_sync_config: config::SaveSyncConfig,
     pub frame_blend_mode: crate::gba::frame_blend::FrameBlendMode,
     pub custom_shader_path: Option<PathBuf>,
+    pub hd_mode7_config: crate::gba::ppu::hd_mode7::HdMode7Config,
     pub display_filter: DisplayFilter,
     pub nvidia_sharpen: bool,
     pub nvidia_sharpness: f32,
@@ -153,7 +154,7 @@ impl GbaApp {
         // The ROM (of either console) is loaded after construction through
         // load_rom_from_path, so there is exactly one dispatch site deciding
         // which core a file goes to.
-        let gba = Gba::new();
+        let mut gba = Gba::new();
         let loaded_rom_name = "No ROM Loaded".to_string();
 
         // Persisted controller mappings and keyboard bindings. Load failures
@@ -200,6 +201,9 @@ impl GbaApp {
                 }
             }
 
+            let hd_mode7_config = config.render.hd_mode7;
+            gba.set_hd_mode7_config(hd_mode7_config);
+
             let mut app = Self {
             gba,
             gb: None,
@@ -233,6 +237,7 @@ impl GbaApp {
             save_sync_config: config.save_sync.clone(),
             frame_blend_mode,
             custom_shader_path: config.render.custom_shader_path.clone(),
+            hd_mode7_config,
             display_filter,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -475,6 +480,7 @@ impl GbaApp {
                     crate::gba::frame_blend::FrameBlendMode::LcdGhosting { .. } => "lcd",
                 }.to_string(),
                 custom_shader_path: self.custom_shader_path.clone(),
+                hd_mode7: self.hd_mode7_config,
             },
         };
         if let Err(e) = cfg.save() {
@@ -1262,6 +1268,20 @@ impl eframe::App for GbaApp {
                     ui.checkbox(&mut self.color_correction, "Authentic GBA LCD Color Correction");
                     ui.checkbox(&mut self.ultrawide_ambient_glow, "Ultrawide Ambient Edge Glow");
                     ui.separator();
+                    ui.label("HD Mode 7 (High-Res Affine Rendering):");
+                    let prev_hd = self.hd_mode7_config;
+                    for &scale in &crate::gba::ppu::hd_mode7::HdScale::ALL {
+                        ui.radio_value(&mut self.hd_mode7_config.scale, scale, scale.display_name());
+                    }
+                    if self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off {
+                        ui.checkbox(&mut self.hd_mode7_config.perspective_interpolation, "Perspective Scanline Interpolation");
+                        ui.checkbox(&mut self.hd_mode7_config.ssaa, "Supersampled Anti-Aliasing (SSAA Native)");
+                    }
+                    if prev_hd != self.hd_mode7_config {
+                        self.gba.set_hd_mode7_config(self.hd_mode7_config);
+                        self.config_dirty = true;
+                    }
+                    ui.separator();
                     ui.label("Scale Preset (4K / Ultrawide):");
                     ui.radio_value(&mut self.scale_mode, ScaleMode::IntegerAuto, "Auto Integer (Pixel-Perfect)");
                     ui.radio_value(&mut self.scale_mode, ScaleMode::Scale1x, "1x (240x160)");
@@ -1668,9 +1688,18 @@ impl eframe::App for GbaApp {
                 } else {
                     self.gba.get_framebuffer()
                 };
+                let hd_frame = if self.gb.is_none()
+                    && self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off
+                {
+                    self.gba.render_hd_frame()
+                } else {
+                    None
+                };
                 let tex = self.screen_renderer.update_framebuffer(
                     ctx,
                     frame,
+                    hd_frame.as_ref(),
+                    self.hd_mode7_config.ssaa,
                     self.display_filter,
                     self.frame_blend_mode,
                     self.nvidia_sharpen,

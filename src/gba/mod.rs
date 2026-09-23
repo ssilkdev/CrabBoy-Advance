@@ -111,6 +111,16 @@ impl Gba {
         self.mmu.ppu.get_draw_commands()
     }
 
+    /// Configure HD Mode 7 high-resolution affine rendering (ROADMAP M6).
+    pub fn set_hd_mode7_config(&mut self, config: ppu::hd_mode7::HdMode7Config) {
+        self.mmu.ppu.set_hd_mode7_config(config);
+    }
+
+    /// Render HD Mode 7 frame if active.
+    pub fn render_hd_frame(&self) -> Option<ppu::hd_mode7::HdFrame> {
+        self.mmu.ppu.render_hd_frame()
+    }
+
     pub fn load_rom<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
         let cart = Cartridge::from_file(path)?;
         self.mmu.load_cartridge(cart);

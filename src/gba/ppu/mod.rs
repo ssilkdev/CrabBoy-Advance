@@ -3,11 +3,13 @@
 
 pub mod bg;
 pub mod blend;
+pub mod hd_mode7;
 pub mod layers;
 pub mod obj;
 
 use bg::{render_affine_bg, render_bitmap_bg, render_text_bg};
 use blend::{apply_color_effects, bgr555_to_rgb888, Pixel};
+pub use hd_mode7::{render_hd_mode7, HdFrame, HdMode7Config, HdScale};
 pub use layers::{LayerDrawCommand, LayerKind, PpuLayer, PpuLayerBuffers};
 use obj::render_sprites;
 
@@ -71,6 +73,9 @@ pub struct Ppu {
     pub layer_capture: bool,
     pub layer_buffers: Option<PpuLayerBuffers>,
     pub draw_commands: Vec<LayerDrawCommand>,
+
+    // HD Mode 7 Rendering (ROADMAP M6)
+    pub hd_config: HdMode7Config,
 }
 
 impl Default for Ppu {
@@ -116,6 +121,7 @@ impl Ppu {
             layer_capture: false,
             layer_buffers: None,
             draw_commands: Vec::new(),
+            hd_config: HdMode7Config::default(),
         }
     }
 
@@ -128,6 +134,19 @@ impl Ppu {
             self.layer_buffers = None;
             self.draw_commands.clear();
         }
+    }
+
+    /// Configure HD Mode 7 rendering (ROADMAP M6).
+    pub fn set_hd_mode7_config(&mut self, config: HdMode7Config) {
+        if config.scale != HdScale::Off {
+            self.set_layer_capture(true);
+        }
+        self.hd_config = config;
+    }
+
+    /// Renders an HD Mode 7 high-resolution frame if active.
+    pub fn render_hd_frame(&self) -> Option<HdFrame> {
+        render_hd_mode7(self, &self.hd_config)
     }
 
     /// Access isolated RGBA framebuffer surface for a specific layer.
@@ -308,6 +327,11 @@ impl Ppu {
 
         let mode = (self.dispcnt & 7) as u8;
         let frame = (self.dispcnt & (1 << 4)) != 0;
+
+        let scanline_affine_origin = [
+            [self.bg_x_internal[0], self.bg_y_internal[0]],
+            [self.bg_x_internal[1], self.bg_y_internal[1]],
+        ];
 
         // Render BG layers based on mode
         match mode {
@@ -565,7 +589,10 @@ impl Ppu {
                     let (matrix, origin) = if kind == LayerKind::Affine && (i == 2 || i == 3) {
                         let aff_idx = i - 2;
                         ([self.bg_pa[aff_idx], self.bg_pb[aff_idx], self.bg_pc[aff_idx], self.bg_pd[aff_idx]],
-                         [self.bg_x_internal[aff_idx], self.bg_y_internal[aff_idx]])
+                         scanline_affine_origin[aff_idx])
+                    } else if kind == LayerKind::Bitmap {
+                        ([self.bg_pa[0], self.bg_pb[0], self.bg_pc[0], self.bg_pd[0]],
+                         scanline_affine_origin[0])
                     } else {
                         ([0x0100, 0, 0, 0x0100], [0, 0])
                     };
@@ -579,11 +606,15 @@ impl Ppu {
                         },
                         kind,
                         priority: (self.bgcnt[i] & 3) as u8,
+                        bgcnt: self.bgcnt[i],
                         h_offset: self.bghofs[i],
                         v_offset: self.bgvofs[i],
                         affine_matrix: matrix,
                         affine_origin: origin,
                         blend_mode: bldcnt_mode,
+                        bldcnt: self.bldcnt,
+                        bldalpha: self.bldalpha,
+                        bldy: self.bldy,
                         window_enabled: any_win,
                     });
                 }
@@ -594,11 +625,15 @@ impl Ppu {
                     layer: PpuLayer::Obj,
                     kind: LayerKind::Obj,
                     priority: 0,
+                    bgcnt: 0,
                     h_offset: 0,
                     v_offset: 0,
                     affine_matrix: [0x0100, 0, 0, 0x0100],
                     affine_origin: [0, 0],
                     blend_mode: bldcnt_mode,
+                    bldcnt: self.bldcnt,
+                    bldalpha: self.bldalpha,
+                    bldy: self.bldy,
                     window_enabled: any_win,
                 });
             }

@@ -90,13 +90,14 @@ impl Default for SaveSyncConfig {
     }
 }
 
-/// Rendering pipeline configuration (ROADMAP M5).
+/// Rendering pipeline configuration (ROADMAP M5, M6).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct RenderConfig {
     pub filter: String,
     pub frame_blend: String,
     pub custom_shader_path: Option<PathBuf>,
+    pub hd_mode7: crate::gba::ppu::hd_mode7::HdMode7Config,
 }
 
 impl Default for RenderConfig {
@@ -105,6 +106,7 @@ impl Default for RenderConfig {
             filter: "crisp".to_string(),
             frame_blend: "off".to_string(),
             custom_shader_path: None,
+            hd_mode7: crate::gba::ppu::hd_mode7::HdMode7Config::default(),
         }
     }
 }
