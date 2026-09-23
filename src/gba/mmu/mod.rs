@@ -46,6 +46,13 @@ pub struct Mmu {
 
     pub flight_recorder: FlightRecorder,
     pub current_pc: u32,
+    /// BIOS open-bus latch: the last opcode fetched from BIOS (as seen at
+    /// the fetch stage, i.e. PC+8). BIOS memory is read-protected, so a read
+    /// from BIOS while executing outside it returns this value instead.
+    /// Values follow the real BIOS (jsmolka bios.gba): 0xE129F000 after boot,
+    /// 0xE3A02004 after an SWI, 0xE25EF004 inside an IRQ handler and
+    /// 0xE55EC002 after returning from one. ROADMAP M1.
+    pub bios_latch: u32,
     pub current_cycles: u64,
     pub intr_wait_mask: Option<u16>,
 }
@@ -55,6 +62,12 @@ impl Default for Mmu {
         Self::new()
     }
 }
+
+/// BIOS open-bus values of the real GBA BIOS at well-known points.
+pub const BIOS_LATCH_BOOT: u32 = 0xE129_F000;
+pub const BIOS_LATCH_AFTER_SWI: u32 = 0xE3A0_2004;
+pub const BIOS_LATCH_IN_IRQ: u32 = 0xE25E_F004;
+pub const BIOS_LATCH_AFTER_IRQ: u32 = 0xE55E_C002;
 
 impl Mmu {
     pub fn new() -> Self {
@@ -116,6 +129,7 @@ impl Mmu {
             last_read: 0,
             flight_recorder: FlightRecorder::new(),
             current_pc: 0,
+            bios_latch: BIOS_LATCH_BOOT,
             current_cycles: 0,
             intr_wait_mask: None,
         }
@@ -128,9 +142,12 @@ impl Mmu {
     #[inline(always)]
     pub fn read8(&self, addr: u32) -> u8 {
         match (addr >> 24) & 0xFF {
-            0x00 => {
-                let off = (addr & 0x3FFF) as usize;
-                self.bios[off]
+            0x00 if addr < 0x4000 => {
+                if self.current_pc >= 0x4000 {
+                    // Read-protected: open bus returns the latched opcode.
+                    return (self.bios_latch >> ((addr & 3) * 8)) as u8;
+                }
+                self.bios[addr as usize]
             }
             0x02 => {
                 let off = (addr & 0x3_FFFF) as usize;
@@ -809,6 +826,7 @@ impl Mmu {
             }
 
             self.intr_wait_mask = pending_wait;
+            self.bios_latch = BIOS_LATCH_AFTER_SWI;
         } else {
             cpu.trigger_swi(comment);
         }

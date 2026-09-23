@@ -83,6 +83,7 @@ impl Gba {
         self.mmu.ie = 0;
         self.mmu.if_reg = 0;
         self.mmu.intr_wait_mask = None;
+        self.mmu.bios_latch = mmu::BIOS_LATCH_BOOT;
         self.diagnostics.reset();
     }
 
@@ -96,6 +97,14 @@ impl Gba {
         // Synchronize PC and cycles to MMU for flight recording
         self.mmu.current_pc = self.cpu.regs[15];
         self.mmu.current_cycles = self.cpu.cycles;
+
+        // BIOS open-bus latch for our IRQ dispatcher stub (see Mmu::new):
+        // 0x24 jumps to the game's handler, 0x2C returns from the IRQ.
+        match self.mmu.current_pc {
+            0x24 => self.mmu.bios_latch = mmu::BIOS_LATCH_IN_IRQ,
+            0x2C => self.mmu.bios_latch = mmu::BIOS_LATCH_AFTER_IRQ,
+            _ => {}
+        }
 
         // Execute instruction
         let cycles = if self.cpu.halted {
@@ -354,6 +363,9 @@ impl Gba {
     }
 
     pub fn load_state(&mut self, data: &[u8]) -> bool {
+        // The prefetch pipeline isn't part of the state format; refill it
+        // from memory after loading.
+        self.cpu.pipe_valid = false;
         let min_len = 16 * 4 + 4 + 8 + 1 + 109 + 256 * 1024 + 32 * 1024 + 96 * 1024 + 1024 + 1024 + 1024;
         if data.len() < min_len {
             return false;
