@@ -16,6 +16,7 @@ pub mod save_sync;
 pub mod shader;
 pub mod state;
 pub mod timer;
+pub mod widescreen;
 
 use cheats::CheatManager;
 use cpu::{arm::step_arm, thumb::step_thumb, Arm7Tdmi, CpuMode};
@@ -153,14 +154,60 @@ impl Gba {
         )
     }
 
-    /// Render HD Mode 7 or HD Pack frame if active.
+    /// Render HD Mode 7, HD Pack, or Widescreen frame if active.
     pub fn render_hd_frame(&self) -> Option<ppu::hd_mode7::HdFrame> {
         self.mmu.ppu.render_hd_frame()
+    }
+
+    /// Configure Widescreen rendering (ROADMAP M8).
+    pub fn set_widescreen_config(&mut self, config: widescreen::WidescreenConfig) {
+        self.mmu.ppu.set_widescreen_config(config);
+    }
+
+    /// Toggle widescreen active state.
+    pub fn set_widescreen_enabled(&mut self, enabled: bool) {
+        self.mmu.ppu.set_widescreen_enabled(enabled);
+    }
+
+    /// Query if widescreen is actively enabled.
+    pub fn is_widescreen_enabled(&self) -> bool {
+        self.mmu.ppu.is_widescreen_enabled()
+    }
+
+    /// Borrow active widescreen config.
+    pub fn widescreen_config(&self) -> &widescreen::WidescreenConfig {
+        self.mmu.ppu.widescreen_config()
+    }
+
+    /// Mutably borrow active widescreen config.
+    pub fn widescreen_config_mut(&mut self) -> &mut widescreen::WidescreenConfig {
+        self.mmu.ppu.widescreen_config_mut()
+    }
+
+    /// Render widescreen frame directly if active.
+    pub fn render_widescreen_frame(&self) -> Option<ppu::hd_mode7::HdFrame> {
+        self.mmu.ppu.render_widescreen_frame()
+    }
+
+    /// Automatically configure widescreen settings and apply patches for loaded cartridge.
+    pub fn configure_widescreen_for_loaded_cartridge(&mut self) -> Option<&'static widescreen::WidescreenGameProfile> {
+        if let Some(ref mut cart) = self.mmu.cartridge {
+            if let Some(profile) = widescreen::WidescreenDatabase::lookup(&cart.game_code, &cart.title) {
+                let mut config = profile.to_config();
+                config.enabled = self.mmu.ppu.widescreen_config.enabled;
+                self.mmu.ppu.set_widescreen_config(config);
+                profile.apply_patches(&mut cart.rom);
+                log::info!("Auto-configured widescreen profile for '{}' [{}]: {}", profile.title, profile.game_code, profile.notes);
+                return Some(profile);
+            }
+        }
+        None
     }
 
     pub fn load_rom<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
         let cart = Cartridge::from_file(path)?;
         self.mmu.load_cartridge(cart);
+        self.configure_widescreen_for_loaded_cartridge();
         self.reset();
         Ok(())
     }
@@ -168,6 +215,7 @@ impl Gba {
     pub fn load_rom_bytes(&mut self, rom: Vec<u8>) {
         let cart = Cartridge::from_bytes(rom);
         self.mmu.load_cartridge(cart);
+        self.configure_widescreen_for_loaded_cartridge();
         self.reset();
     }
 

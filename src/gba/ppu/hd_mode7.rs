@@ -116,20 +116,22 @@ impl HdFrame {
         }
     }
 
-    /// Downsamples the high-resolution frame to native 240x160 using box-filtered
-    /// supersampled anti-aliasing (SSAA).
-    pub fn downsample_ssaa(&self) -> Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]> {
-        let mut out = Box::new([0u32; SCREEN_WIDTH * SCREEN_HEIGHT]);
+    /// Downsamples the high-resolution frame to native resolution using box-filtered
+    /// supersampled anti-aliasing (SSAA). Supports widescreen frames of arbitrary width.
+    pub fn downsample_ssaa_wide(&self) -> Vec<u32> {
+        let target_w = self.width / self.scale;
+        let target_h = self.height / self.scale;
+        let mut out = vec![0u32; target_w * target_h];
         let scale = self.scale;
         if scale == 1 {
-            out.copy_from_slice(&self.pixels[..SCREEN_WIDTH * SCREEN_HEIGHT]);
+            out.copy_from_slice(&self.pixels[..target_w * target_h]);
             return out;
         }
 
         let inv_count = 1.0 / ((scale * scale) as f32);
 
-        for ny in 0..SCREEN_HEIGHT {
-            for nx in 0..SCREEN_WIDTH {
+        for ny in 0..target_h {
+            for nx in 0..target_w {
                 let mut sum_r = 0.0f32;
                 let mut sum_g = 0.0f32;
                 let mut sum_b = 0.0f32;
@@ -149,9 +151,19 @@ impl HdFrame {
                 let r = (sum_r * inv_count).round() as u32;
                 let g = (sum_g * inv_count).round() as u32;
                 let b = (sum_b * inv_count).round() as u32;
-                out[ny * SCREEN_WIDTH + nx] = 0xFF00_0000 | (b << 16) | (g << 8) | r;
+                out[ny * target_w + nx] = 0xFF00_0000 | (b << 16) | (g << 8) | r;
             }
         }
+        out
+    }
+
+    /// Downsamples the high-resolution frame to native 240x160 using box-filtered
+    /// supersampled anti-aliasing (SSAA).
+    pub fn downsample_ssaa(&self) -> Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]> {
+        let mut out = Box::new([0u32; SCREEN_WIDTH * SCREEN_HEIGHT]);
+        let wide = self.downsample_ssaa_wide();
+        let copy_len = wide.len().min(SCREEN_WIDTH * SCREEN_HEIGHT);
+        out[..copy_len].copy_from_slice(&wide[..copy_len]);
         out
     }
 }

@@ -80,6 +80,9 @@ pub struct Ppu {
     // HD Sprite and Tile Replacement Packs (ROADMAP M7)
     pub hd_pack: Option<crate::gba::hd_pack::HdPack>,
     pub hd_pack_enabled: bool,
+
+    // Per-Game Widescreen (ROADMAP M8)
+    pub widescreen_config: crate::gba::widescreen::WidescreenConfig,
 }
 
 impl Default for Ppu {
@@ -128,6 +131,7 @@ impl Ppu {
             hd_config: HdMode7Config::default(),
             hd_pack: None,
             hd_pack_enabled: true,
+            widescreen_config: crate::gba::widescreen::WidescreenConfig::default(),
         }
     }
 
@@ -179,9 +183,49 @@ impl Ppu {
         self.hd_pack.as_mut()
     }
 
-    /// Renders an HD Mode 7 or HD Pack high-resolution frame if active.
+    /// Configure Widescreen rendering (ROADMAP M8).
+    pub fn set_widescreen_config(&mut self, config: crate::gba::widescreen::WidescreenConfig) {
+        if config.enabled && config.mode != crate::gba::widescreen::WidescreenMode::Off {
+            self.set_layer_capture(true);
+        }
+        self.widescreen_config = config;
+    }
+
+    /// Toggle widescreen active state.
+    pub fn set_widescreen_enabled(&mut self, enabled: bool) {
+        if enabled && self.widescreen_config.mode != crate::gba::widescreen::WidescreenMode::Off {
+            self.set_layer_capture(true);
+        }
+        self.widescreen_config.enabled = enabled;
+    }
+
+    /// Query if widescreen rendering is actively enabled.
+    pub fn is_widescreen_enabled(&self) -> bool {
+        self.widescreen_config.enabled && self.widescreen_config.mode != crate::gba::widescreen::WidescreenMode::Off
+    }
+
+    /// Borrow active widescreen config.
+    pub fn widescreen_config(&self) -> &crate::gba::widescreen::WidescreenConfig {
+        &self.widescreen_config
+    }
+
+    /// Mutably borrow active widescreen config.
+    pub fn widescreen_config_mut(&mut self) -> &mut crate::gba::widescreen::WidescreenConfig {
+        &mut self.widescreen_config
+    }
+
+    /// Render widescreen frame directly.
+    pub fn render_widescreen_frame(&self) -> Option<HdFrame> {
+        crate::gba::widescreen::render_widescreen(self, &self.widescreen_config, &self.hd_config)
+    }
+
+    /// Renders an HD Mode 7, HD Pack, or Widescreen frame if active.
     pub fn render_hd_frame(&self) -> Option<HdFrame> {
-        render_hd_mode7(self, &self.hd_config)
+        if self.is_widescreen_enabled() {
+            crate::gba::widescreen::render_widescreen(self, &self.widescreen_config, &self.hd_config)
+        } else {
+            render_hd_mode7(self, &self.hd_config)
+        }
     }
 
     /// Access isolated RGBA framebuffer surface for a specific layer.
@@ -329,7 +373,7 @@ impl Ppu {
         (irq_vblank, irq_hblank, irq_vcounter, dma_vblank, dma_hblank)
     }
 
-    fn render_scanline(&mut self, y: u32) {
+    pub fn render_scanline(&mut self, y: u32) {
         if y == 0 && self.layer_capture {
             if let Some(ref mut lb) = self.layer_buffers {
                 lb.clear();

@@ -39,6 +39,7 @@ USAGE:
     crabboy-advance [ROM_PATH]                                  Launch GUI emulator (.gba, .gb, .gbc)
     crabboy-advance <ROM> --ai-play [--ai-endpoint URL]         Launch GUI with the AI Agent already playing
     crabboy-advance <ROM> --hd-pack <DIR>                       Launch GUI with HD sprite & tile pack loaded
+    crabboy-advance <ROM> --widescreen                          Launch GUI with 16:9 widescreen expansion
     crabboy-advance --diagnose <ROM> [--frames N] [--output P]  Run headless diagnostics and export report
     crabboy-advance --dump-frame <ROM> [--frame N] [--output P] Run headless to frame N and save PNG screenshot
     crabboy-advance --dump-tiles <ROM> [--frame N] [--output D] Run headless to frame N and dump tiles/sprites pack
@@ -197,6 +198,10 @@ fn handle_headless_cli(args: &[String]) {
         if let Err(e) = gba.load_rom(&rom_path) {
             eprintln!("Failed to load ROM '{}': {}", rom_path.display(), e);
             std::process::exit(1);
+        }
+
+        if args.iter().any(|a| a == "--widescreen") {
+            gba.set_widescreen_enabled(true);
         }
 
         println!(
@@ -448,12 +453,17 @@ fn main() -> eframe::Result<()> {
 
     let ai_opts = parse_ai_options(&args);
     let hd_pack_arg = get_arg_val(&args, "--hd-pack").map(PathBuf::from);
+    let widescreen_arg = args.iter().any(|a| a == "--widescreen");
 
     eframe::run_native(
         "GBA Simulator",
         options,
         Box::new(move |cc| {
             let mut app = GbaApp::new(cc, initial_rom);
+            if widescreen_arg {
+                app.gba.set_widescreen_enabled(true);
+                app.widescreen_config.enabled = true;
+            }
             if let Some(ref pack_dir) = hd_pack_arg {
                 match crate::gba::hd_pack::HdPack::load_from_dir(pack_dir) {
                     Ok(pack) => {

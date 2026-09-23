@@ -110,6 +110,7 @@ pub struct GbaApp {
     pub hd_mode7_config: crate::gba::ppu::hd_mode7::HdMode7Config,
     pub hd_pack_path: Option<PathBuf>,
     pub hd_pack_enabled: bool,
+    pub widescreen_config: crate::gba::widescreen::WidescreenConfig,
     pub display_filter: DisplayFilter,
     pub nvidia_sharpen: bool,
     pub nvidia_sharpness: f32,
@@ -215,6 +216,9 @@ impl GbaApp {
                 }
             }
 
+            let widescreen_config = config.render.widescreen.clone();
+            gba.set_widescreen_config(widescreen_config.clone());
+
             let mut app = Self {
             gba,
             gb: None,
@@ -251,6 +255,7 @@ impl GbaApp {
             hd_mode7_config,
             hd_pack_path,
             hd_pack_enabled,
+            widescreen_config,
             display_filter,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -350,6 +355,7 @@ impl GbaApp {
                         self.console = ConsoleKind::Gba;
                         self.loaded_rom_name = name;
                         self.rewind_manager.clear();
+                        self.widescreen_config = self.gba.widescreen_config().clone();
                         self.update_run_ahead_for_rom();
                         self.sync_saves();
                         self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
@@ -496,6 +502,7 @@ impl GbaApp {
                 hd_mode7: self.hd_mode7_config,
                 hd_pack_path: self.hd_pack_path.clone(),
                 hd_pack_enabled: self.hd_pack_enabled,
+                widescreen: self.widescreen_config.clone(),
             },
         };
         if let Err(e) = cfg.save() {
@@ -1342,6 +1349,38 @@ impl eframe::App for GbaApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    ui.label("Per-Game Widescreen (16:9 / 16:10):");
+                    let mut ws_enabled = self.gba.is_widescreen_enabled();
+                    if ui.checkbox(&mut ws_enabled, "Enable Widescreen Expansion").changed() {
+                        self.gba.set_widescreen_enabled(ws_enabled);
+                        self.widescreen_config.enabled = ws_enabled;
+                        self.config_dirty = true;
+                    }
+                    if let Some(ref cart) = self.gba.mmu.cartridge {
+                        if let Some(prof) = crate::gba::widescreen::WidescreenDatabase::lookup(&cart.game_code, &cart.title) {
+                            ui.label(format!("Profile: {} [{}]", prof.title, prof.game_code));
+                            ui.label(format!("Safe Settings: {}", prof.notes));
+                        } else {
+                            ui.label("Profile: Generic 16:9 Expansion");
+                        }
+                    } else {
+                        ui.label("Profile: Generic 16:9 Expansion (No ROM loaded)");
+                    }
+
+                    let mut ws_mode = self.widescreen_config.mode;
+                    let mut ws_changed = false;
+                    ui.horizontal(|ui| {
+                        ws_changed |= ui.radio_value(&mut ws_mode, crate::gba::widescreen::WidescreenMode::Ratio16_9, "16:9 (284x160)").changed();
+                        ws_changed |= ui.radio_value(&mut ws_mode, crate::gba::widescreen::WidescreenMode::TileAligned16_9, "16:9 Aligned (288x160)").changed();
+                        ws_changed |= ui.radio_value(&mut ws_mode, crate::gba::widescreen::WidescreenMode::Ratio16_10, "16:10 Steam Deck").changed();
+                    });
+                    if ws_changed {
+                        self.widescreen_config.mode = ws_mode;
+                        self.gba.set_widescreen_config(self.widescreen_config.clone());
+                        self.config_dirty = true;
+                    }
+
+                    ui.separator();
                     ui.label("Scale Preset (4K / Ultrawide):");
                     ui.radio_value(&mut self.scale_mode, ScaleMode::IntegerAuto, "Auto Integer (Pixel-Perfect)");
                     ui.radio_value(&mut self.scale_mode, ScaleMode::Scale1x, "1x (240x160)");
@@ -1741,7 +1780,12 @@ impl eframe::App for GbaApp {
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 15, 18)))
             .show(ctx, |ui| {
                 let available_size = ui.available_size();
-                let target_size = self.aspect_ratio.calculate_target_size(available_size, self.scale_mode);
+                let custom_aspect = if self.gb.is_none() && self.gba.is_widescreen_enabled() {
+                    Some(self.gba.widescreen_config().aspect_ratio())
+                } else {
+                    None
+                };
+                let target_size = self.aspect_ratio.calculate_target_size_for_aspect(available_size, self.scale_mode, custom_aspect);
 
                 let frame = if self.gb.is_some() {
                     &*self.gb_framebuffer
@@ -1750,7 +1794,8 @@ impl eframe::App for GbaApp {
                 };
                 let hd_frame = if self.gb.is_none()
                     && (self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off
-                        || self.gba.is_hd_pack_enabled())
+                        || self.gba.is_hd_pack_enabled()
+                        || self.gba.is_widescreen_enabled())
                 {
                     self.gba.render_hd_frame()
                 } else {

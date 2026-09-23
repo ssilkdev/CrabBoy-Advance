@@ -100,6 +100,7 @@ pub struct RenderConfig {
     pub hd_mode7: crate::gba::ppu::hd_mode7::HdMode7Config,
     pub hd_pack_path: Option<PathBuf>,
     pub hd_pack_enabled: bool,
+    pub widescreen: crate::gba::widescreen::WidescreenConfig,
 }
 
 impl Default for RenderConfig {
@@ -111,6 +112,7 @@ impl Default for RenderConfig {
             hd_mode7: crate::gba::ppu::hd_mode7::HdMode7Config::default(),
             hd_pack_path: None,
             hd_pack_enabled: true,
+            widescreen: crate::gba::widescreen::WidescreenConfig::default(),
         }
     }
 }

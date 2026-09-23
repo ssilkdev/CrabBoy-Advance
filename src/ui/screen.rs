@@ -141,31 +141,38 @@ impl AspectRatio {
 
     /// Calculates the target viewport size in points given the available area and scale mode.
     pub fn calculate_target_size(&self, available_size: Vec2, scale_mode: ScaleMode) -> Vec2 {
+        self.calculate_target_size_for_aspect(available_size, scale_mode, None)
+    }
+
+    /// Calculates the target viewport size in points given the available area, scale mode,
+    /// and an optional custom aspect ratio (used by widescreen frames).
+    pub fn calculate_target_size_for_aspect(&self, available_size: Vec2, scale_mode: ScaleMode, custom_aspect: Option<f32>) -> Vec2 {
         let native_w = SCREEN_WIDTH as f32;
         let native_h = SCREEN_HEIGHT as f32;
-        let native_aspect = native_w / native_h; // 1.5
+        let effective_aspect = match self {
+            Self::Native => custom_aspect.unwrap_or(native_w / native_h),
+            _ => self.ratio().or(custom_aspect).unwrap_or(native_w / native_h),
+        };
 
         match scale_mode {
             ScaleMode::Fit => {
-                match self.ratio() {
-                    Some(aspect) => {
-                        let w_by_h = available_size.y * aspect;
-                        if w_by_h <= available_size.x {
-                            Vec2::new(w_by_h, available_size.y)
-                        } else {
-                            Vec2::new(available_size.x, available_size.x / aspect)
-                        }
+                if *self == Self::Stretch {
+                    available_size
+                } else {
+                    let w_by_h = available_size.y * effective_aspect;
+                    if w_by_h <= available_size.x {
+                        Vec2::new(w_by_h, available_size.y)
+                    } else {
+                        Vec2::new(available_size.x, available_size.x / effective_aspect)
                     }
-                    None => available_size, // Stretch mode fills entire available area
                 }
             }
             ScaleMode::IntegerAuto => {
-                let aspect = self.ratio().unwrap_or(native_aspect);
                 let max_h = (available_size.y / native_h).floor() as u32;
-                let max_w = (available_size.x / (native_h * aspect)).floor() as u32;
+                let max_w = (available_size.x / (native_h * effective_aspect)).floor() as u32;
                 let scale = max_w.min(max_h).max(1);
                 let target_h = native_h * scale as f32;
-                let target_w = target_h * aspect;
+                let target_w = target_h * effective_aspect;
                 Vec2::new(target_w, target_h)
             }
             fixed_scale => {
@@ -183,8 +190,7 @@ impl AspectRatio {
                     _ => 1.0,
                 };
                 let target_h = native_h * factor;
-                let aspect = self.ratio().unwrap_or(native_aspect);
-                let target_w = target_h * aspect;
+                let target_w = target_h * effective_aspect;
                 Vec2::new(target_w, target_h)
             }
         }
@@ -235,7 +241,8 @@ impl ScreenRenderer {
         let should_sharpen = nvidia_sharpen || filter == DisplayFilter::NvidiaSharpen;
 
         if let Some(hd) = hd_frame {
-            if hd.scale > 1 && !ssaa_mode {
+            let is_wide = (hd.width / hd.scale) != SCREEN_WIDTH;
+            if (hd.scale > 1 && !ssaa_mode) || (is_wide && !ssaa_mode) {
                 let target_w = hd.width;
                 let target_h = hd.height;
                 if self.image_buffer.size != [target_w, target_h] {
@@ -243,6 +250,41 @@ impl ScreenRenderer {
                 }
 
                 for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(hd.pixels.iter()) {
+                    let mut r = (pixel & 0xFF) as u8;
+                    let mut g = ((pixel >> 8) & 0xFF) as u8;
+                    let mut b = ((pixel >> 16) & 0xFF) as u8;
+                    if color_correction {
+                        let (cr, cg, cb) = apply_gba_color_correction(r, g, b);
+                        r = cr;
+                        g = cg;
+                        b = cb;
+                    }
+                    *dst = Color32::from_rgb(r, g, b);
+                }
+
+                if should_sharpen {
+                    apply_nvidia_adaptive_sharpening_image(&mut self.image_buffer, nvidia_sharpness);
+                }
+
+                let tex_options = match filter {
+                    DisplayFilter::Linear => TextureOptions::LINEAR,
+                    _ => TextureOptions::NEAREST,
+                };
+
+                let tex = self.texture.get_or_insert_with(|| {
+                    ctx.load_texture("gba_screen", self.image_buffer.clone(), tex_options)
+                });
+                tex.set(self.image_buffer.clone(), tex_options);
+                return tex;
+            } else if is_wide && ssaa_mode {
+                let wide_words = hd.downsample_ssaa_wide();
+                let target_w = hd.width / hd.scale;
+                let target_h = hd.height / hd.scale;
+                if self.image_buffer.size != [target_w, target_h] {
+                    self.image_buffer = ColorImage::new([target_w, target_h], Color32::BLACK);
+                }
+
+                for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(wide_words.iter()) {
                     let mut r = (pixel & 0xFF) as u8;
                     let mut g = ((pixel >> 8) & 0xFF) as u8;
                     let mut b = ((pixel >> 16) & 0xFF) as u8;
