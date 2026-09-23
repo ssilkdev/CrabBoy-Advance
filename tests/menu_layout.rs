@@ -97,16 +97,16 @@ fn on_screen(h: &Harness, r: egui::Rect) -> bool {
 }
 
 #[test]
-fn display_settings_fit_and_work_on_small_screens() {
+fn settings_window_fits_and_works_on_small_screens() {
     for (w, hgt) in [(1280.0, 720.0), (1024.0, 600.0)] {
         let mut h = Harness::new(w, hgt);
         h.click("Video");
-        h.click("⚙ Display Settings…");
-        let win = window_rect(&h, "Display Settings").expect("window opens");
+        h.click("⚙ Display settings…");
+        let win = window_rect(&h, "Settings").expect("window opens");
         assert!(on_screen(&h, win), "{w}x{hgt}: window {win:?} off screen");
-        for page in ["🎨 Picture", "✨ Enhance", "🖼 HD & Widescreen", "🖥 Screen & Frame"] {
+        for page in ["🎨 Picture", "✨ Enhance", "🖼 HD & Widescreen", "🖥 Screen & Frame", "⏱ Speed & Latency", "🔊 Sound"] {
             h.click(page);
-            let win = window_rect(&h, "Display Settings").unwrap();
+            let win = window_rect(&h, "Settings").unwrap();
             assert!(on_screen(&h, win), "{w}x{hgt} {page}: window {win:?} off screen");
             // Every control on the page is inside the window (scrolled
             // content is clipped to it, never drawn below the screen).
@@ -149,7 +149,7 @@ fn display_settings_fit_and_work_on_small_screens() {
 #[test]
 fn every_menu_fits_on_a_720p_screen() {
     let mut h = Harness::new(1280.0, 720.0);
-    let menus = ["File", "Emulation", "Video", "Audio", "Game Boy", "Tools", "Controls", "Help"];
+    let menus = ["File", "Emulation", "Video", "Audio", "Game Boy", "Tools", "Controls", "Help", "Debug"];
     let mut report = Vec::new();
     let mut failures = Vec::new();
     for m in menus {
@@ -166,4 +166,107 @@ fn every_menu_fits_on_a_720p_screen() {
     }
     println!("{}", report.join("\n"));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every menu's "⚙ … settings…" opens the Settings window at its section,
+/// and settings from the new pages take effect.
+#[test]
+fn menus_open_settings_at_their_section_and_settings_apply() {
+    let mut h = Harness::new(1280.0, 720.0);
+    for (menu, item, heading) in [
+        ("Video", "⚙ Display settings…", "🎨 Picture"),
+        ("Emulation", "⚙ Emulation settings…", "⏱ Speed & Latency"),
+        ("Audio", "⚙ Audio settings…", "🔊 Sound"),
+    ] {
+        h.click(menu);
+        h.click(item);
+        let shown = h.tree.iter().any(|(_, n)| n.role() == Role::Label && n.value() == Some(heading));
+        assert!(shown, "{menu} > {item} should open {heading}");
+    }
+    // Speed page: 2x fast.
+    h.click("⏱ Speed & Latency");
+    h.click("2×");
+    assert_eq!(h.app.speed_multiplier, 2);
+    // Run-ahead 1 frame.
+    h.click("1 frame");
+    assert_eq!(h.app.run_ahead.frames, 1);
+    // Sound page: surround mode through its combo box.
+    h.click("🔊 Sound");
+    let combo = h
+        .tree
+        .iter()
+        .find(|(_, n)| n.role() == Role::ComboBox)
+        .map(|(_, n)| rect(n))
+        .expect("surround combo");
+    let p = combo.center();
+    h.events.push(egui::Event::PointerMoved(p));
+    for pressed in [true, false] {
+        h.events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.step();
+    h.click("Stereo");
+    assert_eq!(h.app.gba.mmu.apu.audio_output.surround_mode(), gba_simulator::gba::apu::audio_output::SurroundMode::Stereo);
+}
+
+/// Menu items show their keyboard shortcut, right-aligned. egui paints the
+/// shortcut as separate text, so look for it among the painted shapes.
+#[test]
+fn menu_items_show_shortcuts() {
+    let mut h = Harness::new(1280.0, 720.0);
+    h.click("Tools");
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
+        ..Default::default()
+    };
+    let (app, frame) = (&mut h.app, &mut h.frame);
+    let out = h.ctx.run(input, |ctx| eframe::App::update(app, ctx, frame));
+    let mut texts: Vec<(String, egui::Pos2)> = Vec::new();
+    for cs in &out.shapes {
+        collect(&cs.shape, &mut texts);
+    }
+    fn collect(s: &egui::epaint::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+        match s {
+            egui::epaint::Shape::Text(t) => out.push((t.galley.text().to_string(), t.pos)),
+            egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+            _ => {}
+        }
+    }
+    let item = texts.iter().find(|(t, _)| t.contains("Cheats")).expect("Cheats item painted");
+    let sc = texts
+        .iter()
+        .find(|(t, p)| t == "Ctrl+C" && (p.y - item.1.y).abs() < 4.0)
+        .expect("Ctrl+C painted on the same line as Cheats");
+    assert!(sc.1.x > item.1.x + 150.0, "shortcut is right-aligned: {:?} vs {:?}", sc.1, item.1);
+}
+
+/// The status text on the right of the menu bar never overlaps the menus,
+/// at any window width.
+#[test]
+fn menu_bar_status_never_overlaps_the_menus() {
+    for w in [640.0, 760.0, 900.0, 1280.0] {
+        let mut h = Harness::new(w, 600.0);
+        h.app.loaded_rom_name = "Pokemon - Emerald Version (USA, Europe).gba".into();
+        h.step();
+        h.step();
+        let menus: Vec<egui::Rect> = ["File", "Emulation", "Video", "Audio", "Game Boy", "Tools", "Controls", "Help", "Debug"]
+            .iter()
+            .filter_map(|m| h.find(m))
+            .collect();
+        let right_edge = menus.iter().map(|r| r.max.x).fold(0.0, f32::max);
+        // Everything else in the bar (y < 24) that isn't a menu button.
+        for (_, n) in &h.tree {
+            let Some(b) = n.bounds() else { continue };
+            if b.y1 > 26.0 || b.x1 <= b.x0 {
+                continue;
+            }
+            let r = rect(n);
+            let is_menu = menus.iter().any(|m| (m.center() - r.center()).length() < 1.0);
+            if is_menu || !matches!(n.role(), Role::Label | Role::Button) {
+                continue;
+            }
+            assert!(r.min.x >= right_edge - 0.5, "{w}px: {:?} {:?} at {r:?} overlaps the menus (end at {right_edge})", n.label(), n.value());
+            assert!(r.max.x <= w + 0.5, "{w}px: {:?} runs past the window edge", n.value());
+        }
+    }
 }

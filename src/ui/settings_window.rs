@@ -1,16 +1,21 @@
-//! Display Settings window.
+//! The Settings window.
 //!
-//! Replaces the old Video menu, which had grown to ~90 items in one dropdown
-//! and ran off the bottom of the screen. Settings are grouped into pages
-//! picked from a sidebar; only one page is shown at a time, the page
-//! scrolls, and the window is capped to the screen so nothing can end up
-//! out of reach. Choices are compact combo boxes and segmented buttons
-//! instead of long radio lists.
+//! One window for every setting that used to live inline in the menus
+//! (the Video menu alone had ~90 items and ran off the screen). A sidebar
+//! groups pages by section (Display, Emulation, Audio); only one page shows
+//! at a time, pages scroll, and the window is capped to the screen. Each
+//! setting is a labelled row with a short explanation underneath, using
+//! combo boxes and segmented buttons instead of long radio lists.
 //!
-//! The dialog edits a [`VideoSettings`] view of the app's fields and reports
-//! what changed; `GbaApp` applies the side effects (core config, file
-//! dialogs, persistence).
+//! Menus stay short: actions with their shortcuts, a few quick pickers, and
+//! "⚙ … settings…" which opens this window at the matching section.
+//!
+//! The window edits a [`Settings`] view of the app's fields and reports what
+//! changed in [`SettingsActions`]; `GbaApp` applies side effects (core
+//! config, file dialogs, persistence).
 
+use crate::gba::accessibility::{SlowMotionAudio, SlowMotionConfig, MIN_SLOW_MOTION};
+use crate::gba::apu::audio_output::SurroundMode;
 use crate::gba::frame_blend::FrameBlendMode;
 use crate::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
 use crate::gba::widescreen::WidescreenMode;
@@ -25,17 +30,28 @@ pub enum Page {
     Enhance,
     Hd,
     Screen,
+    Speed,
+    Sound,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Picture, Page::Enhance, Page::Hd, Page::Screen];
+    pub const ALL: [Page; 6] = [Page::Picture, Page::Enhance, Page::Hd, Page::Screen, Page::Speed, Page::Sound];
 
-    fn title(self) -> &'static str {
+    /// Sidebar groups, in order.
+    const SECTIONS: [(&'static str, &'static [Page]); 3] = [
+        ("DISPLAY", &[Page::Picture, Page::Enhance, Page::Hd, Page::Screen]),
+        ("EMULATION", &[Page::Speed]),
+        ("AUDIO", &[Page::Sound]),
+    ];
+
+    pub fn title(self) -> &'static str {
         match self {
             Page::Picture => "🎨 Picture",
             Page::Enhance => "✨ Enhance",
             Page::Hd => "🖼 HD & Widescreen",
             Page::Screen => "🖥 Screen & Frame",
+            Page::Speed => "⏱ Speed & Latency",
+            Page::Sound => "🔊 Sound",
         }
     }
 
@@ -45,12 +61,14 @@ impl Page {
             Page::Enhance => "Sharpening, color correction and glow.",
             Page::Hd => "High-res rendering, sprite packs and widescreen.",
             Page::Screen => "Size, aspect ratio, bezel and screenshots.",
+            Page::Speed => "Game speed, slow motion and input latency.",
+            Page::Sound => "Volume, surround and bass.",
         }
     }
 }
 
 /// The settings the window edits (borrowed from `GbaApp`).
-pub struct VideoSettings<'a> {
+pub struct Settings<'a> {
     pub filter: &'a mut DisplayFilter,
     pub xbrz_factor: &'a mut usize,
     pub blend: &'a mut FrameBlendMode,
@@ -71,11 +89,29 @@ pub struct VideoSettings<'a> {
     pub bezel: &'a mut BezelMode,
     pub screenshot_enhanced: &'a mut bool,
     pub custom_shader_name: Option<String>,
+
+    // Emulation
+    /// 1 = normal, 2/4 = fast forward.
+    pub speed: &'a mut u32,
+    pub slow_motion: &'a mut SlowMotionConfig,
+    pub run_ahead_frames: &'a mut u32,
+    pub run_ahead_second_instance: &'a mut bool,
+    /// "for <game>" / "default for all games".
+    pub run_ahead_scope: String,
+    pub run_ahead_fallback: Option<String>,
+
+    // Audio
+    pub muted: &'a mut bool,
+    pub volume: &'a mut f32,
+    pub surround: &'a mut SurroundMode,
+    pub bass: &'a mut f32,
+    pub width: &'a mut f32,
+    pub hw_channels: usize,
 }
 
 /// Things the app has to act on after the window is drawn.
 #[derive(Default, Debug, PartialEq)]
-pub struct VideoActions {
+pub struct SettingsActions {
     /// A persisted setting changed.
     pub changed: bool,
     pub hd_changed: bool,
@@ -84,10 +120,16 @@ pub struct VideoActions {
     pub load_shader: bool,
     pub load_hd_pack: bool,
     pub dump_tiles: bool,
+    pub slow_motion_changed: bool,
+    pub run_ahead_changed: bool,
+    pub audio_dsp_changed: bool,
+    pub open_rtc: bool,
+    pub open_mixer: bool,
+    pub open_accessibility: bool,
 }
 
 #[derive(Default)]
-pub struct VideoSettingsDialog {
+pub struct SettingsWindow {
     pub is_open: bool,
     pub page: Page,
 }
@@ -256,14 +298,20 @@ fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, value: &mut T, items: &[(T,
     changed
 }
 
-impl VideoSettingsDialog {
-    /// Select a page by index (0 = Picture ... 3 = Screen & Frame).
+impl SettingsWindow {
+    /// Select a page by index into [`Page::ALL`].
     pub fn set_page(&mut self, i: usize) {
         self.page = Page::ALL[i.min(Page::ALL.len() - 1)];
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, mut s: VideoSettings<'_>) -> VideoActions {
-        let mut act = VideoActions::default();
+    /// Open the window at `page`.
+    pub fn open_at(&mut self, page: Page) {
+        self.page = page;
+        self.is_open = true;
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, mut s: Settings<'_>) -> SettingsActions {
+        let mut act = SettingsActions::default();
         if !self.is_open {
             return act;
         }
@@ -273,7 +321,7 @@ impl VideoSettingsDialog {
         let max_h = (screen.height() - 80.0).max(200.0);
         let max_w = (screen.width() - 40.0).max(300.0);
         let mut open = self.is_open;
-        egui::Window::new("Display Settings")
+        egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -287,14 +335,20 @@ impl VideoSettingsDialog {
                     ui.vertical(|ui| {
                         ui.set_width(170.0);
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        for p in Page::ALL {
-                            let text = RichText::new(p.title()).size(14.5);
-                            let r = ui.add_sized(
-                                [170.0, 32.0],
-                                egui::Button::new(text).selected(self.page == p).frame(self.page == p),
-                            );
-                            if r.clicked() {
-                                self.page = p;
+                        for (i, (heading, pages)) in Page::SECTIONS.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(8.0);
+                            }
+                            ui.label(RichText::new(*heading).size(11.5).strong().color(ui.visuals().weak_text_color()));
+                            for &p in *pages {
+                                let text = RichText::new(p.title()).size(14.5);
+                                let r = ui.add_sized(
+                                    [170.0, 30.0],
+                                    egui::Button::new(text).selected(self.page == p).frame(self.page == p),
+                                );
+                                if r.clicked() {
+                                    self.page = p;
+                                }
                             }
                         }
                     });
@@ -311,6 +365,8 @@ impl VideoSettingsDialog {
                             Page::Enhance => enhance(ui, &mut s, &mut act),
                             Page::Hd => hd(ui, &mut s, &mut act),
                             Page::Screen => screen_page(ui, &mut s, &mut act),
+                            Page::Speed => speed_page(ui, &mut s, &mut act),
+                            Page::Sound => sound_page(ui, &mut s, &mut act),
                         });
                     });
                 });
@@ -320,7 +376,7 @@ impl VideoSettingsDialog {
     }
 }
 
-fn picture(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions) {
+fn picture(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
     let filter = &mut *s.filter;
     row(ui, "Filter / shader", "How pixels are drawn: crisp, smoothed, or imitating an LCD/CRT.", |ui| {
         act.changed |= combo(ui, "vs_filter", filter, &FILTERS, |f| {
@@ -353,7 +409,7 @@ fn picture(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions)
     );
 }
 
-fn enhance(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions) {
+fn enhance(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
     let sharpen = &mut *s.sharpen;
     row(ui, "Sharpening", "Adaptive sharpening (NVIDIA NIS / AMD CAS style).", |ui| {
         act.changed |= ui.checkbox(sharpen, "Enabled").changed();
@@ -374,7 +430,7 @@ fn enhance(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions)
     });
 }
 
-fn hd(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions) {
+fn hd(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
     section(ui, "HD Mode 7");
     let hdc = &mut *s.hd;
     let before = *hdc;
@@ -458,7 +514,7 @@ fn hd(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions) {
     }
 }
 
-fn screen_page(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActions) {
+fn screen_page(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
     let scale = &mut *s.scale_mode;
     row(ui, "Size", "Auto keeps every GBA pixel the same size (no shimmering).", |ui| {
         act.changed |= combo(ui, "vs_scale", scale, &SCALES, |x| scale_name(x).into());
@@ -475,4 +531,153 @@ fn screen_page(ui: &mut egui::Ui, s: &mut VideoSettings<'_>, act: &mut VideoActi
     row(ui, "Screenshots", "", |ui| {
         act.changed |= segmented(ui, shot, &[(false, "Raw 240×160"), (true, "As shown (filters)")]);
     });
+}
+
+pub fn speed_name(speed: u32, slow: &SlowMotionConfig) -> String {
+    if speed > 1 {
+        format!("{speed}× fast")
+    } else if slow.enabled {
+        format!("{:.0}% slow motion", slow.speed_factor * 100.0)
+    } else {
+        "Normal".into()
+    }
+}
+
+pub fn surround_name(m: SurroundMode) -> &'static str {
+    match m {
+        SurroundMode::Stereo => "Stereo",
+        SurroundMode::Surround51 => "5.1 surround",
+        SurroundMode::Headphone3D => "3D headphones",
+    }
+}
+
+pub const SURROUNDS: [SurroundMode; 3] = [SurroundMode::Headphone3D, SurroundMode::Surround51, SurroundMode::Stereo];
+
+/// A full-width link-style button under the control column.
+fn open_button(ui: &mut egui::Ui, label: &str) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.add_space(LABEL_W + ui.spacing().item_spacing.x);
+        clicked = ui.button(label).clicked();
+    });
+    ui.add_space(6.0);
+    clicked
+}
+
+fn speed_page(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
+    section(ui, "Speed");
+    let speed = &mut *s.speed;
+    row(ui, "Game speed", "Hold the turbo key for 4× at any time.", |ui| {
+        act.changed |= segmented(ui, speed, &[(1, "Normal"), (2, "2×"), (4, "4×")]);
+    });
+    let sm = &mut *s.slow_motion;
+    let mut pct = if sm.enabled { (sm.speed_factor * 100.0).round() as u32 } else { 100 };
+    let before = pct;
+    row(ui, "Slow motion", "Saved per game. Only applies at normal speed.", |ui| {
+        segmented(ui, &mut pct, &[(100, "Off"), (75, "75%"), (50, "50%"), (25, "25%"), (10, "10%")]);
+    });
+    if pct != before {
+        sm.enabled = pct < 100;
+        if pct < 100 {
+            sm.speed_factor = (pct as f32 / 100.0).max(MIN_SLOW_MOTION);
+        }
+        act.slow_motion_changed = true;
+    }
+    if sm.enabled {
+        let mut audio = sm.audio;
+        row(ui, "Slow-motion sound", "", |ui| {
+            if segmented(
+                ui,
+                &mut audio,
+                &[
+                    (SlowMotionAudio::PitchPreserved, "Keep pitch"),
+                    (SlowMotionAudio::Tape, "Tape"),
+                    (SlowMotionAudio::Mute, "Mute"),
+                ],
+            ) {
+                sm.audio = audio;
+                act.slow_motion_changed = true;
+            }
+        });
+    }
+
+    ui.separator();
+    section(ui, "Input latency");
+    let frames = &mut *s.run_ahead_frames;
+    let hint = format!("Hides the game's own input lag by running ahead. Saved {}.", s.run_ahead_scope);
+    row(ui, "Run-ahead", &hint, |ui| {
+        act.run_ahead_changed |= segmented(ui, frames, &[(0, "Off"), (1, "1 frame"), (2, "2 frames")]);
+    });
+    if *frames > 0 {
+        let second = &mut *s.run_ahead_second_instance;
+        row(ui, "Second instance", "Runs ahead in a separate copy so audio never glitches. Uses more CPU.", |ui| {
+            act.run_ahead_changed |= ui.checkbox(second, "Enabled").changed();
+        });
+        if let Some(reason) = &s.run_ahead_fallback {
+            ui.horizontal(|ui| {
+                ui.add_space(LABEL_W + ui.spacing().item_spacing.x);
+                ui.colored_label(Color32::YELLOW, format!("⚠ Using single instance: {reason}"));
+            });
+        }
+    }
+
+    ui.separator();
+    section(ui, "More");
+    if open_button(ui, "🕒 Real-time clock…") {
+        act.open_rtc = true;
+    }
+    if open_button(ui, "♿ Accessibility…") {
+        act.open_accessibility = true;
+    }
+}
+
+fn sound_page(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
+    section(ui, "Output");
+    let muted = &mut *s.muted;
+    row(ui, "Sound", "", |ui| {
+        let mut on = !*muted;
+        if ui.checkbox(&mut on, "On").changed() {
+            *muted = !on;
+            act.changed = true;
+        }
+    });
+    let vol = &mut *s.volume;
+    row(ui, "Volume", "", |ui| {
+        act.changed |= ui.add(egui::Slider::new(vol, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed();
+    });
+
+    ui.separator();
+    section(ui, "Surround & bass");
+    let sur = &mut *s.surround;
+    let ch = s.hw_channels;
+    let hint = format!("Your output device has {ch} channel{}.", if ch == 1 { "" } else { "s" });
+    row(ui, "Mode", &hint, |ui| {
+        act.audio_dsp_changed |= combo(ui, "st_surround", sur, &SURROUNDS, |m| surround_name(m).into());
+    });
+    let bass = &mut *s.bass;
+    row(ui, "Bass boost", "", |ui| {
+        act.audio_dsp_changed |= ui.add(egui::Slider::new(bass, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed();
+    });
+    if *sur != SurroundMode::Stereo {
+        let width = &mut *s.width;
+        row(ui, "Surround width", "How far the sound spreads around you.", |ui| {
+            act.audio_dsp_changed |= ui.add(egui::Slider::new(width, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed();
+        });
+    }
+
+    ui.separator();
+    section(ui, "More");
+    if open_button(ui, "🎛 Channel mixer & HD music…") {
+        act.open_mixer = true;
+    }
+}
+
+/// A menu item: label on the left, keyboard shortcut right-aligned and
+/// dimmed (the standard desktop menu layout). Returns true when clicked.
+pub fn menu_item(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>, shortcut: &str) -> bool {
+    let mut b = egui::Button::new(label);
+    if !shortcut.is_empty() {
+        b = b.shortcut_text(RichText::new(shortcut).color(ui.visuals().weak_text_color()));
+    }
+    ui.add(b).clicked()
 }
