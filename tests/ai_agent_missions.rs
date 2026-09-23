@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Mission + chat + guide-retrieval behaviour of the AI agent.
 //!
 //! These exercise the parts that run on the UI thread and need no model

@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! End-to-end test for the AI Agent Player.
 //!
 //! Stands up a real HTTP server that speaks the OpenAI `/v1/chat/completions`

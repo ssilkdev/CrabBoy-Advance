@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Real-world PDF ingestion for the AI game-guide knowledge base.
 //!
 //! Uses the shipped user manual as a known-good PDF fixture: it is a

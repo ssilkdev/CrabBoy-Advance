@@ -1,0 +1,40 @@
+[package]
+name = "crabboy-android"
+version = "0.1.0"
+edition = "2021"
+description = "Android front-end for CrabBoy Advance"
+license = "MIT"
+publish = false
+
+# A standalone workspace: keeps the desktop crate's build (and its lockfile)
+# completely untouched, and lets the [patch] below apply to Android only.
+[workspace]
+
+[lib]
+name = "crabboy_android"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+egui = "0.31"
+
+[target.'cfg(target_os = "android")'.dependencies]
+gba_simulator = { package = "crabboy-advance", path = "..", default-features = false }
+eframe = { version = "0.31", default-features = false, features = ["android-native-activity", "default_fonts", "glow"] }
+winit = { version = "0.30", default-features = false, features = ["android-native-activity", "rwh_06"] }
+log = "0.4"
+android_logger = "0.14"
+jni = "0.21"
+
+[patch.crates-io]
+# winit marks every Android key event "handled", so gamepad buttons never reach
+# Java (and egui drops them as unidentified keys). This copy returns gamepad /
+# joystick input to the Java side instead -- see patches/README.md.
+winit = { path = "patches/winit" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Manual harness: drive a REAL ROM with the AI agent against a real HTTP
 //! vision endpoint, and dump the resulting frames to disk.
 //!

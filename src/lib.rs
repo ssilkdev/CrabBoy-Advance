@@ -2,4 +2,5 @@
 
 pub mod dmg;
 pub mod gba;
+#[cfg(feature = "desktop")]
 pub mod ui;

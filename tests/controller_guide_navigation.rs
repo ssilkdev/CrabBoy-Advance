@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Behavioural checks for guide navigation and chord masking.
 //!
 //! These cover the two pieces of controller logic that are easy to get subtly

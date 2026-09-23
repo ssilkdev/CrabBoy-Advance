@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Tests for the `--ai-*` launch options.
 //!
 //! `apply_ai_launch_options` is the single place CLI flags become agent config,

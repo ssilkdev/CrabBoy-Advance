@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Web-guide import: URL -> stripped text -> indexed knowledge base.
 //!
 //! The offline tests use synthetic HTML shaped like a real MediaWiki page and

@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Automated Test Suite for GBA Simulator Core Components
 
 #[cfg(test)]

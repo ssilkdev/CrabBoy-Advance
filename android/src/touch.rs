@@ -1,0 +1,351 @@
+//! On-screen touch controls: layout, multi-touch hit testing, and drawing.
+
+use std::collections::HashMap;
+
+use egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
+
+/// Button bitmask shared by touch and controller input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Buttons(pub u16);
+
+impl Buttons {
+    pub const A: u16 = 1 << 0;
+    pub const B: u16 = 1 << 1;
+    pub const SELECT: u16 = 1 << 2;
+    pub const START: u16 = 1 << 3;
+    pub const RIGHT: u16 = 1 << 4;
+    pub const LEFT: u16 = 1 << 5;
+    pub const UP: u16 = 1 << 6;
+    pub const DOWN: u16 = 1 << 7;
+    pub const R: u16 = 1 << 8;
+    pub const L: u16 = 1 << 9;
+    /// Front-end only: open the menu.
+    pub const MENU: u16 = 1 << 14;
+    /// Front-end only: toggle fast-forward.
+    pub const FAST: u16 = 1 << 15;
+}
+
+/// Where everything goes on screen, in egui points.
+pub struct Layout {
+    /// The game image.
+    pub screen: Rect,
+    pub dpad_center: Pos2,
+    pub dpad_radius: f32,
+    pub a: (Pos2, f32),
+    pub b: (Pos2, f32),
+    pub l: Rect,
+    pub r: Rect,
+    pub start: Rect,
+    pub select: Rect,
+    pub menu: Rect,
+    pub fast: Rect,
+}
+
+impl Layout {
+    /// Portrait: game on top, controls below. Landscape: a control column on
+    /// each side and the game scaled to fit between them.
+    pub fn compute(safe: Rect, tex_size: Option<[usize; 2]>) -> Self {
+        let [tw, th] = tex_size.unwrap_or([240, 160]);
+        let aspect = tw as f32 / th as f32;
+        let (w, h) = (safe.width(), safe.height());
+        // A comfortable thumb target: ~13% of the short side, within limits.
+        let unit = (w.min(h) * 0.135).clamp(34.0, 80.0);
+        if h > w {
+            Self::portrait(safe, aspect, unit)
+        } else {
+            Self::landscape(safe, aspect, unit)
+        }
+    }
+
+    fn portrait(safe: Rect, aspect: f32, unit: f32) -> Self {
+        let screen_h = (safe.width() / aspect).min(safe.height() * 0.5);
+        let screen_w = screen_h * aspect;
+        let screen = Rect::from_min_size(
+            Pos2::new(safe.center().x - screen_w / 2.0, safe.top()),
+            Vec2::new(screen_w, screen_h),
+        );
+        let ctrl = Rect::from_min_max(Pos2::new(safe.left(), screen.bottom()), safe.max);
+        let shoulder_y = ctrl.top() + unit * 0.9;
+        let face_y = ctrl.top() + ctrl.height() * 0.45;
+        let meta_y = ctrl.bottom() - unit * 0.9;
+        let margin = unit * 0.35;
+        let (dpad_center, dpad_radius, a, b) = Self::pads(safe.left() + margin, safe.right() - margin, face_y, unit);
+
+        let shoulder = Vec2::new(unit * 1.8, unit * 0.9);
+        let l = Rect::from_min_size(Pos2::new(safe.left() + margin, shoulder_y - shoulder.y / 2.0), shoulder);
+        let r = Rect::from_min_size(
+            Pos2::new(safe.right() - margin - shoulder.x, shoulder_y - shoulder.y / 2.0),
+            shoulder,
+        );
+
+        let cx = safe.center().x;
+        let pill = Vec2::new(unit * 1.6, unit * 0.62);
+        let gap = unit * 0.3;
+        let select = Rect::from_center_size(Pos2::new(cx - pill.x / 2.0 - gap / 2.0, meta_y), pill);
+        let start = Rect::from_center_size(Pos2::new(cx + pill.x / 2.0 + gap / 2.0, meta_y), pill);
+
+        // Menu and fast-forward sit centered between the shoulders, apart
+        // enough that a sloppy tap cannot hit both.
+        let small = Vec2::splat(unit * 0.85);
+        let small_gap = unit * 0.5;
+        let menu = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, shoulder_y), small);
+        let fast = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, shoulder_y), small);
+
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
+    }
+
+    fn landscape(safe: Rect, aspect: f32, unit: f32) -> Self {
+        let margin = unit * 0.35;
+        // Each side column holds the D-pad or the A/B cluster.
+        let column = margin * 2.0 + unit * 2.9;
+        let fit_w = (safe.width() - 2.0 * column).max(safe.width() * 0.5);
+        let screen_w = (safe.height() * aspect).min(fit_w);
+        let screen = Rect::from_center_size(safe.center(), Vec2::new(screen_w, screen_w / aspect));
+
+        let left_x = safe.left() + margin;
+        let right_x = safe.right() - margin;
+        let (dpad_center, dpad_radius, a, b) = Self::pads(left_x, right_x, safe.center().y + unit * 0.2, unit);
+
+        // Top of each column: shoulder plus a small button (menu left, fast right).
+        let top_y = safe.top() + unit * 0.7;
+        let shoulder = Vec2::new(unit * 1.6, unit * 0.85);
+        let small = Vec2::splat(unit * 0.85);
+        let l = Rect::from_min_size(Pos2::new(left_x, top_y - shoulder.y / 2.0), shoulder);
+        let menu = Rect::from_center_size(Pos2::new(l.right() + margin + small.x / 2.0, top_y), small);
+        let r = Rect::from_min_size(Pos2::new(right_x - shoulder.x, top_y - shoulder.y / 2.0), shoulder);
+        let fast = Rect::from_center_size(Pos2::new(r.left() - margin - small.x / 2.0, top_y), small);
+
+        // Bottom of each column: Select under the D-pad, Start under A/B.
+        let bottom_y = safe.bottom() - unit * 0.55;
+        let pill = Vec2::new(unit * 1.6, unit * 0.62);
+        let select = Rect::from_center_size(Pos2::new(dpad_center.x, bottom_y), pill);
+        let start = Rect::from_center_size(Pos2::new((a.0.x + b.0.x) / 2.0, bottom_y), pill);
+
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
+    }
+
+    /// D-pad hugging `left_x`, A/B cluster hugging `right_x`, both around `y`.
+    fn pads(left_x: f32, right_x: f32, y: f32, unit: f32) -> (Pos2, f32, (Pos2, f32), (Pos2, f32)) {
+        let dpad_radius = unit * 1.45;
+        let dpad_center = Pos2::new(left_x + dpad_radius, y);
+        let face_r = unit * 0.62;
+        let a = Pos2::new(right_x - face_r, y - face_r * 0.9);
+        let b = Pos2::new(a.x - face_r * 2.4, y + face_r * 0.6);
+        (dpad_center, dpad_radius, (a, face_r), (b, face_r))
+    }
+
+    /// Buttons under one finger. The D-pad resolves to one or two directions
+    /// (diagonals), and face buttons get a generous hit radius so a thumb
+    /// resting between A and B presses both, like on real hardware.
+    pub fn hit(&self, p: Pos2) -> u16 {
+        let mut bits = 0;
+
+        let d = p - self.dpad_center;
+        let dist = d.length();
+        if dist <= self.dpad_radius * 1.25 && dist >= self.dpad_radius * 0.18 {
+            let angle = d.y.atan2(d.x).to_degrees(); // 0 = right, 90 = down
+            let dir = |center: f32| {
+                let diff = (angle - center + 540.0).rem_euclid(360.0) - 180.0;
+                diff.abs() <= 67.5
+            };
+            if dir(0.0) {
+                bits |= Buttons::RIGHT;
+            }
+            if dir(90.0) {
+                bits |= Buttons::DOWN;
+            }
+            if dir(180.0) {
+                bits |= Buttons::LEFT;
+            }
+            if dir(-90.0) {
+                bits |= Buttons::UP;
+            }
+        }
+
+        for ((center, r), bit) in [(self.a, Buttons::A), (self.b, Buttons::B)] {
+            if (p - center).length() <= r * 1.3 {
+                bits |= bit;
+            }
+        }
+        for (rect, bit) in [
+            (self.l, Buttons::L),
+            (self.r, Buttons::R),
+            (self.start, Buttons::START),
+            (self.select, Buttons::SELECT),
+            (self.menu, Buttons::MENU),
+            (self.fast, Buttons::FAST),
+        ] {
+            if rect.expand(8.0).contains(p) {
+                bits |= bit;
+            }
+        }
+        bits
+    }
+}
+
+/// Tracks every active finger so buttons can be held simultaneously and a
+/// thumb can slide from one button to another.
+#[derive(Default)]
+pub struct TouchPad {
+    fingers: HashMap<u64, Pos2>,
+    held: u16,
+    prev: u16,
+}
+
+impl TouchPad {
+    pub fn update(&mut self, ctx: &egui::Context, layout: &Layout) -> Buttons {
+        ctx.input(|i| {
+            for ev in &i.events {
+                if let egui::Event::Touch { id, phase, pos, .. } = ev {
+                    match phase {
+                        egui::TouchPhase::Start | egui::TouchPhase::Move => {
+                            self.fingers.insert(id.0, *pos);
+                        }
+                        egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                            self.fingers.remove(&id.0);
+                        }
+                    }
+                }
+            }
+        });
+        self.prev = self.held;
+        self.held = self.fingers.values().fold(0, |acc, &p| acc | layout.hit(p));
+        Buttons(self.held)
+    }
+
+    /// Release everything (used while the menu is open).
+    pub fn clear(&mut self) {
+        self.fingers.clear();
+        self.prev = self.held;
+        self.held = 0;
+    }
+
+    pub fn held(&self) -> u16 {
+        self.held
+    }
+
+    pub fn just_pressed(&self, bit: u16) -> bool {
+        self.held & bit != 0 && self.prev & bit == 0
+    }
+}
+
+const FILL: Color32 = Color32::from_rgba_premultiplied(40, 40, 48, 150);
+const FILL_DOWN: Color32 = Color32::from_rgba_premultiplied(130, 90, 60, 200);
+const EDGE: Color32 = Color32::from_rgba_premultiplied(160, 160, 170, 140);
+const LABEL: Color32 = Color32::from_rgba_premultiplied(230, 230, 235, 230);
+
+pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool) {
+    let stroke = Stroke::new(2.0_f32, EDGE);
+    let fill = |bit: u16| if held & bit != 0 { FILL_DOWN } else { FILL };
+
+    // D-pad: a plus shape made of four arms around a hub.
+    let arm = l.dpad_radius * 0.62;
+    let thick = l.dpad_radius * 0.62;
+    let c = l.dpad_center;
+    for (bit, dir) in [
+        (Buttons::UP, Vec2::new(0.0, -1.0)),
+        (Buttons::DOWN, Vec2::new(0.0, 1.0)),
+        (Buttons::LEFT, Vec2::new(-1.0, 0.0)),
+        (Buttons::RIGHT, Vec2::new(1.0, 0.0)),
+    ] {
+        let center = c + dir * arm;
+        let size = if dir.x == 0.0 { Vec2::new(thick, arm * 1.1) } else { Vec2::new(arm * 1.1, thick) };
+        let rect = Rect::from_center_size(center, size);
+        p.rect(rect, 6.0, fill(bit), stroke, egui::StrokeKind::Inside);
+        // Arrow drawn as a triangle: the default fonts lack ▲/▼.
+        let tip = center + dir * arm * 0.35;
+        let base = center - dir * arm * 0.05;
+        let side = dir.rot90() * thick * 0.2;
+        p.add(egui::Shape::convex_polygon(vec![tip, base + side, base - side], LABEL, Stroke::NONE));
+    }
+    p.rect_filled(Rect::from_center_size(c, Vec2::splat(thick)), 2.0, FILL);
+
+    for ((center, r), bit, label) in [(l.a, Buttons::A, "A"), (l.b, Buttons::B, "B")] {
+        p.circle(center, r, fill(bit), stroke);
+        p.text(center, Align2::CENTER_CENTER, label, FontId::proportional(r * 0.9), LABEL);
+    }
+
+    for (rect, bit, label) in [
+        (l.l, Buttons::L, "L"),
+        (l.r, Buttons::R, "R"),
+        (l.select, Buttons::SELECT, "SELECT"),
+        (l.start, Buttons::START, "START"),
+    ] {
+        p.rect(rect, rect.height() / 2.0, fill(bit), stroke, egui::StrokeKind::Inside);
+        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(rect.height() * 0.42), LABEL);
+    }
+
+    let ff_fill = if fast_forward { FILL_DOWN } else { FILL };
+    p.rect(l.fast, 10.0, ff_fill, stroke, egui::StrokeKind::Inside);
+    p.text(l.fast.center(), Align2::CENTER_CENTER, "⏩", FontId::proportional(l.fast.height() * 0.45), LABEL);
+}
+
+pub fn paint_menu_button(p: &Painter, l: &Layout) {
+    p.rect(l.menu, 10.0, FILL, Stroke::new(2.0_f32, EDGE), egui::StrokeKind::Inside);
+    p.text(l.menu.center(), Align2::CENTER_CENTER, "☰", FontId::proportional(l.menu.height() * 0.5), LABEL);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn portrait() -> Layout {
+        Layout::compute(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 860.0)), Some([240, 160]))
+    }
+
+    #[test]
+    fn dpad_directions_and_diagonals() {
+        let l = portrait();
+        let c = l.dpad_center;
+        let r = l.dpad_radius * 0.8;
+        assert_eq!(l.hit(c + Vec2::new(r, 0.0)), Buttons::RIGHT);
+        assert_eq!(l.hit(c + Vec2::new(0.0, -r)), Buttons::UP);
+        assert_eq!(l.hit(c + Vec2::new(r, r) * 0.7), Buttons::RIGHT | Buttons::DOWN);
+        assert_eq!(l.hit(c), 0, "the dead zone in the middle presses nothing");
+    }
+
+    #[test]
+    fn face_buttons_do_not_overlap_the_dpad_or_screen() {
+        let l = portrait();
+        assert_eq!(l.hit(l.a.0), Buttons::A);
+        assert_eq!(l.hit(l.b.0), Buttons::B);
+        assert!(l.a.0.y > l.screen.bottom() && l.b.0.y > l.screen.bottom());
+        assert_eq!(l.hit(l.screen.center()), 0);
+    }
+
+    #[test]
+    fn landscape_keeps_game_aspect() {
+        let l = Layout::compute(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 400.0)), Some([240, 160]));
+        assert!((l.screen.width() / l.screen.height() - 1.5).abs() < 0.01);
+        assert_eq!(l.hit(l.start.center()), Buttons::START);
+    }
+
+    #[test]
+    fn landscape_controls_stay_off_the_game_image() {
+        // Typical 20:9 phone in landscape (points).
+        let l = Layout::compute(Rect::from_min_size(Pos2::ZERO, Vec2::new(914.0, 411.0)), Some([240, 160]));
+        for rect in [l.l, l.r, l.menu, l.fast, l.start, l.select] {
+            assert!(!rect.intersects(l.screen), "{rect:?} overlaps {:?}", l.screen);
+        }
+        assert!(l.dpad_center.x + l.dpad_radius <= l.screen.left());
+        assert!(l.b.0.x - l.b.1 >= l.screen.right());
+        assert!(l.screen.height() > 411.0 * 0.8, "game should still be large");
+    }
+
+    #[test]
+    fn buttons_do_not_overlap() {
+        for size in [Vec2::new(360.0, 780.0), Vec2::new(412.0, 915.0), Vec2::new(915.0, 412.0)] {
+            let l = Layout::compute(Rect::from_min_size(Pos2::ZERO, size), Some([240, 160]));
+            for (p, want) in [
+                (l.menu.center(), Buttons::MENU),
+                (l.fast.center(), Buttons::FAST),
+                (l.l.center(), Buttons::L),
+                (l.r.center(), Buttons::R),
+                (l.select.center(), Buttons::SELECT),
+                (l.start.center(), Buttons::START),
+            ] {
+                assert_eq!(l.hit(p), want, "size {size:?}");
+            }
+        }
+    }
+}

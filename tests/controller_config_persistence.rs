@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! End-to-end check that a remap actually survives a relaunch.
 //!
 //! The unit tests in `ui::controls` prove the wire format round-trips; this

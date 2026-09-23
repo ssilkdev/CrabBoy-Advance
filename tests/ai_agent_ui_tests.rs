@@ -1,3 +1,4 @@
+#![cfg(feature = "desktop")]
 //! Headless render tests for the AI Agent UI surfaces.
 //!
 //! `egui::Context::run` executes the full layout/paint pass without a window,

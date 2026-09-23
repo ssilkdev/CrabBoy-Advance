@@ -1,0 +1,4 @@
+build/
+target/
+debug.keystore
+*.keystore
