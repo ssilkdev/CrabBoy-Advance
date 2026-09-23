@@ -132,6 +132,9 @@ pub struct BusTiming {
     /// Extra (beyond 1 per access) wait cycles accumulated so far. The CPU
     /// reads the delta across each instruction.
     pub waits: Cell<u32>,
+    /// Total cycles spent on bus accesses so far. The MMU uses it to know
+    /// the current cycle in the middle of an instruction (see `Mmu::now`).
+    pub clock: Cell<u64>,
     /// Address that would make the next access sequential.
     next_seq: Cell<u32>,
     prefetch: Cell<Prefetch>,
@@ -168,6 +171,7 @@ impl BusTiming {
             cost
         };
         self.waits.set(self.waits.get() + cost - 1);
+        self.clock.set(self.clock.get() + cost as u64);
         cost
     }
 

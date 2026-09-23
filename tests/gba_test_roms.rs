@@ -189,9 +189,9 @@ const MGBA_SUITES: &[&str] = &[
 const MGBA_BASELINE: &[u32] = &[
     1081, // Memory            /1552
     124,  // I/O read          /130
-    482,  // Timing            /2020
-    345,  // Timer count-up    /936
-    0,    // Timer IRQ         /90
+    577,  // Timing            /2020
+    438,  // Timer count-up    /936
+    4,    // Timer IRQ         /90
     140,  // Shifter           /140
     93,   // Carry             /93
     52,   // Multiply long     /72

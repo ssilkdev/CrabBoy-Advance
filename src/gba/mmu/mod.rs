@@ -24,6 +24,11 @@ use cartridge::Cartridge;
 use save_backend::{SaveBackend, SaveType};
 use sio::Sio;
 
+/// A timer counter read returns the value latched this many cycles before
+/// the access completes (the read takes 1N + 1I). Matches mGBA and the
+/// suite's Timer IRQ expectations.
+const TIMER_READ_LATENCY: u64 = 2;
+
 pub struct Mmu {
     pub bios: Box<[u8; 16 * 1024]>,
     pub ewram: Box<[u8; 256 * 1024]>,
@@ -65,6 +70,15 @@ pub struct Mmu {
     /// Cycles the CPU was stalled (by DMA, or by time spent inside an HLE
     /// BIOS call) since the last `take_dma_stall`.
     pub dma_stall: u32,
+    /// `timing.clock` at the start of the current instruction; with
+    /// `current_cycles` this gives the exact cycle of an access mid-
+    /// instruction (`now`). Set by `Gba::step_instruction`.
+    pub instr_clock_start: u64,
+    /// Cycle at which the IRQ line (IE & IF != 0) became asserted, if it
+    /// is. The CPU takes the IRQ a few cycles later (see `IRQ_DELAY`).
+    pub irq_assert_time: Option<u64>,
+    /// An IRQ has been dispatched since the current IntrWait began.
+    pub intr_wait_dispatched: bool,
     /// mGBA-compatible debug-print port at 0x04FFF600 (see `debug_port`).
     pub debug_port: debug_port::DebugPort,
     pub current_cycles: u64,
@@ -147,6 +161,9 @@ impl Mmu {
             debug_port: debug_port::DebugPort::new(),
             timing: timing::BusTiming::default(),
             dma_stall: 0,
+            instr_clock_start: 0,
+            irq_assert_time: None,
+            intr_wait_dispatched: false,
             current_cycles: 0,
             intr_wait_mask: None,
         }
@@ -477,13 +494,13 @@ impl Mmu {
             0x0DA => (self.dma.channels[3].dad >> 16) as u16,
             0x0DC => self.dma.channels[3].count,
             0x0DE => self.dma.channels[3].cnt_h & 0xFFE0,
-            0x100 => self.timers.timers[0].counter,
+            0x100 => self.timers.read_counter(0, self.now().saturating_sub(TIMER_READ_LATENCY)),
             0x102 => self.timers.timers[0].cnt_h,
-            0x104 => self.timers.timers[1].counter,
+            0x104 => self.timers.read_counter(1, self.now().saturating_sub(TIMER_READ_LATENCY)),
             0x106 => self.timers.timers[1].cnt_h,
-            0x108 => self.timers.timers[2].counter,
+            0x108 => self.timers.read_counter(2, self.now().saturating_sub(TIMER_READ_LATENCY)),
             0x10A => self.timers.timers[2].cnt_h,
-            0x10C => self.timers.timers[3].counter,
+            0x10C => self.timers.read_counter(3, self.now().saturating_sub(TIMER_READ_LATENCY)),
             0x10E => self.timers.timers[3].cnt_h,
             0x120..=0x12E | 0x134 => self.sio.read_io16(addr & 0x3FE),
             0x130 => self.keypad.read_keyinput(),
@@ -637,14 +654,38 @@ impl Mmu {
                     self.execute_dma_channel(3);
                 }
             }
-            0x100 => self.timers.timers[0].reload = val,
-            0x102 => self.timers.timers[0].write_cnt_h(val),
-            0x104 => self.timers.timers[1].reload = val,
-            0x106 => self.timers.timers[1].write_cnt_h(val),
-            0x108 => self.timers.timers[2].reload = val,
-            0x10A => self.timers.timers[2].write_cnt_h(val),
-            0x10C => self.timers.timers[3].reload = val,
-            0x10E => self.timers.timers[3].write_cnt_h(val),
+            0x100 => {
+                let now = self.now();
+                self.timers.write_reload(0, val, now);
+            }
+            0x102 => {
+                let now = self.now();
+                self.timers.write_control(0, val, now);
+            }
+            0x104 => {
+                let now = self.now();
+                self.timers.write_reload(1, val, now);
+            }
+            0x106 => {
+                let now = self.now();
+                self.timers.write_control(1, val, now);
+            }
+            0x108 => {
+                let now = self.now();
+                self.timers.write_reload(2, val, now);
+            }
+            0x10A => {
+                let now = self.now();
+                self.timers.write_control(2, val, now);
+            }
+            0x10C => {
+                let now = self.now();
+                self.timers.write_reload(3, val, now);
+            }
+            0x10E => {
+                let now = self.now();
+                self.timers.write_control(3, val, now);
+            }
             0x120..=0x12E | 0x134 => self.sio.write_io16(addr & 0x3FE, val),
             0x130 => {} // KEYINPUT is read only
             0x132 => self.keypad.keycnt = val,
@@ -774,6 +815,14 @@ impl Mmu {
         }
 
         true
+    }
+
+    /// The current emulated cycle, including bus accesses already made by
+    /// the instruction being executed. Timer reads/writes use this so they
+    /// see the counter at the exact cycle of the access.
+    #[inline(always)]
+    pub fn now(&self) -> u64 {
+        self.current_cycles + (self.timing.clock.get() - self.instr_clock_start)
     }
 
     /// Take (and reset) the DMA stall cycles accumulated since last call.
@@ -967,6 +1016,13 @@ impl Mmu {
             }
 
             self.intr_wait_mask = pending_wait;
+            self.intr_wait_dispatched = false;
+            if pending_wait.is_some() {
+                // The real IntrWait writes IME=1 before halting, so the
+                // IRQ it waits for can actually be taken (games often call
+                // VBlankIntrWait with IME off).
+                self.ime = true;
+            }
             self.bios_latch = BIOS_LATCH_AFTER_SWI;
         } else {
             cpu.trigger_swi(comment);

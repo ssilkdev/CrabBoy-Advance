@@ -17,6 +17,10 @@ use mmu::{cartridge::Cartridge, Mmu};
 pub use ppu::{Ppu, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::path::Path;
 
+/// Cycles between the IRQ line asserting (IE & IF != 0) and the CPU
+/// taking the exception; matches mGBA's GBA_IRQ_DELAY and the Timer IRQ
+/// test results.
+pub const IRQ_DELAY: u64 = 7;
 pub const CYCLES_PER_FRAME: u32 = 280_896; // 228 scanlines * 1232 cycles (~59.73 Hz)
 
 /// Marks the start of the v2 save-state tail (hardware controller state).
@@ -89,14 +93,23 @@ impl Gba {
 
     /// Step a single instruction and advance peripherals
     pub fn step_instruction(&mut self) -> u32 {
-        // Check pending IRQ
+        // Check pending IRQ. The CPU only sees the IRQ line IRQ_DELAY
+        // cycles after IE & IF becomes non-zero (ROADMAP M1; measured by
+        // the mGBA suite's Timer IRQ tests).
         if self.mmu.has_pending_irq() && !self.cpu.get_flag(cpu::FLAG_I) {
-            self.cpu.trigger_irq();
+            let ready = self.mmu.irq_assert_time.map_or(true, |t| self.cpu.cycles >= t + IRQ_DELAY);
+            if ready {
+                self.cpu.trigger_irq();
+                if self.mmu.intr_wait_mask.is_some() {
+                    self.mmu.intr_wait_dispatched = true;
+                }
+            }
         }
 
         // Synchronize PC and cycles to MMU for flight recording
         self.mmu.current_pc = self.cpu.regs[15];
         self.mmu.current_cycles = self.cpu.cycles;
+        self.mmu.instr_clock_start = self.mmu.timing.clock.get();
 
         // BIOS open-bus latch for our IRQ dispatcher stub (see Mmu::new):
         // 0x24 jumps to the game's handler, 0x2C returns from the IRQ.
@@ -144,14 +157,19 @@ impl Gba {
             }
         }
 
-        // Step Timers
-        let (timer_irq_mask, overflows) = self.mmu.timers.step(cycles);
-        if timer_irq_mask != 0 {
+        // Timers: bring counters up to the end of this instruction; an
+        // overflow raises IF at its exact cycle.
+        self.mmu.timers.sync(self.cpu.cycles);
+        let timer_events = self.mmu.timers.take_events();
+        let overflows = timer_events.overflows;
+        let mut irq_time = None;
+        if timer_events.irq_mask != 0 {
             for i in 0..4 {
-                if (timer_irq_mask & (1 << i)) != 0 {
+                if (timer_events.irq_mask & (1 << i)) != 0 {
                     self.mmu.request_interrupt(3 + i as u16);
                 }
             }
+            irq_time = Some(timer_events.irq_time);
         }
 
         // Step SIO (Serial Communication)
@@ -164,22 +182,43 @@ impl Gba {
             self.mmu.request_interrupt(12);
         }
 
+        // Track when the IRQ line was asserted (for IRQ_DELAY). Timer
+        // IRQs know their exact overflow cycle; other sources count from
+        // the end of this instruction.
+        if (self.mmu.ie & self.mmu.if_reg) != 0 {
+            if self.mmu.irq_assert_time.is_none() {
+                self.mmu.irq_assert_time = Some(irq_time.unwrap_or(self.cpu.cycles));
+            }
+        } else {
+            self.mmu.irq_assert_time = None;
+        }
+
         // On GBA, HALT is only broken when (IE & IF) != 0
         if self.cpu.halted && (self.mmu.ie & self.mmu.if_reg) != 0 {
             self.cpu.halted = false;
         }
 
-        // If waiting in IntrWait / VBlankIntrWait and not servicing an IRQ, check if target interrupt occurred
+        // IntrWait / VBlankIntrWait: the real BIOS sleeps in HALT and only
+        // re-checks its flags after an IRQ handler has run, so it can
+        // never return before the IRQ is dispatched (which matters now
+        // that IRQs are taken IRQ_DELAY cycles after IF is raised).
         if let Some(mask) = self.mmu.intr_wait_mask {
-            if !self.cpu.in_irq {
+            if !self.cpu.in_irq && self.mmu.intr_wait_dispatched {
                 let flags = self.mmu.read16(0x0300_7FF8);
                 if (flags & mask) != 0 {
                     self.mmu.write16(0x0300_7FF8, flags & !mask);
                     self.mmu.intr_wait_mask = None;
                     self.cpu.halted = false;
+                    // IntrWait returns through the BIOS SWI exit, so the
+                    // BIOS open-bus latch holds its last opcode.
+                    self.mmu.bios_latch = mmu::BIOS_LATCH_AFTER_SWI;
                 } else {
+                    // Not the IRQ we wait for: sleep until the next one.
+                    self.mmu.intr_wait_dispatched = false;
                     self.cpu.halted = true;
                 }
+            } else if !self.cpu.in_irq {
+                self.cpu.halted = true;
             }
         }
 
@@ -369,6 +408,8 @@ impl Gba {
         // The prefetch pipeline isn't part of the state format; refill it
         // from memory after loading.
         self.cpu.pipe_valid = false;
+        // Timer anchors and the IRQ line time aren't serialized either.
+        self.mmu.irq_assert_time = None;
         let min_len = 16 * 4 + 4 + 8 + 1 + 109 + 256 * 1024 + 32 * 1024 + 96 * 1024 + 1024 + 1024 + 1024;
         if data.len() < min_len {
             return false;
@@ -516,6 +557,8 @@ impl Gba {
                 tm.irq_enable = data[offset] != 0;
                 offset += 1;
             }
+            let now = self.cpu.cycles;
+            self.mmu.timers.rebase_all(now);
         }
 
         true
