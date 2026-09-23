@@ -28,6 +28,7 @@ pub mod tas;
 pub mod tas_dialog;
 pub mod updater;
 pub mod updater_dialog;
+pub mod video_settings;
 pub mod web_guide;
 
 use accessibility_dialog::AccessibilityDialog;
@@ -35,7 +36,7 @@ use memmap_dialog::MemoryMapDialog;
 use ai_agent::AiAgent;
 use ai_agent_dialog::AiAgentDialog;
 use audio_mixer_dialog::AudioMixerDialog;
-use bezels::{BezelMode, BezelRenderer};
+use bezels::BezelRenderer;
 use cheats_dialog::CheatsDialog;
 use gif_recorder::GifRecorder;
 use guide_dialog::{GuideDialog, GuidePadInput};
@@ -107,6 +108,8 @@ pub struct GbaApp {
     pub accessibility_dialog: AccessibilityDialog,
     /// Per-game memory map and guided variable discovery (ROADMAP M11).
     pub memmap_dialog: MemoryMapDialog,
+    /// Display Settings window (replaces the long Video menu).
+    pub video_settings_dialog: video_settings::VideoSettingsDialog,
     /// Colorblind filter, slow motion, sticky buttons, one-handed layout and
     /// UI scale, per game (ROADMAP M10).
     pub accessibility: crate::gba::accessibility::AccessibilityManager,
@@ -281,6 +284,7 @@ impl GbaApp {
             save_sync_dialog: SaveSyncDialog::new(),
             accessibility_dialog: AccessibilityDialog::new(),
             memmap_dialog: MemoryMapDialog::new(),
+            video_settings_dialog: Default::default(),
             accessibility,
             run_ahead,
             run_ahead_config,
@@ -485,6 +489,133 @@ impl GbaApp {
                 self.gba.reset();
                 // A reset re-randomizes relocating game data: new session.
                 self.memmap_dialog.on_reset();
+            }
+        }
+    }
+
+    fn ui_snapshot(&mut self, ctx: &egui::Context, path: &str) {
+        let frame = ctx.cumulative_pass_nr();
+        if frame == 1 {
+            self.video_settings_dialog.is_open = true;
+            if let Some(p) = std::env::var("CRABBOY_UI_SNAPSHOT_PAGE").ok().and_then(|p| p.parse::<usize>().ok()) {
+                self.video_settings_dialog.set_page(p);
+            }
+        }
+        if frame == 20 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        let shot = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot {
+            let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            let _ = image::save_buffer(path, &bytes, img.width() as u32, img.height() as u32, image::ExtendedColorType::Rgba8);
+            std::env::remove_var("CRABBOY_UI_SNAPSHOT");
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        ctx.request_repaint();
+    }
+
+    /// Draw the Display Settings window and apply what changed.
+    fn show_video_settings(&mut self, ctx: &egui::Context) {
+        if !self.video_settings_dialog.is_open {
+            return;
+        }
+        let mut hd_pack_enabled = self.gba.is_hd_pack_enabled();
+        let hd_pack_info = self
+            .gba
+            .hd_pack()
+            .map(|p| (p.name.clone(), p.scale as usize, p.sprite_count(), p.tile_count()));
+        let mut ws_enabled = self.gba.is_widescreen_enabled();
+        let widescreen_profile = match self.gba.mmu.cartridge.as_ref() {
+            Some(cart) => match crate::gba::widescreen::WidescreenDatabase::lookup(&cart.game_code, &cart.title) {
+                Some(p) => format!("Tuned profile for {}: {}", p.title, p.notes),
+                None => "No tuned profile for this game: generic expansion, edges may show glitches.".into(),
+            },
+            None => "Load a game to see its widescreen profile.".into(),
+        };
+        let custom_shader_name = self
+            .custom_shader_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string());
+        let act = self.video_settings_dialog.show(
+            ctx,
+            video_settings::VideoSettings {
+                filter: &mut self.display_filter,
+                xbrz_factor: &mut self.xbrz_factor,
+                blend: &mut self.frame_blend_mode,
+                sharpen: &mut self.nvidia_sharpen,
+                sharpness: &mut self.nvidia_sharpness,
+                color_correction: &mut self.color_correction,
+                ambient_glow: &mut self.ultrawide_ambient_glow,
+                hd: &mut self.hd_mode7_config,
+                hd_pack_enabled: &mut hd_pack_enabled,
+                hd_pack_info,
+                widescreen_enabled: &mut ws_enabled,
+                widescreen_mode: &mut self.widescreen_config.mode,
+                widescreen_profile,
+                scale_mode: &mut self.scale_mode,
+                aspect: &mut self.aspect_ratio,
+                bezel: &mut self.bezel_renderer.mode,
+                screenshot_enhanced: &mut self.screenshot_enhanced,
+                custom_shader_name,
+            },
+        );
+        if act.hd_changed {
+            self.gba.set_hd_mode7_config(self.hd_mode7_config);
+        }
+        if act.hd_pack_toggled {
+            self.gba.set_hd_pack_enabled(hd_pack_enabled);
+            self.hd_pack_enabled = hd_pack_enabled;
+        }
+        if act.widescreen_changed {
+            self.widescreen_config.enabled = ws_enabled;
+            self.gba.set_widescreen_config(self.widescreen_config.clone());
+        }
+        if act.changed {
+            self.config_dirty = true;
+        }
+        if act.load_shader {
+            if let Some(file) = rfd::FileDialog::new().add_filter("Shader Profile", &["shader", "json", "txt"]).pick_file() {
+                match std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|c| {
+                    crate::gba::shader::CustomShaderParams::parse(&c).map_err(|e| e.to_string())
+                }) {
+                    Ok(params) => {
+                        self.set_toast(format!("Loaded shader: {}", params.name));
+                        self.screen_renderer.custom_shader = Some(params);
+                        self.custom_shader_path = Some(file);
+                        self.display_filter = DisplayFilter::Custom;
+                        self.config_dirty = true;
+                    }
+                    Err(e) => self.set_toast(format!("Failed to load shader: {e}")),
+                }
+            }
+        }
+        if act.load_hd_pack {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                match crate::gba::hd_pack::HdPack::load_from_dir(&dir) {
+                    Ok(pack) => {
+                        let msg = format!("Loaded HD Pack '{}' ({} replacements)", pack.name, pack.len());
+                        self.gba.load_hd_pack(pack);
+                        self.hd_pack_path = Some(dir);
+                        self.hd_pack_enabled = true;
+                        self.config_dirty = true;
+                        self.set_toast(msg);
+                    }
+                    Err(e) => self.set_toast(format!("Failed to load HD Pack: {e}")),
+                }
+            }
+        }
+        if act.dump_tiles {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                match self.gba.dump_tiles_and_sprites(&dir) {
+                    Ok(m) => self.set_toast(format!("Dumped {} items to '{}'", m.replacements.len(), dir.display())),
+                    Err(e) => self.set_toast(format!("Failed to dump tiles/sprites: {e}")),
+                }
             }
         }
     }
@@ -735,6 +866,12 @@ impl eframe::App for GbaApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // CRABBOY_UI_SNAPSHOT=<png> [CRABBOY_UI_SNAPSHOT_PAGE=0..3]: open
+        // Display Settings, save a screenshot of the real window and quit.
+        // For checking UI layout without a person at the screen.
+        if let Ok(path) = std::env::var("CRABBOY_UI_SNAPSHOT") {
+            self.ui_snapshot(ctx, &path);
+        }
         // GIF clips encode on a background thread; report when they land.
         for res in self.gif_recorder.poll_finished() {
             match res {
@@ -1335,188 +1472,48 @@ impl eframe::App for GbaApp {
                 });
 
                 ui.menu_button("Video", |ui| {
-                    ui.label(RichText::new("Frame Blending (LCD Ghosting):").strong());
-                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::Off, "Off (Instant 60 Hz)").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::Simple50, "50/50 Blend (Smooth Transparency)").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::SmartDeFlicker, "Smart De-Flicker (Motion-Preserving)").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::LcdGhosting { decay: 0.65 }, "Authentic LCD Ghosting (AGB-001)").clicked() { self.config_dirty = true; }
-                    ui.separator();
-                    ui.label(RichText::new("Filter / Shader Preset:").strong());
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Crisp, "Crisp Pixel (Nearest)").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Linear, "Smooth (Bilinear)").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::LcdGrid, "Retro LCD Grid").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::LcdSubpixel, "Authentic GBA LCD Subpixels").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::CrtScanlines, "CRT Scanlines").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::CrtGeom, "CRT Aperture Grille & Bloom").clicked() { self.config_dirty = true; }
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Xbrz, "xBRZ High-Definition (AI Edge Smoothing)").clicked() { self.config_dirty = true; }
-                    if self.display_filter == DisplayFilter::Xbrz {
-                        ui.indent("xbrz_selector", |ui| {
-                            ui.label("xBRZ Scale Factor:");
-                            if ui.radio_value(&mut self.xbrz_factor, 2, "2x (480p)").clicked() { self.config_dirty = true; }
-                            if ui.radio_value(&mut self.xbrz_factor, 3, "3x (720p)").clicked() { self.config_dirty = true; }
-                            if ui.radio_value(&mut self.xbrz_factor, 4, "4x (960p - Recommended)").clicked() { self.config_dirty = true; }
-                            if ui.radio_value(&mut self.xbrz_factor, 5, "5x (1200p)").clicked() { self.config_dirty = true; }
-                            if ui.radio_value(&mut self.xbrz_factor, 6, "6x (1440p HD)").clicked() { self.config_dirty = true; }
-                        });
-                    }
-                    let custom_label = if let Some(ref path) = self.custom_shader_path {
-                        format!("Custom Shader ({})", path.file_name().and_then(|n| n.to_str()).unwrap_or("active"))
-                    } else {
-                        "Custom User Shader".to_string()
-                    };
-                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Custom, custom_label).clicked() { self.config_dirty = true; }
-                    if ui.button("Load Custom Shader (.shader / .json)...").clicked() {
-                        if let Some(file) = rfd::FileDialog::new()
-                            .add_filter("Shader Profile", &["shader", "json", "txt"])
-                            .pick_file()
-                        {
-                            if let Ok(content) = std::fs::read_to_string(&file) {
-                                match crate::gba::shader::CustomShaderParams::parse(&content) {
-                                    Ok(params) => {
-                                        self.set_toast(format!("Loaded shader: {}", params.name));
-                                        self.screen_renderer.custom_shader = Some(params);
-                                        self.custom_shader_path = Some(file);
-                                        self.display_filter = DisplayFilter::Custom;
-                                        self.config_dirty = true;
-                                    }
-                                    Err(e) => {
-                                        self.set_toast(format!("Failed to parse shader: {e}"));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.label("Enhancements & Post-Processing:");
-                    ui.checkbox(&mut self.nvidia_sharpen, "NVIDIA Adaptive Sharpening (NIS / CAS)");
-                    if self.nvidia_sharpen || self.display_filter == DisplayFilter::NvidiaSharpen {
-                        ui.indent("sharpen_slider", |ui| {
-                            ui.add(egui::Slider::new(&mut self.nvidia_sharpness, 0.0..=1.0).text("Sharpness Strength"));
-                        });
-                    }
-                    ui.checkbox(&mut self.color_correction, "Authentic GBA LCD Color Correction");
-                    ui.checkbox(&mut self.ultrawide_ambient_glow, "Ultrawide Ambient Edge Glow");
-                    ui.separator();
-                    ui.label("HD Mode 7 (High-Res Affine Rendering):");
-                    let prev_hd = self.hd_mode7_config;
-                    for &scale in &crate::gba::ppu::hd_mode7::HdScale::ALL {
-                        ui.radio_value(&mut self.hd_mode7_config.scale, scale, scale.display_name());
-                    }
-                    if self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off {
-                        ui.checkbox(&mut self.hd_mode7_config.perspective_interpolation, "Perspective Scanline Interpolation");
-                        ui.checkbox(&mut self.hd_mode7_config.ssaa, "Supersampled Anti-Aliasing (SSAA Native)");
-                    }
-                    if prev_hd != self.hd_mode7_config {
-                        self.gba.set_hd_mode7_config(self.hd_mode7_config);
-                        self.config_dirty = true;
-                    }
-                    ui.separator();
-                    ui.label("HD Sprite & Tile Packs (Mesen-style):");
-                    let mut pack_enabled = self.gba.is_hd_pack_enabled();
-                    if ui.checkbox(&mut pack_enabled, "Enable HD Pack Replacement").changed() {
-                        self.gba.set_hd_pack_enabled(pack_enabled);
-                        self.hd_pack_enabled = pack_enabled;
-                        self.config_dirty = true;
-                    }
-                    if let Some(pack) = self.gba.hd_pack() {
-                        ui.label(format!("Active Pack: {} ({}x HD)", pack.name, pack.scale));
-                        ui.label(format!("Replacements: {} sprites, {} tiles", pack.sprite_count(), pack.tile_count()));
-                    } else {
-                        ui.label("No HD Pack loaded");
-                    }
-                    if ui.button("Load HD Pack Folder...").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            match crate::gba::hd_pack::HdPack::load_from_dir(&dir) {
-                                Ok(pack) => {
-                                    let msg = format!("Loaded HD Pack '{}' ({} replacements)", pack.name, pack.len());
-                                    self.gba.load_hd_pack(pack);
-                                    self.hd_pack_path = Some(dir);
-                                    self.hd_pack_enabled = true;
-                                    self.config_dirty = true;
-                                    self.set_toast(msg);
-                                }
-                                Err(e) => {
-                                    self.set_toast(format!("Failed to load HD Pack: {}", e));
-                                }
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Dump Tiles & Sprites to Folder...").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            match self.gba.dump_tiles_and_sprites(&dir) {
-                                Ok(manifest) => {
-                                    self.set_toast(format!("Dumped {} items to '{}'", manifest.replacements.len(), dir.display()));
-                                }
-                                Err(e) => {
-                                    self.set_toast(format!("Failed to dump tiles/sprites: {}", e));
-                                }
-                            }
-                        }
+                    // Quick picks only; everything else lives in the
+                    // Display Settings window (the full list used to run
+                    // off the bottom of the screen).
+                    ui.set_min_width(240.0);
+                    if ui.button("⚙ Display Settings…").clicked() {
+                        self.video_settings_dialog.is_open = true;
                         ui.close_menu();
                     }
                     ui.separator();
-                    ui.label("Per-Game Widescreen (16:9 / 16:10):");
-                    let mut ws_enabled = self.gba.is_widescreen_enabled();
-                    if ui.checkbox(&mut ws_enabled, "Enable Widescreen Expansion").changed() {
-                        self.gba.set_widescreen_enabled(ws_enabled);
-                        self.widescreen_config.enabled = ws_enabled;
-                        self.config_dirty = true;
-                    }
-                    if let Some(ref cart) = self.gba.mmu.cartridge {
-                        if let Some(prof) = crate::gba::widescreen::WidescreenDatabase::lookup(&cart.game_code, &cart.title) {
-                            ui.label(format!("Profile: {} [{}]", prof.title, prof.game_code));
-                            ui.label(format!("Safe Settings: {}", prof.notes));
-                        } else {
-                            ui.label("Profile: Generic 16:9 Expansion");
+                    ui.menu_button(format!("Filter: {}", video_settings::filter_name(self.display_filter)), |ui| {
+                        for f in video_settings::FILTERS {
+                            if ui.radio_value(&mut self.display_filter, f, video_settings::filter_name(f)).clicked() {
+                                self.config_dirty = true;
+                                ui.close_menu();
+                            }
                         }
-                    } else {
-                        ui.label("Profile: Generic 16:9 Expansion (No ROM loaded)");
-                    }
-
-                    let mut ws_mode = self.widescreen_config.mode;
-                    let mut ws_changed = false;
-                    ui.horizontal(|ui| {
-                        ws_changed |= ui.radio_value(&mut ws_mode, crate::gba::widescreen::WidescreenMode::Ratio16_9, "16:9 (284x160)").changed();
-                        ws_changed |= ui.radio_value(&mut ws_mode, crate::gba::widescreen::WidescreenMode::TileAligned16_9, "16:9 Aligned (288x160)").changed();
-                        ws_changed |= ui.radio_value(&mut ws_mode, crate::gba::widescreen::WidescreenMode::Ratio16_10, "16:10 Steam Deck").changed();
                     });
-                    if ws_changed {
-                        self.widescreen_config.mode = ws_mode;
-                        self.gba.set_widescreen_config(self.widescreen_config.clone());
+                    ui.menu_button(format!("Blending: {}", video_settings::blend_name(self.frame_blend_mode)), |ui| {
+                        for b in video_settings::BLENDS {
+                            if ui.radio_value(&mut self.frame_blend_mode, b, video_settings::blend_name(b)).clicked() {
+                                self.config_dirty = true;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.menu_button(format!("Aspect: {}", self.aspect_ratio.display_name()), |ui| {
+                        for &ar in &AspectRatio::ALL {
+                            if ui.radio_value(&mut self.aspect_ratio, ar, ar.display_name()).clicked() {
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if ui.checkbox(&mut self.color_correction, "GBA color correction").changed() {
                         self.config_dirty = true;
                     }
-
-                    ui.separator();
-                    ui.label("Scale Preset (4K / Ultrawide):");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::IntegerAuto, "Auto Integer (Pixel-Perfect)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale1x, "1x (240x160)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale2x, "2x (480x320)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale3x, "3x (720x480)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale4x, "4x (960x640)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale5x, "5x (1200x800)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale6x, "6x (1440x960)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale8x, "8x (1920x1280)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale10x, "10x (2400x1600 - 1600p Ultrawide)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale12x, "12x (2880x1920)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Scale14x, "14x (3360x2240 - 4K Fill)");
-                    ui.radio_value(&mut self.scale_mode, ScaleMode::Fit, "Fit to Window");
-                    ui.separator();
-                    ui.label("Console Bezel / Frame:");
-                    ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::None, "None (Clean Screen)");
-                    ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::GbaClassicIndigo, "GBA Classic (Indigo Purple)");
-                    ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::GbaClassicGlacier, "GBA Classic (Glacier Ice)");
-                    ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::GbaSpFlameRed, "GBA SP (Flame Red)");
-                    ui.radio_value(&mut self.bezel_renderer.mode, BezelMode::GameBoyPlayer, "Game Boy Player (GameCube)");
-                    ui.separator();
-                    ui.label("📐 Aspect Ratio (F3 to cycle):");
-                    for &ar in &AspectRatio::ALL {
-                        if ui.radio_value(&mut self.aspect_ratio, ar, ar.display_name()).clicked() {
-                            self.set_toast(format!("📐 Aspect Ratio: {}", ar.display_name()));
-                        }
+                    let mut ws = self.gba.is_widescreen_enabled();
+                    if ui.checkbox(&mut ws, "Widescreen").changed() {
+                        self.gba.set_widescreen_enabled(ws);
+                        self.widescreen_config.enabled = ws;
+                        self.config_dirty = true;
                     }
-                    ui.separator();
-                    ui.checkbox(&mut self.screenshot_enhanced, "Screenshot: Capture Enhanced (xBRZ/NIS) vs Raw 1x");
                 });
 
                 ui.menu_button("Audio", |ui| {
@@ -2323,6 +2320,7 @@ impl eframe::App for GbaApp {
         }
 
         self.memmap_dialog.show(ctx, &mut self.gba, &mut self.debug_windows.mem_state.watch_list, &mut dialog_toast);
+        self.show_video_settings(ctx);
 
         let local_dirs = self.local_save_directories();
         self.save_sync_dialog.show(
