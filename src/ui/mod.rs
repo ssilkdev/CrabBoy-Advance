@@ -218,6 +218,16 @@ impl GbaApp {
         if let Some(ref path) = initial_rom {
             app.load_rom_from_path(path);
         }
+
+        // Seed config.json on first ever launch. Writing it eagerly (rather
+        // than waiting for the user's first remap) means the file is there to
+        // be found, inspected and hand-edited, and it surfaces a
+        // permissions problem immediately instead of at the moment the user
+        // finally remaps something and expects it to stick.
+        if config::config_path().map(|p| !p.exists()).unwrap_or(false) {
+            app.flush_config();
+        }
+
         app
     }
 
