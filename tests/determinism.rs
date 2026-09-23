@@ -57,7 +57,7 @@ fn run(gba: &mut Gba, start: u64, frames: u64) -> (Vec<u64>, u64) {
         apply_input(gba, scripted_input(f));
         gba.run_frame();
         gba.mmu.apu.flush_samples();
-        audio.append(&mut gba.mmu.apu.pending_diagnostic_samples);
+        audio.append(gba.mmu.apu.capture.get_or_insert_with(Vec::new));
         video.push(frame_hash(gba));
     }
     (video, audio_hash(&audio))
@@ -82,6 +82,7 @@ fn boot(rom: &PathBuf, tag: &str) -> (Gba, PathBuf) {
     let mut gba = Gba::new();
     gba.load_rom(&copy).unwrap();
     gba.set_deterministic_clock(Some(1_788_000_000)); // fixed Unix time
+    gba.mmu.apu.capture = Some(Vec::new());
     (gba, dir)
 }
 

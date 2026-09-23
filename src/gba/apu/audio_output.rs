@@ -23,6 +23,17 @@ impl SurroundMode {
     }
 }
 
+/// When set, `AudioOutput::new` does not open a host audio device
+/// (ROADMAP M2). Headless runs (replays, tests, tools, run-ahead's shadow
+/// core) don't need one, and on Android a process without an Activity
+/// can't open one at all. See `Gba::new_headless`.
+static HEADLESS: AtomicBool = AtomicBool::new(false);
+
+/// Make every AudioOutput created from now on in this process headless.
+pub fn set_headless(on: bool) {
+    HEADLESS.store(on, Ordering::Relaxed);
+}
+
 /// Queue fill band the resampler's rate control aims for (interleaved
 /// samples): below LOW it speeds up output by 0.5%, above HIGH it slows it.
 const RATE_LOW: usize = 1000;
@@ -75,13 +86,17 @@ impl AudioOutput {
         let fast_forward_mode = Arc::new(AtomicU8::new(1)); // Default Smart Mute during fast-forward
         let is_fast_forwarding = Arc::new(AtomicBool::new(false));
 
-        let (stream, sample_rate, channels) = Self::init_cpal_stream(
-            buffer_clone,
-            Arc::clone(&surround_mode),
-            Arc::clone(&bass_boost),
-            Arc::clone(&surround_width),
-        )
-        .unwrap_or((None, 44100, 2));
+        let (stream, sample_rate, channels) = if HEADLESS.load(Ordering::Relaxed) {
+            (None, super::resample::CORE_SAMPLE_RATE, 2)
+        } else {
+            Self::init_cpal_stream(
+                buffer_clone,
+                Arc::clone(&surround_mode),
+                Arc::clone(&bass_boost),
+                Arc::clone(&surround_width),
+            )
+            .unwrap_or((None, 44100, 2))
+        };
 
         Self {
             _stream: stream,

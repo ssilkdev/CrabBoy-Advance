@@ -6,3 +6,6 @@
 *.bin binary
 *.gba binary
 *.sav binary
+
+# Golden test hashes are compared byte-for-byte (tests/replay.rs).
+tests/data/*.txt text eol=lf

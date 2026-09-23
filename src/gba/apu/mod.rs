@@ -96,6 +96,10 @@ pub struct Apu {
 
     // Audio samples awaiting diagnostic analysis
     pub pending_diagnostic_samples: Vec<f32>,
+    /// When `Some`, every core sample (interleaved stereo, CORE_SAMPLE_RATE)
+    /// is also appended here. For replay hashing, recording and analysis
+    /// tools; `None` (the default) costs nothing.
+    pub capture: Option<Vec<f32>>,
 }
 
 impl Default for Apu {
@@ -128,6 +132,7 @@ impl Apu {
             scope_buffer: [0.0; 512],
             scope_idx: 0,
             pending_diagnostic_samples: Vec::with_capacity(2048),
+            capture: None,
         }
     }
 
@@ -452,6 +457,9 @@ impl Apu {
         }
 
         self.pending_diagnostic_samples.extend_from_slice(&self.sample_batch);
+        if let Some(cap) = self.capture.as_mut() {
+            cap.extend_from_slice(&self.sample_batch);
+        }
         self.audio_output.push_sample_batch(&self.sample_batch);
         self.sample_batch.clear();
 

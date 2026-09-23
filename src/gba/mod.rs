@@ -8,6 +8,7 @@ pub mod dma;
 pub mod keypad;
 pub mod mmu;
 pub mod ppu;
+pub mod replay;
 pub mod state;
 pub mod timer;
 
@@ -62,6 +63,15 @@ impl Gba {
             is_running: true,
             frame_counter: 0,
         }
+    }
+
+    /// A core that never opens a host audio device: for replays, tests and
+    /// tools (ROADMAP M2). Audio is still produced (and can be captured via
+    /// `mmu.apu.capture`), it just isn't played. Note this switches the
+    /// whole process to headless audio.
+    pub fn new_headless() -> Self {
+        apu::audio_output::set_headless(true);
+        Self::new()
     }
 
     pub fn load_rom<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
