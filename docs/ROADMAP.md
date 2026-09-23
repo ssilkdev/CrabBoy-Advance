@@ -126,7 +126,7 @@ deterministic, so this comes first.
 - **Done when:** every option works on both desktop and Android and is saved
   per game.
 
-### M11. Automatic game-variable discovery [New]
+### M11. Automatic game-variable discovery [New] ✅
 - A guided RAM search with light machine learning that finds variables like
   HP, player position, money, menu state and the text-box buffer, then saves
   them as a per-game "memory map".

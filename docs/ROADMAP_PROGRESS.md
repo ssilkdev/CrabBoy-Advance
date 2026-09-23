@@ -553,3 +553,91 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
 - Not done: the desktop filter runs on the CPU per pixel (cheap: frames are
   240×160 and runs of equal colors reuse the last result); the desktop GUI
   was checked by build + tests, not by clicking through it in a live window.
+
+### M11. Automatic game-variable discovery ✅
+
+- ✅ **Memory maps** (`src/gba/memmap/mod.rs`, `653d11d`). A per-game list of
+  named variables: numbers, flags, player X/Y and text buffers. A variable's
+  location is either absolute or `[pointer]+offset`, and a value can be
+  XOR-encoded with a key that is also relocatable (Gen 3 money). Maps are
+  saved as JSON under `<config dir>/memmaps/<GAMECODE>.json` and load
+  automatically with the game.
+- ✅ **Guided search** (`memmap/search.rs`):
+  - Relation filters (equals, changed, increased, changed by N...).
+  - XOR pairs found in linear time by indexing every RAM word once.
+  - Each hit is turned into every IWRAM-pointer-relative form that reaches
+    it, and only forms that still read correctly in other sessions are kept.
+- ✅ **Discovery** (`memmap/discover.rs`). The player records snapshots
+  labelled with what the screen shows; they never give an address.
+  - **Sessions:** each reset starts a new session. Emerald moves its save
+    blocks and money key to new addresses on each boot (checked by
+    booting with different idle times). Requiring a hit to hold in every
+    session is what removes coincidental matches.
+  - **Numbers:** search in session 1, then confirm the survivors in the
+    other sessions.
+  - **Position:** built from "moved dx, dy" steps; a candidate has to follow
+    every step, both moves and standing still.
+  - **Flags (the "light machine learning"):** for every byte, learn a
+    decision stump (`== v`, `!= v`, `in {..}`) from session 1's labelled
+    snapshots, then keep it only if it classifies every held-out session
+    correctly. Simpler rules rank higher.
+  - **Text:** a buffer that holds the same bytes while one message is up
+    and different bytes for another message, whose opening bytes read like
+    text (not a repeating tile pattern) and appear verbatim in the ROM.
+  - **Ranking:** the simplest location wins (absolute before pointer, u16
+    before u32 before u8). Forms that reach the same bytes are merged.
+  - **"Ask me"** (`PokeRefiner`): when a number still has several
+    candidates, write a test value into half of them, ask what the game
+    shows, and restore the save state. Each answer halves the list.
+- ✅ **Desktop UI** (`src/ui/memmap_dialog.rs`; Debug menu or Ctrl+J):
+  - Record numbers, steps, yes/no facts and messages (same or new).
+  - Sessions advance automatically on reset.
+  - Discover shows a per-variable report; ambiguous numbers go to the
+    "Ask me" section.
+  - Each variable shows its live value and has "Watch" (adds it to the hex
+    editor's watch list) and delete. Save the map from the dialog.
+  - The Gen 3 companion shows the discovered variables live.
+- ✅ **Tests**:
+  - `tests/memmap_discovery.rs` (needs the Emerald ROM and save): three
+    boots with relocated save blocks. The scripted player walks, reads a
+    sign, opens the start menu and save prompt, and fights until it takes
+    damage. It labels only what's visible on screen. Known Gen 3 addresses
+    are used just to label and to grade the result; discovery never sees
+    them. Graded against those sessions plus a fresh fourth boot:
+    - **HP** `0x02024542` u16: exact; only 2 candidates after session 1.
+    - **Money** `[0x03005D90]+0xAC u32 xor [0x03005D8C]+0x490`: the real
+      encrypted, pointer-relative field. Money never changes during the
+      tour, so about 790 constant words also fit; "Ask me" narrowed them to
+      1 in 10 questions by reading the trainer card.
+    - **Player X/Y** `0x02037360/2`: the player's object-event coordinates.
+      They track movement exactly in every session with a constant +7
+      offset (the engine's map border).
+    - **Text box open** `0x02001BC0 != 0`: correct while walking, and
+      correct with a sign open in the fresh session. It is also off in the
+      start menu.
+    - **Text box text** `0x02021FC4`: holds the sign's string in the fresh
+      session; its first 12 bytes are found in the ROM.
+    - The map is saved, reloaded, and reads the same values.
+    - Discovery takes about 0.27 s for 46 snapshots.
+  - `tests/memmap_ui.rs`: the real dialog runs in a headless egui context
+    and is driven by clicks and typing, finding widgets by label through
+    AccessKit. It records two sessions, runs Discover (finds HP as
+    `[0x03000100]+0x20` despite decoys), uses Watch, saves, and reloads the
+    map on the next load. A second test runs "Ask me" to a single answer
+    and checks every poked value was restored.
+  - Unit tests: toy game fully discovered, stump learner, XOR relocation,
+    JSON round-trip.
+  - Full `cargo test --release`: **579 passed, 0 failed**. Android still
+    builds.
+- **"Done when" check:** for Emerald it finds HP, position, money and
+  text-box state without being told where they are, and the map is saved
+  and reused ✅.
+- Notes:
+  - X/Y came out as the object-event copy (+7) rather than the save-block
+    copy. Both track the player exactly. The reported offset is constant,
+    so the map is right for relative use, but a consumer that needs
+    absolute map coordinates should subtract 7 for Gen 3.
+  - "Text box open" was trained on signs, a save prompt and the start
+    menu; battle text wasn't in the training set.
+  - Android has no discovery UI (a desktop tool), but maps are plain JSON
+    and the core API builds for Android.
