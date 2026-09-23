@@ -83,6 +83,25 @@ impl SaveBackend {
         }
     }
 
+    /// Whether the save chip has unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        match self {
+            SaveBackend::None => false,
+            SaveBackend::Sram(s) => s.dirty,
+            SaveBackend::Flash(f) => f.dirty,
+            SaveBackend::Eeprom(e) => e.dirty,
+        }
+    }
+
+    pub fn set_dirty(&mut self, dirty: bool) {
+        match self {
+            SaveBackend::None => {}
+            SaveBackend::Sram(s) => s.dirty = dirty,
+            SaveBackend::Flash(f) => f.dirty = dirty,
+            SaveBackend::Eeprom(e) => e.dirty = dirty,
+        }
+    }
+
     pub fn sync_to_disk(&mut self) {
         match self {
             SaveBackend::None => {}

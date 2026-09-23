@@ -100,6 +100,9 @@ pub struct Apu {
     /// is also appended here. For replay hashing, recording and analysis
     /// tools; `None` (the default) costs nothing.
     pub capture: Option<Vec<f32>>,
+    /// Suppress sample emission to output, capture, and scope buffers
+    /// (used during run-ahead speculative frames).
+    pub speculative: bool,
 }
 
 impl Default for Apu {
@@ -133,6 +136,7 @@ impl Apu {
             scope_idx: 0,
             pending_diagnostic_samples: Vec::with_capacity(2048),
             capture: None,
+            speculative: false,
         }
     }
 
@@ -331,10 +335,12 @@ impl Apu {
     fn mix_and_push_sample(&mut self) {
         let enabled = (self.soundcnt_x & (1 << 7)) != 0;
         if !enabled {
-            self.sample_batch.push(0.0);
-            self.sample_batch.push(0.0);
-            if self.sample_batch.len() >= 512 {
-                self.flush_samples();
+            if !self.speculative {
+                self.sample_batch.push(0.0);
+                self.sample_batch.push(0.0);
+                if self.sample_batch.len() >= 512 {
+                    self.flush_samples();
+                }
             }
             return;
         }
@@ -438,21 +444,34 @@ impl Apu {
         let final_left = soft_limit(self.lp_l);
         let final_right = soft_limit(self.lp_r);
 
-        self.sample_batch.push(final_left);
-        self.sample_batch.push(final_right);
+        if !self.speculative {
+            self.sample_batch.push(final_left);
+            self.sample_batch.push(final_right);
 
-        // Update real-time oscilloscope buffer
-        self.scope_buffer[self.scope_idx] = (final_left + final_right) * 0.5;
-        self.scope_idx = (self.scope_idx + 1) % 512;
+            // Update real-time oscilloscope buffer
+            self.scope_buffer[self.scope_idx] = (final_left + final_right) * 0.5;
+            self.scope_idx = (self.scope_idx + 1) % 512;
 
-        if self.sample_batch.len() >= 512 {
-            self.flush_samples();
+            if self.sample_batch.len() >= 512 {
+                self.flush_samples();
+            }
         }
+    }
+
+    /// Drop samples produced by a frame that is being thrown away (run-ahead
+    /// speculation): they reach neither the device nor any capture.
+    pub fn discard_samples(&mut self) {
+        self.sample_batch.clear();
     }
 
     /// Flushes accumulated audio samples to host audio stream and applies Dynamic Rate Control (DRC)
     pub fn flush_samples(&mut self) {
         if self.sample_batch.is_empty() {
+            return;
+        }
+
+        if self.speculative {
+            self.sample_batch.clear();
             return;
         }
 

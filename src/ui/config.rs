@@ -17,6 +17,7 @@
 //! a truncated JSON file that resets all their bindings.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::controls::{ControllerSettings, KeyBindings};
@@ -26,6 +27,47 @@ use super::controls::{ControllerSettings, KeyBindings};
 /// the old file untouched so downgrading does not destroy a newer config.
 pub const CONFIG_VERSION: u32 = 1;
 
+/// Run-ahead configuration for a single game (ROADMAP M3).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct RunAheadGameConfig {
+    /// Frames to run ahead (0..=4).
+    pub frames: u32,
+    /// Whether to run speculative frames in a shadow core.
+    pub second_instance: bool,
+}
+
+impl Default for RunAheadGameConfig {
+    fn default() -> Self {
+        Self {
+            frames: 0,
+            second_instance: true,
+        }
+    }
+}
+
+/// Global and per-game run-ahead settings (ROADMAP M3).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct RunAheadSettings {
+    /// Global default frames to run ahead (0 = disabled).
+    pub default_frames: u32,
+    /// Default setting for second instance.
+    pub second_instance: bool,
+    /// Per-game overrides keyed by ROM title/filename.
+    pub per_game: HashMap<String, RunAheadGameConfig>,
+}
+
+impl Default for RunAheadSettings {
+    fn default() -> Self {
+        Self {
+            default_frames: 0,
+            second_instance: true,
+            per_game: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct AppConfig {
@@ -34,6 +76,8 @@ pub struct AppConfig {
     pub controllers: ControllerSettings,
     /// Keyboard bindings, stored by egui `Key` name.
     pub keyboard: KeyBindings,
+    /// Run-ahead latency reduction settings (ROADMAP M3).
+    pub run_ahead: RunAheadSettings,
 }
 
 impl Default for AppConfig {
@@ -42,6 +86,7 @@ impl Default for AppConfig {
             version: CONFIG_VERSION,
             controllers: ControllerSettings::default(),
             keyboard: KeyBindings::default(),
+            run_ahead: RunAheadSettings::default(),
         }
     }
 }
@@ -157,4 +202,44 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         format!("Failed to replace {}: {}", path.display(), e)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_legacy_config_without_run_ahead() {
+        let legacy_json = r#"{
+            "version": 1,
+            "controllers": {},
+            "keyboard": {}
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(legacy_json).expect("should parse legacy config");
+        assert_eq!(cfg.run_ahead.default_frames, 0);
+        assert!(cfg.run_ahead.second_instance);
+        assert!(cfg.run_ahead.per_game.is_empty());
+    }
+
+    #[test]
+    fn round_trips_run_ahead_settings() {
+        let mut cfg = AppConfig::default();
+        cfg.run_ahead.default_frames = 1;
+        cfg.run_ahead.second_instance = false;
+        cfg.run_ahead.per_game.insert(
+            "Pokemon - Emerald Version (USA, Europe)".to_string(),
+            RunAheadGameConfig {
+                frames: 2,
+                second_instance: true,
+            },
+        );
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let parsed: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.run_ahead.default_frames, 1);
+        assert!(!parsed.run_ahead.second_instance);
+        let emerald = parsed.run_ahead.per_game.get("Pokemon - Emerald Version (USA, Europe)").unwrap();
+        assert_eq!(emerald.frames, 2);
+        assert!(emerald.second_instance);
+    }
 }

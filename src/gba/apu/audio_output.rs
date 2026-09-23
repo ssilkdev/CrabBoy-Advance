@@ -29,9 +29,10 @@ impl SurroundMode {
 /// can't open one at all. See `Gba::new_headless`.
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 
-/// Make every AudioOutput created from now on in this process headless.
-pub fn set_headless(on: bool) {
-    HEADLESS.store(on, Ordering::Relaxed);
+/// Make AudioOutputs created from now on headless (or not); returns the
+/// previous setting so callers can scope it (see `Gba::new_headless`).
+pub fn set_headless(on: bool) -> bool {
+    HEADLESS.swap(on, Ordering::Relaxed)
 }
 
 /// Queue fill band the resampler's rate control aims for (interleaved

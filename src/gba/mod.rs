@@ -9,6 +9,7 @@ pub mod keypad;
 pub mod mmu;
 pub mod ppu;
 pub mod replay;
+pub mod run_ahead;
 pub mod state;
 pub mod timer;
 
@@ -45,6 +46,10 @@ pub struct Gba {
     pub diagnostics: SystemDiagnostics,
     pub is_running: bool,
     pub frame_counter: u64,
+    /// Set while run-ahead emulates frames that will be rolled back
+    /// (ROADMAP M3): no audio output or capture, no diagnostics, no save
+    /// file writes.
+    pub speculative: bool,
 }
 
 impl Default for Gba {
@@ -62,16 +67,25 @@ impl Gba {
             diagnostics: SystemDiagnostics::new(),
             is_running: true,
             frame_counter: 0,
+            speculative: false,
         }
     }
 
     /// A core that never opens a host audio device: for replays, tests and
     /// tools (ROADMAP M2). Audio is still produced (and can be captured via
-    /// `mmu.apu.capture`), it just isn't played. Note this switches the
-    /// whole process to headless audio.
+    /// `mmu.apu.capture`), it just isn't played.
     pub fn new_headless() -> Self {
-        apu::audio_output::set_headless(true);
-        Self::new()
+        // Scoped: only this core's AudioOutput is headless.
+        let prev = apu::audio_output::set_headless(true);
+        let gba = Self::new();
+        apu::audio_output::set_headless(prev);
+        gba
+    }
+
+    /// Set whether the core is running speculative (run-ahead) frames.
+    pub fn set_speculative(&mut self, spec: bool) {
+        self.speculative = spec;
+        self.mmu.apu.speculative = spec;
     }
 
     pub fn load_rom<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
@@ -296,6 +310,7 @@ impl Gba {
 
     /// Run full frame (~280,896 cycles)
     pub fn run_frame(&mut self) {
+        self.mmu.apu.speculative = self.speculative;
         let mut frame_cycles = 0;
         while frame_cycles < CYCLES_PER_FRAME {
             let c = self.step_instruction();
@@ -312,6 +327,12 @@ impl Gba {
 
         // Apply active cheats on VBlank
         self.cheats.apply(&mut self.mmu);
+
+        // Speculative (run-ahead) frames are silent and leave no trace.
+        if self.speculative {
+            self.mmu.apu.discard_samples();
+            return;
+        }
 
         // Flush frame audio samples and feed diagnostic linter
         self.mmu.apu.flush_samples();

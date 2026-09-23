@@ -99,6 +99,8 @@ pub struct GbaApp {
     pub updater_dialog: UpdaterDialog,
 
     // Settings
+    pub run_ahead: crate::gba::run_ahead::RunAhead,
+    pub run_ahead_config: config::RunAheadSettings,
     pub display_filter: DisplayFilter,
     pub nvidia_sharpen: bool,
     pub nvidia_sharpness: f32,
@@ -160,6 +162,12 @@ impl GbaApp {
         let updater = UpdateManager::new();
         updater.check_for_updates_async();
 
+        let run_ahead_config = config.run_ahead.clone();
+        let run_ahead = crate::gba::run_ahead::RunAhead::new(
+            run_ahead_config.default_frames,
+            run_ahead_config.second_instance,
+        );
+
         let mut app = Self {
             gba,
             gb: None,
@@ -187,6 +195,8 @@ impl GbaApp {
             controls_dialog: ControlsDialog::new(),
             updater,
             updater_dialog: UpdaterDialog::new(),
+            run_ahead,
+            run_ahead_config,
             display_filter: DisplayFilter::Crisp,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -275,6 +285,7 @@ impl GbaApp {
                     self.console = ConsoleKind::Gba;
                     self.loaded_rom_name = name;
                     self.rewind_manager.clear();
+                    self.update_run_ahead_for_rom();
                     self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
                 }
                 Err(e) => self.set_toast(format!("Failed to load ROM: {}", e)),
@@ -342,7 +353,7 @@ impl GbaApp {
     fn run_active_frame(&mut self) {
         match self.gb {
             Some(ref mut gb) => gb.run_frame(),
-            None => self.gba.run_frame(),
+            None => self.run_ahead.run_frame(&mut self.gba),
         }
     }
 
@@ -389,11 +400,69 @@ impl GbaApp {
             version: config::CONFIG_VERSION,
             controllers: self.gamepad_manager.settings.clone(),
             keyboard: self.key_bindings.clone(),
+            run_ahead: self.run_ahead_config.clone(),
         };
         if let Err(e) = cfg.save() {
             log::warn!("Could not save config: {}", e);
             self.set_toast(format!("⚠ Settings not saved: {}", e));
         }
+    }
+
+    /// Update active run-ahead frames and second-instance mode for the currently loaded ROM.
+    pub fn update_run_ahead_for_rom(&mut self) {
+        if let Some(cfg) = self.run_ahead_config.per_game.get(&self.loaded_rom_name) {
+            self.run_ahead.frames = cfg.frames;
+            self.run_ahead.second_instance = cfg.second_instance;
+        } else {
+            self.run_ahead.frames = self.run_ahead_config.default_frames;
+            self.run_ahead.second_instance = self.run_ahead_config.second_instance;
+        }
+    }
+
+    pub fn set_run_ahead_frames(&mut self, frames: u32) {
+        self.run_ahead.frames = frames;
+        if self.loaded_rom_name != "No ROM Loaded" {
+            let entry = self
+                .run_ahead_config
+                .per_game
+                .entry(self.loaded_rom_name.clone())
+                .or_insert_with(|| config::RunAheadGameConfig {
+                    frames,
+                    second_instance: self.run_ahead.second_instance,
+                });
+            entry.frames = frames;
+        } else {
+            self.run_ahead_config.default_frames = frames;
+        }
+        self.config_dirty = true;
+        self.set_toast(if frames == 0 {
+            "Run-ahead disabled".to_string()
+        } else {
+            format!("Run-ahead: {} frame{} ahead", frames, if frames > 1 { "s" } else { "" })
+        });
+    }
+
+    pub fn set_run_ahead_second_instance(&mut self, second_instance: bool) {
+        self.run_ahead.second_instance = second_instance;
+        if self.loaded_rom_name != "No ROM Loaded" {
+            let entry = self
+                .run_ahead_config
+                .per_game
+                .entry(self.loaded_rom_name.clone())
+                .or_insert_with(|| config::RunAheadGameConfig {
+                    frames: self.run_ahead.frames,
+                    second_instance,
+                });
+            entry.second_instance = second_instance;
+        } else {
+            self.run_ahead_config.second_instance = second_instance;
+        }
+        self.config_dirty = true;
+        self.set_toast(if second_instance {
+            "Run-ahead: second instance (glitchless audio)".to_string()
+        } else {
+            "Run-ahead: single instance (rollback)".to_string()
+        });
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -963,6 +1032,43 @@ impl eframe::App for GbaApp {
                         ui.close_menu();
                         self.show_rtc_dialog = true;
                     }
+                    ui.separator();
+                    let ra_label = if self.run_ahead.frames == 0 {
+                        "Run-Ahead: Disabled".to_string()
+                    } else {
+                        format!("Run-Ahead: {} frame{}", self.run_ahead.frames, if self.run_ahead.frames > 1 { "s" } else { "" })
+                    };
+                    ui.menu_button(ra_label, |ui| {
+                        ui.label(RichText::new("Input Latency Reduction").strong());
+                        let scope = if self.loaded_rom_name != "No ROM Loaded" {
+                            format!("Configured for: {}", self.loaded_rom_name)
+                        } else {
+                            "Global default setting".to_string()
+                        };
+                        ui.label(RichText::new(scope).color(Color32::GRAY).small());
+                        ui.separator();
+                        for f in 0..=2 {
+                            let label = match f {
+                                0 => "Off (Normal Latency)",
+                                1 => "1 Frame Run-Ahead",
+                                2 => "2 Frames Run-Ahead",
+                                _ => unreachable!(),
+                            };
+                            if ui.radio(self.run_ahead.frames == f, label).clicked() {
+                                self.set_run_ahead_frames(f);
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        let mut second = self.run_ahead.second_instance;
+                        if ui.checkbox(&mut second, "Second Instance (Glitchless Audio)").clicked() {
+                            self.set_run_ahead_second_instance(second);
+                            ui.close_menu();
+                        }
+                        if let Some(ref reason) = self.run_ahead.fallback_reason {
+                            ui.label(RichText::new(format!("⚠ Shadow core fallback: {reason}")).color(Color32::YELLOW).small());
+                        }
+                    });
                     ui.separator();
                     ui.label("Speed:");
                     if ui.radio_value(&mut self.speed_multiplier, 1, "1x (Normal 60 FPS)").clicked() { ui.close_menu(); }
