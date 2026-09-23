@@ -108,6 +108,8 @@ pub struct GbaApp {
     pub frame_blend_mode: crate::gba::frame_blend::FrameBlendMode,
     pub custom_shader_path: Option<PathBuf>,
     pub hd_mode7_config: crate::gba::ppu::hd_mode7::HdMode7Config,
+    pub hd_pack_path: Option<PathBuf>,
+    pub hd_pack_enabled: bool,
     pub display_filter: DisplayFilter,
     pub nvidia_sharpen: bool,
     pub nvidia_sharpness: f32,
@@ -204,6 +206,15 @@ impl GbaApp {
             let hd_mode7_config = config.render.hd_mode7;
             gba.set_hd_mode7_config(hd_mode7_config);
 
+            let hd_pack_path = config.render.hd_pack_path.clone();
+            let hd_pack_enabled = config.render.hd_pack_enabled;
+            if let Some(ref path) = hd_pack_path {
+                if let Ok(pack) = crate::gba::hd_pack::HdPack::load_from_dir(path) {
+                    gba.load_hd_pack(pack);
+                    gba.set_hd_pack_enabled(hd_pack_enabled);
+                }
+            }
+
             let mut app = Self {
             gba,
             gb: None,
@@ -238,6 +249,8 @@ impl GbaApp {
             frame_blend_mode,
             custom_shader_path: config.render.custom_shader_path.clone(),
             hd_mode7_config,
+            hd_pack_path,
+            hd_pack_enabled,
             display_filter,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -481,6 +494,8 @@ impl GbaApp {
                 }.to_string(),
                 custom_shader_path: self.custom_shader_path.clone(),
                 hd_mode7: self.hd_mode7_config,
+                hd_pack_path: self.hd_pack_path.clone(),
+                hd_pack_enabled: self.hd_pack_enabled,
             },
         };
         if let Err(e) = cfg.save() {
@@ -1282,6 +1297,51 @@ impl eframe::App for GbaApp {
                         self.config_dirty = true;
                     }
                     ui.separator();
+                    ui.label("HD Sprite & Tile Packs (Mesen-style):");
+                    let mut pack_enabled = self.gba.is_hd_pack_enabled();
+                    if ui.checkbox(&mut pack_enabled, "Enable HD Pack Replacement").changed() {
+                        self.gba.set_hd_pack_enabled(pack_enabled);
+                        self.hd_pack_enabled = pack_enabled;
+                        self.config_dirty = true;
+                    }
+                    if let Some(pack) = self.gba.hd_pack() {
+                        ui.label(format!("Active Pack: {} ({}x HD)", pack.name, pack.scale));
+                        ui.label(format!("Replacements: {} sprites, {} tiles", pack.sprite_count(), pack.tile_count()));
+                    } else {
+                        ui.label("No HD Pack loaded");
+                    }
+                    if ui.button("Load HD Pack Folder...").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            match crate::gba::hd_pack::HdPack::load_from_dir(&dir) {
+                                Ok(pack) => {
+                                    let msg = format!("Loaded HD Pack '{}' ({} replacements)", pack.name, pack.len());
+                                    self.gba.load_hd_pack(pack);
+                                    self.hd_pack_path = Some(dir);
+                                    self.hd_pack_enabled = true;
+                                    self.config_dirty = true;
+                                    self.set_toast(msg);
+                                }
+                                Err(e) => {
+                                    self.set_toast(format!("Failed to load HD Pack: {}", e));
+                                }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Dump Tiles & Sprites to Folder...").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            match self.gba.dump_tiles_and_sprites(&dir) {
+                                Ok(manifest) => {
+                                    self.set_toast(format!("Dumped {} items to '{}'", manifest.replacements.len(), dir.display()));
+                                }
+                                Err(e) => {
+                                    self.set_toast(format!("Failed to dump tiles/sprites: {}", e));
+                                }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     ui.label("Scale Preset (4K / Ultrawide):");
                     ui.radio_value(&mut self.scale_mode, ScaleMode::IntegerAuto, "Auto Integer (Pixel-Perfect)");
                     ui.radio_value(&mut self.scale_mode, ScaleMode::Scale1x, "1x (240x160)");
@@ -1689,7 +1749,8 @@ impl eframe::App for GbaApp {
                     self.gba.get_framebuffer()
                 };
                 let hd_frame = if self.gb.is_none()
-                    && self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off
+                    && (self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off
+                        || self.gba.is_hd_pack_enabled())
                 {
                     self.gba.render_hd_frame()
                 } else {

@@ -76,6 +76,10 @@ pub struct Ppu {
 
     // HD Mode 7 Rendering (ROADMAP M6)
     pub hd_config: HdMode7Config,
+
+    // HD Sprite and Tile Replacement Packs (ROADMAP M7)
+    pub hd_pack: Option<crate::gba::hd_pack::HdPack>,
+    pub hd_pack_enabled: bool,
 }
 
 impl Default for Ppu {
@@ -122,6 +126,8 @@ impl Ppu {
             layer_buffers: None,
             draw_commands: Vec::new(),
             hd_config: HdMode7Config::default(),
+            hd_pack: None,
+            hd_pack_enabled: true,
         }
     }
 
@@ -144,7 +150,36 @@ impl Ppu {
         self.hd_config = config;
     }
 
-    /// Renders an HD Mode 7 high-resolution frame if active.
+    /// Load an HD Sprite and Tile replacement pack (ROADMAP M7).
+    pub fn load_hd_pack(&mut self, pack: crate::gba::hd_pack::HdPack) {
+        self.set_layer_capture(true);
+        self.hd_pack = Some(pack);
+    }
+
+    /// Toggle HD replacement pack active state.
+    pub fn set_hd_pack_enabled(&mut self, enabled: bool) {
+        if enabled && self.hd_pack.is_some() {
+            self.set_layer_capture(true);
+        }
+        self.hd_pack_enabled = enabled;
+    }
+
+    /// Query if an HD replacement pack is actively loaded and enabled.
+    pub fn is_hd_pack_enabled(&self) -> bool {
+        self.hd_pack_enabled && self.hd_pack.as_ref().map_or(false, |p| p.enabled && !p.is_empty())
+    }
+
+    /// Borrow loaded HD replacement pack if present.
+    pub fn hd_pack(&self) -> Option<&crate::gba::hd_pack::HdPack> {
+        self.hd_pack.as_ref()
+    }
+
+    /// Mutably borrow loaded HD replacement pack if present.
+    pub fn hd_pack_mut(&mut self) -> Option<&mut crate::gba::hd_pack::HdPack> {
+        self.hd_pack.as_mut()
+    }
+
+    /// Renders an HD Mode 7 or HD Pack high-resolution frame if active.
     pub fn render_hd_frame(&self) -> Option<HdFrame> {
         render_hd_mode7(self, &self.hd_config)
     }

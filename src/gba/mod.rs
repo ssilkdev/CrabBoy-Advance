@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod diagnostics;
 pub mod dma;
 pub mod frame_blend;
+pub mod hd_pack;
 pub mod keypad;
 pub mod mmu;
 pub mod ppu;
@@ -116,7 +117,43 @@ impl Gba {
         self.mmu.ppu.set_hd_mode7_config(config);
     }
 
-    /// Render HD Mode 7 frame if active.
+    /// Load an HD Sprite and Tile replacement pack (ROADMAP M7).
+    pub fn load_hd_pack(&mut self, pack: hd_pack::HdPack) {
+        self.mmu.ppu.load_hd_pack(pack);
+    }
+
+    /// Toggle HD replacement pack active state.
+    pub fn set_hd_pack_enabled(&mut self, enabled: bool) {
+        self.mmu.ppu.set_hd_pack_enabled(enabled);
+    }
+
+    /// Query if an HD replacement pack is actively loaded and enabled.
+    pub fn is_hd_pack_enabled(&self) -> bool {
+        self.mmu.ppu.is_hd_pack_enabled()
+    }
+
+    /// Borrow loaded HD replacement pack if present.
+    pub fn hd_pack(&self) -> Option<&hd_pack::HdPack> {
+        self.mmu.ppu.hd_pack()
+    }
+
+    /// Mutably borrow loaded HD replacement pack if present.
+    pub fn hd_pack_mut(&mut self) -> Option<&mut hd_pack::HdPack> {
+        self.mmu.ppu.hd_pack_mut()
+    }
+
+    /// Dump visible tiles and sprites from the core into PNGs and create a template manifest.
+    pub fn dump_tiles_and_sprites<P: AsRef<Path>>(&self, output_dir: P) -> std::io::Result<hd_pack::HdPackManifest> {
+        hd_pack::dump_tiles_and_sprites(
+            &self.mmu.ppu.vram[..],
+            &self.mmu.ppu.oam[..],
+            &self.mmu.ppu.palette_ram[..],
+            self.mmu.ppu.dispcnt,
+            output_dir,
+        )
+    }
+
+    /// Render HD Mode 7 or HD Pack frame if active.
     pub fn render_hd_frame(&self) -> Option<ppu::hd_mode7::HdFrame> {
         self.mmu.ppu.render_hd_frame()
     }
@@ -391,8 +428,26 @@ impl Gba {
         self.diagnostics.generate_report(&self.mmu, self.frame_counter, self.cpu.cycles)
     }
 
-    /// Dump current framebuffer as PNG
+    /// Dump current framebuffer as PNG (dumps HD frame if active, otherwise native 240x160)
     pub fn dump_frame_png<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+        if let Some(hd) = self.render_hd_frame() {
+            let mut raw_bytes = Vec::with_capacity(hd.width * hd.height * 4);
+            for &pixel in hd.pixels.iter() {
+                raw_bytes.push((pixel & 0xFF) as u8);         // R
+                raw_bytes.push(((pixel >> 8) & 0xFF) as u8);  // G
+                raw_bytes.push(((pixel >> 16) & 0xFF) as u8); // B
+                raw_bytes.push(((pixel >> 24) & 0xFF) as u8); // A
+            }
+            return image::save_buffer(
+                path,
+                &raw_bytes,
+                hd.width as u32,
+                hd.height as u32,
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        }
+
         let mut raw_bytes = Vec::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT * 4);
         for &pixel in self.mmu.ppu.framebuffer.iter() {
             raw_bytes.push((pixel & 0xFF) as u8);         // R

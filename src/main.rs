@@ -38,8 +38,10 @@ fn print_help() {
 USAGE:
     crabboy-advance [ROM_PATH]                                  Launch GUI emulator (.gba, .gb, .gbc)
     crabboy-advance <ROM> --ai-play [--ai-endpoint URL]         Launch GUI with the AI Agent already playing
+    crabboy-advance <ROM> --hd-pack <DIR>                       Launch GUI with HD sprite & tile pack loaded
     crabboy-advance --diagnose <ROM> [--frames N] [--output P]  Run headless diagnostics and export report
     crabboy-advance --dump-frame <ROM> [--frame N] [--output P] Run headless to frame N and save PNG screenshot
+    crabboy-advance --dump-tiles <ROM> [--frame N] [--output D] Run headless to frame N and dump tiles/sprites pack
     crabboy-advance --audit-audio <ROM> [--frames N]            Run headless audio health audit
     crabboy-advance --gb-serial <GB_ROM> [--frames N]           Run a Game Boy ROM headless and print its link-port output
     crabboy-advance --help                                      Show this help message
@@ -222,7 +224,53 @@ fn handle_headless_cli(args: &[String]) {
         std::process::exit(0);
     }
 
-    // 3. Headless Audio Quality Audit
+    // 3. Headless Tile and Sprite Dump Mode (ROADMAP M7)
+    if let Some(pos) = args.iter().position(|a| a == "--dump-tiles" || a == "--dump-sprites") {
+        if pos + 1 >= args.len() {
+            eprintln!("Error: --dump-tiles requires a ROM path.");
+            std::process::exit(1);
+        }
+        let rom_path = PathBuf::from(&args[pos + 1]);
+        let target_frame: u64 = get_arg_val(args, "--frame")
+            .or_else(|| get_arg_val(args, "--frames"))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let output_dir = get_arg_val(args, "--output")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("dumped_pack_frame_{}", target_frame)));
+
+        let mut gba = Gba::new();
+        if let Err(e) = gba.load_rom(&rom_path) {
+            eprintln!("Failed to load ROM '{}': {}", rom_path.display(), e);
+            std::process::exit(1);
+        }
+
+        println!(
+            "Stepping to frame {} on '{}'...",
+            target_frame,
+            rom_path.display()
+        );
+        for _ in 0..target_frame {
+            gba.run_frame();
+        }
+
+        match gba.dump_tiles_and_sprites(&output_dir) {
+            Ok(manifest) => {
+                println!(
+                    "Dumped {} assets to '{}'. Generated manifest.json.",
+                    manifest.replacements.len(),
+                    output_dir.display()
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Failed to dump tiles/sprites: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 4. Headless Audio Quality Audit
     if let Some(pos) = args.iter().position(|a| a == "--audit-audio") {
         if pos + 1 >= args.len() {
             eprintln!("Error: --audit-audio requires a ROM path.");
@@ -399,12 +447,26 @@ fn main() -> eframe::Result<()> {
     };
 
     let ai_opts = parse_ai_options(&args);
+    let hd_pack_arg = get_arg_val(&args, "--hd-pack").map(PathBuf::from);
 
     eframe::run_native(
         "GBA Simulator",
         options,
         Box::new(move |cc| {
             let mut app = GbaApp::new(cc, initial_rom);
+            if let Some(ref pack_dir) = hd_pack_arg {
+                match crate::gba::hd_pack::HdPack::load_from_dir(pack_dir) {
+                    Ok(pack) => {
+                        log::info!("Loaded HD pack '{}' with {} replacements", pack.name, pack.len());
+                        app.gba.load_hd_pack(pack);
+                        app.hd_pack_path = Some(pack_dir.clone());
+                        app.hd_pack_enabled = true;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to load HD pack from '{}': {}", pack_dir.display(), e);
+                    }
+                }
+            }
             let summary = app.apply_ai_launch_options(
                 ai_opts.endpoint.as_deref(),
                 ai_opts.model.as_deref(),

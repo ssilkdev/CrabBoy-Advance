@@ -17,6 +17,8 @@
 //!   and downsampled SSAA (`downsample_ssaa`) for native resolution with
 //!   supersampled anti-aliasing.
 
+use std::sync::Arc;
+use crate::gba::hd_pack::{extract_sprite, recolor_rgba, HdReplacement};
 use super::{
     blend::{apply_color_effects, bgr555_to_rgb888, rgb888_to_bgr555, Pixel},
     layers::{LayerKind, PpuLayer},
@@ -173,15 +175,36 @@ struct HdAffineSprite {
     is_semi_trans: bool,
 }
 
-/// Renders a complete frame using HD Mode 7.
+#[derive(Clone)]
+struct HdReplacedSprite {
+    sprite_x: i32,
+    raw_y: i32,
+    orig_w: usize,
+    orig_h: usize,
+    priority: u8,
+    is_semi_trans: bool,
+    hflip: bool,
+    vflip: bool,
+    replacement: Arc<HdReplacement>,
+    palette: Vec<u16>,
+}
+
+/// Renders a complete frame using HD Mode 7 or HD Pack replacements.
 ///
-/// Returns `None` if `config.scale == HdScale::Off`.
+/// Returns `None` if neither HD Mode 7 nor an HD Pack is active.
 pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
-    if config.scale == HdScale::Off {
+    let scale = if config.scale != HdScale::Off {
+        config.scale.factor()
+    } else if ppu.is_hd_pack_enabled() {
+        ppu.hd_pack().map_or(1, |p| p.scale).clamp(2, 8)
+    } else {
+        return None;
+    };
+
+    if scale <= 1 {
         return None;
     }
 
-    let scale = config.scale.factor();
     let mut frame = HdFrame::new(scale);
 
     // Extract draw commands indexed by [scanline][layer_index]
@@ -198,6 +221,31 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
     let mut affine_sprites = Vec::with_capacity(32);
     let obj_char_base = 0x10000;
     let mapping_1d = (ppu.dispcnt & (1 << 6)) != 0;
+
+    // Collect HD replaced sprites if pack is loaded
+    let mut hd_replaced_sprites = Vec::new();
+    if ppu.is_hd_pack_enabled() {
+        if let Some(pack) = ppu.hd_pack() {
+            for i in 0..128 {
+                if let Some(raw) = extract_sprite(&ppu.oam[..], i, &ppu.vram[..], &ppu.palette_ram[..], ppu.dispcnt) {
+                    if let Some(rep) = pack.find_sprite_replacement(raw.sprite_hash, raw.palette_hash) {
+                        hd_replaced_sprites.push(HdReplacedSprite {
+                            sprite_x: raw.sprite_x,
+                            raw_y: raw.raw_y,
+                            orig_w: raw.width,
+                            orig_h: raw.height,
+                            priority: raw.priority,
+                            is_semi_trans: raw.is_semi_trans,
+                            hflip: raw.hflip,
+                            vflip: raw.vflip,
+                            replacement: Arc::clone(rep),
+                            palette: raw.palette,
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     for i in 0..128 {
         let oam_addr = i * 8;
@@ -526,8 +574,93 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
                         }
                     }
                 } else {
-                    // Non-affine BG: Sample from captured layer surface
-                    if let Some(ref lb) = ppu.layer_buffers {
+                    // Non-affine BG: Check for HD tile replacement first if pack is loaded
+                    let mut sampled_tile: Option<u16> = None;
+                    if ppu.is_hd_pack_enabled() {
+                        if let Some(pack) = ppu.hd_pack() {
+                            if pack.tile_count() > 0 {
+                                let bgcnt = ppu.bgcnt[bg_idx];
+                                let char_base = (((bgcnt >> 2) & 3) as usize) * 16384;
+                                let is_8bpp = (bgcnt & (1 << 7)) != 0;
+                                let screen_base = (((bgcnt >> 8) & 0x1F) as usize) * 2048;
+                                let screen_size = (bgcnt >> 14) & 3;
+
+                                let (map_w, map_h) = match screen_size {
+                                    0 => (256, 256),
+                                    1 => (512, 256),
+                                    2 => (256, 512),
+                                    3 => (512, 512),
+                                    _ => (256, 256),
+                                };
+
+                                let sx_sub = ((nx as f64 + (hx % scale) as f64 / f_scale) + ppu.bghofs[bg_idx] as f64).rem_euclid(map_w as f64);
+                                let sy_sub = ((ny as f64 + (hy % scale) as f64 / f_scale) + ppu.bgvofs[bg_idx] as f64).rem_euclid(map_h as f64);
+
+                                let tile_col = (sx_sub as usize % 256) / 8;
+                                let tile_row = (sy_sub as usize % 256) / 8;
+                                let block_x = sx_sub as usize / 256;
+                                let block_y = sy_sub as usize / 256;
+                                let block_offset = match screen_size {
+                                    0 => 0,
+                                    1 => block_x * 2048,
+                                    2 => block_y * 2048,
+                                    3 => (block_y * 2 + block_x) * 2048,
+                                    _ => 0,
+                                };
+
+                                let map_addr = screen_base + block_offset + (tile_row * 32 + tile_col) * 2;
+                                if map_addr + 1 < ppu.vram.len() {
+                                    let map_entry = (ppu.vram[map_addr] as u16) | ((ppu.vram[map_addr + 1] as u16) << 8);
+                                    let tile_num = (map_entry & 0x3FF) as usize;
+                                    let hflip = (map_entry & (1 << 10)) != 0;
+                                    let vflip = (map_entry & (1 << 11)) != 0;
+                                    let pal_num = ((map_entry >> 12) & 0x0F) as usize;
+
+                                    let tile_addr = if is_8bpp { char_base + tile_num * 64 } else { char_base + tile_num * 32 };
+                                    if tile_addr < ppu.vram.len() {
+                                        let tile_hash = crate::gba::hd_pack::hash_tile(&ppu.vram[..], is_8bpp, tile_addr);
+                                        let palette = crate::gba::hd_pack::extract_palette(&ppu.palette_ram[..], pal_num, is_8bpp, false);
+                                        let pal_hash = crate::gba::hd_pack::hash_palette(&palette);
+
+                                        if let Some(rep) = pack.find_tile_replacement(tile_hash, pal_hash) {
+                                            let mut u = (sx_sub % 8.0) / 8.0;
+                                            let mut v = (sy_sub % 8.0) / 8.0;
+                                            if hflip { u = 1.0 - u; }
+                                            if vflip { v = 1.0 - v; }
+                                            let tx = (u.clamp(0.0, 0.99999) * rep.image.width as f64) as usize;
+                                            let ty = (v.clamp(0.0, 0.99999) * rep.image.height as f64) as usize;
+                                            let idx = ty * rep.image.width + tx;
+                                            if idx < rep.image.pixels.len() {
+                                                let mut rgba = rep.image.pixels[idx];
+                                                if ((rgba >> 24) & 0xFF) > 0 {
+                                                    if rep.recolor {
+                                                        let base_p = rep.base_palette.as_deref().unwrap_or(&palette);
+                                                        rgba = recolor_rgba(rgba, base_p, &palette);
+                                                    }
+                                                    let r = (rgba & 0xFF) as u8;
+                                                    let g = ((rgba >> 8) & 0xFF) as u8;
+                                                    let b = ((rgba >> 16) & 0xFF) as u8;
+                                                    sampled_tile = Some(rgb888_to_bgr555(r, g, b));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(c) = sampled_tile {
+                        let priority = (ppu.bgcnt[bg_idx] & 3) as u8;
+                        candidates[cand_count] = Pixel {
+                            color: c,
+                            layer: bg_idx as u8,
+                            priority,
+                            is_transparent: false,
+                            is_obj_alpha: false,
+                        };
+                        cand_count += 1;
+                    } else if let Some(ref lb) = ppu.layer_buffers {
                         let rgba = lb.get_layer(layer_enum)[ny * SCREEN_WIDTH + nx];
                         if (rgba & 0xFF00_0000) != 0 {
                             let r = (rgba & 0xFF) as u8;
@@ -551,97 +684,162 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
             if (ppu.dispcnt & (1 << 12)) != 0 && (ppu.layer_mask & (1 << 4)) != 0 && (win_mask & (1 << 4)) != 0 {
                 let mut obj_pixel: Option<Pixel> = None;
 
-                // Evaluate high-resolution affine sprites
                 let x_sub = hx as f64 / f_scale;
                 let _y_sub = hy as f64 / f_scale;
 
-                for spr in &affine_sprites {
-                    let half_bw = spr.bound_w as f64 / 2.0;
-                    let half_bh = spr.bound_h as f64 / 2.0;
-                    let half_ow = spr.orig_w as f64 / 2.0;
-                    let half_oh = spr.orig_h as f64 / 2.0;
-
-                    let py_i32 = if spr.raw_y + (spr.bound_h as i32) > 256
-                        && (ny as i32) < (spr.raw_y + (spr.bound_h as i32) - 256)
+                // Evaluate high-resolution HD replaced sprites
+                for spr in &hd_replaced_sprites {
+                    let py_i32 = if spr.raw_y + (spr.orig_h as i32) > 256
+                        && (ny as i32) < (spr.raw_y + (spr.orig_h as i32) - 256)
                     {
                         (ny as i32) + 256 - spr.raw_y
-                    } else if (ny as i32) >= spr.raw_y && (ny as i32) < spr.raw_y + (spr.bound_h as i32) {
+                    } else if (ny as i32) >= spr.raw_y && (ny as i32) < spr.raw_y + (spr.orig_h as i32) {
                         (ny as i32) - spr.raw_y
                     } else {
                         continue;
                     };
 
                     let rel_x = x_sub - spr.sprite_x as f64;
-                    if rel_x < 0.0 || rel_x >= spr.bound_w as f64 {
+                    if rel_x < 0.0 || rel_x >= spr.orig_w as f64 {
                         continue;
                     }
 
-                    let hbx = rel_x - half_bw;
-                    let hby = (py_i32 as f64 + (sy as f64 / f_scale)) - half_bh;
+                    let mut u = rel_x / spr.orig_w as f64;
+                    let mut v = (py_i32 as f64 + (sy as f64 / f_scale)) / spr.orig_h as f64;
 
-                    let tex_x = (spr.pa as f64 * hbx + spr.pb as f64 * hby) / 256.0 + half_ow;
-                    let tex_y = (spr.pc as f64 * hbx + spr.pd as f64 * hby) / 256.0 + half_oh;
+                    let do_hflip = spr.replacement.hflip.unwrap_or(spr.hflip);
+                    let do_vflip = spr.replacement.vflip.unwrap_or(spr.vflip);
 
-                    if tex_x >= 0.0 && tex_x < spr.orig_w as f64 && tex_y >= 0.0 && tex_y < spr.orig_h as f64 {
-                        let px = tex_x as usize;
-                        let py = tex_y as usize;
+                    if do_hflip {
+                        u = 1.0 - u;
+                    }
+                    if do_vflip {
+                        v = 1.0 - v;
+                    }
 
-                        let in_tile_x = px % 8;
-                        let in_tile_y = py % 8;
-                        let tile_x = px / 8;
-                        let tile_y = py / 8;
+                    let u_clamped = u.clamp(0.0, 0.99999);
+                    let v_clamped = v.clamp(0.0, 0.99999);
 
-                        let tile_offset = if mapping_1d {
-                            let tiles_per_row = spr.orig_w / 8;
-                            if spr.is_8bpp {
-                                (spr.raw_tile + (tile_y * tiles_per_row + tile_x) * 2) & 0x3FF
-                            } else {
-                                (spr.raw_tile + tile_y * tiles_per_row + tile_x) & 0x3FF
+                    let tx = (u_clamped * spr.replacement.image.width as f64) as usize;
+                    let ty = (v_clamped * spr.replacement.image.height as f64) as usize;
+
+                    let idx = ty * spr.replacement.image.width + tx;
+                    if idx < spr.replacement.image.pixels.len() {
+                        let mut rgba = spr.replacement.image.pixels[idx];
+                        let alpha = (rgba >> 24) & 0xFF;
+                        if alpha > 0 {
+                            if spr.replacement.recolor {
+                                let base_p = spr.replacement.base_palette.as_deref().unwrap_or(&spr.palette);
+                                rgba = recolor_rgba(rgba, base_p, &spr.palette);
                             }
+                            let r = (rgba & 0xFF) as u8;
+                            let g = ((rgba >> 8) & 0xFF) as u8;
+                            let b = ((rgba >> 16) & 0xFF) as u8;
+                            let c = rgb888_to_bgr555(r, g, b);
+
+                            if obj_pixel.as_ref().map_or(true, |prev| spr.priority <= prev.priority) {
+                                obj_pixel = Some(Pixel {
+                                    color: c,
+                                    layer: 4,
+                                    priority: spr.priority,
+                                    is_transparent: false,
+                                    is_obj_alpha: spr.is_semi_trans,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // If no replaced sprite was hit, evaluate high-resolution affine sprites
+                if obj_pixel.is_none() {
+                    for spr in &affine_sprites {
+                        let half_bw = spr.bound_w as f64 / 2.0;
+                        let half_bh = spr.bound_h as f64 / 2.0;
+                        let half_ow = spr.orig_w as f64 / 2.0;
+                        let half_oh = spr.orig_h as f64 / 2.0;
+
+                        let py_i32 = if spr.raw_y + (spr.bound_h as i32) > 256
+                            && (ny as i32) < (spr.raw_y + (spr.bound_h as i32) - 256)
+                        {
+                            (ny as i32) + 256 - spr.raw_y
+                        } else if (ny as i32) >= spr.raw_y && (ny as i32) < spr.raw_y + (spr.bound_h as i32) {
+                            (ny as i32) - spr.raw_y
                         } else {
-                            if spr.is_8bpp {
-                                let tile_col = ((spr.raw_tile & 0x1F) + tile_x * 2) & 0x1F;
-                                let tile_row = (((spr.raw_tile >> 5) & 0x1F) + tile_y) & 0x1F;
-                                (tile_row * 32 + tile_col) & 0x3FF
-                            } else {
-                                let tile_col = ((spr.raw_tile & 0x1F) + tile_x) & 0x1F;
-                                let tile_row = (((spr.raw_tile >> 5) & 0x1F) + tile_y) & 0x1F;
-                                (tile_row * 32 + tile_col) & 0x3FF
-                            }
+                            continue;
                         };
 
-                        let (color_idx, is_trans) = if spr.is_8bpp {
-                            let tile_addr = obj_char_base + tile_offset * 32 + in_tile_y * 8 + in_tile_x;
-                            if tile_addr < ppu.vram.len() {
-                                let idx = ppu.vram[tile_addr];
-                                (idx as usize, idx == 0)
-                            } else {
-                                (0, true)
-                            }
-                        } else {
-                            let tile_addr = obj_char_base + tile_offset * 32 + in_tile_y * 4 + (in_tile_x / 2);
-                            if tile_addr < ppu.vram.len() {
-                                let byte = ppu.vram[tile_addr];
-                                let idx = if in_tile_x % 2 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
-                                (spr.pal_num * 16 + (idx as usize), idx == 0)
-                            } else {
-                                (0, true)
-                            }
-                        };
+                        let rel_x = x_sub - spr.sprite_x as f64;
+                        if rel_x < 0.0 || rel_x >= spr.bound_w as f64 {
+                            continue;
+                        }
 
-                        if !is_trans {
-                            let pal_addr = 0x200 + color_idx * 2;
-                            if pal_addr + 1 < ppu.palette_ram.len() {
-                                let c = (ppu.palette_ram[pal_addr] as u16)
-                                    | ((ppu.palette_ram[pal_addr + 1] as u16) << 8);
-                                if obj_pixel.as_ref().map_or(true, |prev| spr.priority <= prev.priority) {
-                                    obj_pixel = Some(Pixel {
-                                        color: c,
-                                        layer: 4,
-                                        priority: spr.priority,
-                                        is_transparent: false,
-                                        is_obj_alpha: spr.is_semi_trans,
-                                    });
+                        let hbx = rel_x - half_bw;
+                        let hby = (py_i32 as f64 + (sy as f64 / f_scale)) - half_bh;
+
+                        let tex_x = (spr.pa as f64 * hbx + spr.pb as f64 * hby) / 256.0 + half_ow;
+                        let tex_y = (spr.pc as f64 * hbx + spr.pd as f64 * hby) / 256.0 + half_oh;
+
+                        if tex_x >= 0.0 && tex_x < spr.orig_w as f64 && tex_y >= 0.0 && tex_y < spr.orig_h as f64 {
+                            let px = tex_x as usize;
+                            let py = tex_y as usize;
+
+                            let in_tile_x = px % 8;
+                            let in_tile_y = py % 8;
+                            let tile_x = px / 8;
+                            let tile_y = py / 8;
+
+                            let tile_offset = if mapping_1d {
+                                let tiles_per_row = spr.orig_w / 8;
+                                if spr.is_8bpp {
+                                    (spr.raw_tile + (tile_y * tiles_per_row + tile_x) * 2) & 0x3FF
+                                } else {
+                                    (spr.raw_tile + tile_y * tiles_per_row + tile_x) & 0x3FF
+                                }
+                            } else {
+                                if spr.is_8bpp {
+                                    let tile_col = ((spr.raw_tile & 0x1F) + tile_x * 2) & 0x1F;
+                                    let tile_row = (((spr.raw_tile >> 5) & 0x1F) + tile_y) & 0x1F;
+                                    (tile_row * 32 + tile_col) & 0x3FF
+                                } else {
+                                    let tile_col = ((spr.raw_tile & 0x1F) + tile_x) & 0x1F;
+                                    let tile_row = (((spr.raw_tile >> 5) & 0x1F) + tile_y) & 0x1F;
+                                    (tile_row * 32 + tile_col) & 0x3FF
+                                }
+                            };
+
+                            let (color_idx, is_trans) = if spr.is_8bpp {
+                                let tile_addr = obj_char_base + tile_offset * 32 + in_tile_y * 8 + in_tile_x;
+                                if tile_addr < ppu.vram.len() {
+                                    let idx = ppu.vram[tile_addr];
+                                    (idx as usize, idx == 0)
+                                } else {
+                                    (0, true)
+                                }
+                            } else {
+                                let tile_addr = obj_char_base + tile_offset * 32 + in_tile_y * 4 + (in_tile_x / 2);
+                                if tile_addr < ppu.vram.len() {
+                                    let byte = ppu.vram[tile_addr];
+                                    let idx = if in_tile_x % 2 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
+                                    (spr.pal_num * 16 + (idx as usize), idx == 0)
+                                } else {
+                                    (0, true)
+                                }
+                            };
+
+                            if !is_trans {
+                                let pal_addr = 0x200 + color_idx * 2;
+                                if pal_addr + 1 < ppu.palette_ram.len() {
+                                    let c = (ppu.palette_ram[pal_addr] as u16)
+                                        | ((ppu.palette_ram[pal_addr + 1] as u16) << 8);
+                                    if obj_pixel.as_ref().map_or(true, |prev| spr.priority <= prev.priority) {
+                                        obj_pixel = Some(Pixel {
+                                            color: c,
+                                            layer: 4,
+                                            priority: spr.priority,
+                                            is_transparent: false,
+                                            is_obj_alpha: spr.is_semi_trans,
+                                        });
+                                    }
                                 }
                             }
                         }

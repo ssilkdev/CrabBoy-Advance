@@ -1,0 +1,46 @@
+{
+  "name": "Sample Crab Hero HD Pack",
+  "version": "1.0.0",
+  "author": "CrabBoy Advance Team",
+  "game_title": "Sample GBA Game",
+  "game_code": "SMPL",
+  "scale": 4,
+  "replacements": [
+    {
+      "type": "sprite",
+      "hash": "1000000000000001",
+      "palette_hash": null,
+      "file": "sprites/hero_idle.png",
+      "width": 64,
+      "height": 64,
+      "recolor": false
+    },
+    {
+      "type": "sprite",
+      "hash": "1000000000000002",
+      "palette_hash": null,
+      "file": "sprites/hero_walk1.png",
+      "width": 64,
+      "height": 64,
+      "recolor": false
+    },
+    {
+      "type": "sprite",
+      "hash": "1000000000000003",
+      "palette_hash": null,
+      "file": "sprites/hero_walk2.png",
+      "width": 64,
+      "height": 64,
+      "recolor": false
+    },
+    {
+      "type": "sprite",
+      "hash": "1000000000000001",
+      "palette_hash": "2000000000000001",
+      "file": "sprites/hero_fire.png",
+      "width": 64,
+      "height": 64,
+      "recolor": false
+    }
+  ]
+}

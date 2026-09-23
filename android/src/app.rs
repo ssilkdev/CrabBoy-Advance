@@ -374,9 +374,9 @@ impl CrabBoyApp {
     fn upload_frame(&mut self, ctx: &egui::Context) {
         let Some(game) = self.game.as_ref() else { return };
 
-        // HD Mode 7 Rendering (ROADMAP M6)
+        // HD Mode 7 & HD Pack Rendering (ROADMAP M6, M7)
         if let Core::Gba(ref gba) = game.core {
-            if self.hd_mode7.scale != HdScale::Off {
+            if self.hd_mode7.scale != HdScale::Off || gba.is_hd_pack_enabled() {
                 if let Some(hd) = gba.render_hd_frame() {
                     if !self.hd_mode7.ssaa {
                         let hd_size = [hd.width, hd.height];

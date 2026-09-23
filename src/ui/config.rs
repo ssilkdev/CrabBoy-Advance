@@ -98,6 +98,8 @@ pub struct RenderConfig {
     pub frame_blend: String,
     pub custom_shader_path: Option<PathBuf>,
     pub hd_mode7: crate::gba::ppu::hd_mode7::HdMode7Config,
+    pub hd_pack_path: Option<PathBuf>,
+    pub hd_pack_enabled: bool,
 }
 
 impl Default for RenderConfig {
@@ -107,6 +109,8 @@ impl Default for RenderConfig {
             frame_blend: "off".to_string(),
             custom_shader_path: None,
             hd_mode7: crate::gba::ppu::hd_mode7::HdMode7Config::default(),
+            hd_pack_path: None,
+            hd_pack_enabled: true,
         }
     }
 }
