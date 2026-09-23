@@ -3,6 +3,7 @@
 
 pub mod audio_output;
 pub mod dmg;
+pub mod ff_stretch;
 
 pub use audio_output::{AudioOutput, SurroundMode};
 pub use dmg::DmgAudio;

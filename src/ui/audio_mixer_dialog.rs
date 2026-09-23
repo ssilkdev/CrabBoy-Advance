@@ -80,6 +80,10 @@ impl AudioMixerDialog {
                     gba.mmu.apu.audio_output.set_fast_forward_mode(1);
                     *toast = Some("Fast-Forward: Smart Mute active".to_string());
                 }
+                if ui.radio_value(&mut ff_mode, 2, "Pitch-Preserved (skip ahead in short grains)").clicked() {
+                    gba.mmu.apu.audio_output.set_fast_forward_mode(2);
+                    *toast = Some("Fast-Forward: pitch-preserved audio active".to_string());
+                }
                 if ui.radio_value(&mut ff_mode, 0, "Unmodified Audio (High-Speed Pitch)").clicked() {
                     gba.mmu.apu.audio_output.set_fast_forward_mode(0);
                     *toast = Some("Fast-Forward: Raw audio active".to_string());

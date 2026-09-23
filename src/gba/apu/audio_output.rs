@@ -22,6 +22,10 @@ impl SurroundMode {
     }
 }
 
+/// Output-queue fill level (interleaved samples, ~45 ms of stereo at
+/// 44.1 kHz) the fast-forward decimator holds the queue at.
+const FF_TARGET_FILL: usize = 4000;
+
 pub struct AudioOutput {
     _stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<VecDeque<f32>>>,
@@ -35,6 +39,8 @@ pub struct AudioOutput {
     pub channel_mute_mask: Arc<AtomicU8>,
     pub fast_forward_mode: Arc<AtomicU8>, // 0: Normal, 1: Smart Mute, 2: Pitch-Preserved Decimate
     pub is_fast_forwarding: Arc<AtomicBool>,
+    /// Grain decimator for fast-forward mode 2 (see `ff_stretch`).
+    ff_decimator: Mutex<super::ff_stretch::GrainDecimator>,
 }
 
 impl Default for AudioOutput {
@@ -76,6 +82,7 @@ impl AudioOutput {
             channel_mute_mask,
             fast_forward_mode,
             is_fast_forwarding,
+            ff_decimator: Mutex::new(super::ff_stretch::GrainDecimator::new()),
         }
     }
 
@@ -317,6 +324,31 @@ impl AudioOutput {
 
     pub fn push_sample_batch(&self, samples: &[f32]) {
         if self.muted || samples.is_empty() {
+            return;
+        }
+
+        // Fast-forward mode 2: keep whole grains only while the queue has
+        // room (pitch unchanged, crossfaded joins). Outside fast-forward,
+        // hand back anything the decimator still holds first.
+        let decimate = self.is_fast_forwarding() && self.fast_forward_mode() == 2;
+        let staged: Option<Vec<f32>> = match self.ff_decimator.lock() {
+            Ok(mut d) if decimate => {
+                let q_len = self.buffer_len();
+                Some(d.process(samples, q_len, FF_TARGET_FILL))
+            }
+            Ok(mut d) => {
+                let mut held = d.flush();
+                if held.is_empty() {
+                    None
+                } else {
+                    held.extend_from_slice(samples);
+                    Some(held)
+                }
+            }
+            Err(_) => None,
+        };
+        let samples: &[f32] = staged.as_deref().unwrap_or(samples);
+        if samples.is_empty() {
             return;
         }
 
