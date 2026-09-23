@@ -5,7 +5,9 @@ pub mod ai_agent_dialog;
 pub mod audio_mixer_dialog;
 pub mod bezels;
 pub mod cheats_dialog;
+pub mod config;
 pub mod controls;
+pub mod controls_dialog;
 pub mod debug;
 pub mod emu_core;
 pub mod game_guide;
@@ -31,7 +33,7 @@ use audio_mixer_dialog::AudioMixerDialog;
 use bezels::{BezelMode, BezelRenderer};
 use cheats_dialog::CheatsDialog;
 use gif_recorder::GifRecorder;
-use guide_dialog::GuideDialog;
+use guide_dialog::{GuideDialog, GuidePadInput};
 use link_dialog::LinkDialog;
 use pokemon_companion::PokemonCompanion;
 use sensors_dialog::SensorsDialog;
@@ -46,7 +48,9 @@ use crate::gba::apu::SurroundMode;
 use crate::gba::keypad::Key;
 use crate::gba::Gba;
 use emu_core::ConsoleKind;
-use controls::{handle_input, GamepadManager, KeyBindings};
+use config::AppConfig;
+use controls::{handle_input, GamepadManager, KeyBindings, PadAction};
+use controls_dialog::ControlsDialog;
 use debug::DebugWindows;
 use rewind::RewindManager;
 use save_manager::SaveStateManager;
@@ -90,6 +94,7 @@ pub struct GbaApp {
     pub ai_agent: AiAgent,
     pub ai_agent_dialog: AiAgentDialog,
     pub guide_dialog: GuideDialog,
+    pub controls_dialog: ControlsDialog,
     pub updater: UpdateManager,
     pub updater_dialog: UpdaterDialog,
 
@@ -118,7 +123,10 @@ pub struct GbaApp {
 
     // UI state
     toast_message: Option<(String, Instant)>,
-    show_controls_dialog: bool,
+    /// Set whenever a controller setting changed; debounced and flushed to
+    /// config.json so a remap survives a crash, not just a clean exit.
+    config_dirty: bool,
+    last_config_flush: Instant,
     show_save_manager_dialog: bool,
     show_rtc_dialog: bool,
     pub show_about_dialog: bool,
@@ -140,6 +148,11 @@ impl GbaApp {
         let gba = Gba::new();
         let loaded_rom_name = "No ROM Loaded".to_string();
 
+        // Persisted controller mappings and keyboard bindings. Load failures
+        // are non-fatal by design: a broken config must never stop the
+        // emulator from starting, it just falls back to stock bindings.
+        let config = AppConfig::load();
+
         // Clean up any lingering backup executable from previous updates
         UpdateManager::cleanup_old_exe();
 
@@ -155,8 +168,8 @@ impl GbaApp {
             gb_force_dmg: false,
             screen_renderer: ScreenRenderer::new(),
             debug_windows: DebugWindows::default(),
-            key_bindings: KeyBindings::default(),
-            gamepad_manager: GamepadManager::new(),
+            key_bindings: config.keyboard.clone(),
+            gamepad_manager: GamepadManager::new(config.controllers.clone()),
             rewind_manager: RewindManager::default(),
             save_manager: SaveStateManager::default(),
             cheats_dialog: CheatsDialog::new(),
@@ -171,6 +184,7 @@ impl GbaApp {
             ai_agent: AiAgent::new(),
             ai_agent_dialog: AiAgentDialog::new(),
             guide_dialog: GuideDialog::new(),
+            controls_dialog: ControlsDialog::new(),
             updater,
             updater_dialog: UpdaterDialog::new(),
             display_filter: DisplayFilter::Crisp,
@@ -193,7 +207,8 @@ impl GbaApp {
             last_frame_instant: Instant::now(),
             frame_accumulator: Duration::ZERO,
             toast_message: Some(("Welcome to GBA Simulator".to_string(), Instant::now())),
-            show_controls_dialog: false,
+            config_dirty: false,
+            last_config_flush: Instant::now(),
             show_save_manager_dialog: false,
             show_rtc_dialog: false,
             show_about_dialog: false,
@@ -351,6 +366,26 @@ impl GbaApp {
         })
     }
 
+    /// Writes controller + keyboard settings to the user's config file.
+    ///
+    /// Failures are surfaced as a toast rather than swallowed: a user who
+    /// remaps their pad and gets nothing saved deserves to know why (a
+    /// read-only home directory, a full disk) instead of silently losing the
+    /// work again next launch.
+    pub fn flush_config(&mut self) {
+        self.config_dirty = false;
+        self.last_config_flush = Instant::now();
+        let cfg = AppConfig {
+            version: config::CONFIG_VERSION,
+            controllers: self.gamepad_manager.settings.clone(),
+            keyboard: self.key_bindings.clone(),
+        };
+        if let Err(e) = cfg.save() {
+            log::warn!("Could not save config: {}", e);
+            self.set_toast(format!("⚠ Settings not saved: {}", e));
+        }
+    }
+
     pub fn set_toast(&mut self, msg: impl Into<String>) {
         self.toast_message = Some((msg.into(), Instant::now()));
     }
@@ -404,6 +439,14 @@ impl GbaApp {
 }
 
 impl eframe::App for GbaApp {
+    /// Last-chance flush: eframe calls this on window close, catching any edit
+    /// still inside the 600ms debounce window.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.config_dirty {
+            self.flush_config();
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle drag and drop: ROMs load into the emulator, guides (PDF/text)
         // go into the AI agent's knowledge base. Dropping a walkthrough used to
@@ -439,7 +482,11 @@ impl eframe::App for GbaApp {
         // user types.
         let typing = ctx.wants_keyboard_input();
         let mut key_events = Vec::new();
-        handle_input(ctx, &self.key_bindings, &mut self.gamepad_manager, &mut |key: Key, pressed: bool| {
+        // Tell the pad layer whether the guide currently owns the controller,
+        // BEFORE polling: the poll decides on that basis whether game buttons
+        // are emitted at all.
+        self.gamepad_manager.guide_open = self.guide_dialog.is_open;
+        let pad = handle_input(ctx, &self.key_bindings, &mut self.gamepad_manager, &mut |key: Key, pressed: bool| {
             key_events.push((key, pressed));
         });
         if typing {
@@ -459,11 +506,52 @@ impl eframe::App for GbaApp {
             }
         }
 
-        // Fullscreen Toggle (F11 / Alt+Enter / Gamepad Select+Start)
+        // Surface hotplug events. A controller that connects or drops mid-game
+        // is something the player must be told about immediately — silently
+        // losing input is the single worst controller-emulator failure mode.
+        if let Some(msg) = self.gamepad_manager.hotplug_message.take() {
+            self.set_toast(msg);
+        }
+
+        // Persist controller edits made in the config dialog. Debounced so
+        // dragging a deadzone slider does not issue a write per frame.
+        if self.controls_dialog.dirty {
+            self.controls_dialog.dirty = false;
+            self.config_dirty = true;
+        }
+        if self.config_dirty && self.last_config_flush.elapsed() > Duration::from_millis(600) {
+            self.flush_config();
+        }
+
+        // ---- Controller-driven strategy guide ---------------------------
+        // Handled before the game hotkeys so a guide binding that shares a
+        // button with a game action cannot double-fire.
+        if pad.pressed(PadAction::GuideToggle) {
+            self.guide_dialog.is_open = !self.guide_dialog.is_open;
+            self.set_toast(if self.guide_dialog.is_open {
+                "📖 Strategy Guide opened (controller)"
+            } else {
+                "Strategy Guide closed"
+            });
+        }
+        if self.guide_dialog.is_open {
+            let dt = ctx.input(|i| i.stable_dt);
+            self.guide_dialog.apply_pad_input(
+                GuidePadInput {
+                    scroll: pad.guide_scroll_axis,
+                    scroll_speed: self.gamepad_manager.active_profile().guide_scroll_speed,
+                    prev_page: pad.pressed(PadAction::GuidePrevPage),
+                    next_page: pad.pressed(PadAction::GuideNextPage),
+                },
+                dt,
+            );
+        }
+
+        // Fullscreen Toggle (F11 / Alt+Enter / a bound controller combo)
         let wants_fullscreen = ctx.input(|i| {
             i.key_pressed(self.key_bindings.fullscreen)
                 || (i.modifiers.alt && i.key_pressed(egui::Key::Enter))
-        }) || self.gamepad_manager.fullscreen_pressed;
+        }) || pad.pressed(PadAction::Fullscreen);
 
         if wants_fullscreen {
             self.is_fullscreen = !self.is_fullscreen;
@@ -509,18 +597,21 @@ impl eframe::App for GbaApp {
         });
 
         // Gamepad Hotkeys
-        if self.gamepad_manager.pause_button_pressed {
+        if pad.pressed(PadAction::Screenshot) {
+            self.take_screenshot();
+        }
+        if pad.pressed(PadAction::Pause) {
             self.is_paused = !self.is_paused;
             self.set_toast(if self.is_paused { "Paused (Controller)" } else { "Resumed (Controller)" });
         }
-        if self.gamepad_manager.quick_save_pressed {
+        if pad.pressed(PadAction::QuickSave) {
             let slot = self.save_manager.active_slot;
             match self.save_active_slot(slot) {
                 Ok(()) => self.set_toast(format!("Saved to Slot {} (Controller)", slot)),
                 Err(e) => self.set_toast(e),
             }
         }
-        if self.gamepad_manager.quick_load_pressed {
+        if pad.pressed(PadAction::QuickLoad) {
             let slot = self.save_manager.active_slot;
             match self.load_active_slot(slot) {
                 Ok(()) => self.set_toast(format!("Loaded Slot {} (Controller)", slot)),
@@ -656,10 +747,10 @@ impl eframe::App for GbaApp {
         }
 
         // Turbo and Rewind States
-        let wants_rewind = ctx.input(|i| i.key_down(self.key_bindings.rewind)) || self.gamepad_manager.rewind_button_down;
+        let wants_rewind = ctx.input(|i| i.key_down(self.key_bindings.rewind)) || pad.held(PadAction::Rewind);
         self.is_rewinding = wants_rewind && !self.is_paused;
 
-        let is_turbo = ctx.input(|i| i.key_down(self.key_bindings.turbo)) || self.gamepad_manager.turbo_button_pressed;
+        let is_turbo = ctx.input(|i| i.key_down(self.key_bindings.turbo)) || pad.held(PadAction::Turbo);
         let effective_speed = if is_turbo { 4 } else { self.speed_multiplier };
 
         // Fixed-Time Accumulator for hardware-accurate 59.7275 Hz / 60 FPS frame pacing
@@ -1055,7 +1146,7 @@ impl eframe::App for GbaApp {
 
                 ui.menu_button("Controls", |ui| {
                     if ui.button("Configure Controls & Gamepad...").clicked() {
-                        self.show_controls_dialog = true;
+                        self.controls_dialog.open();
                         ui.close_menu();
                     }
                 });
@@ -1220,12 +1311,34 @@ impl eframe::App for GbaApp {
                         self.set_toast(format!("📐 Aspect Ratio: {}", self.aspect_ratio.display_name()));
                     }
 
-                    // Gamepad connection status badge
-                    if let Some(ref gp_name) = self.gamepad_manager.connected_gamepad_name {
-                        let short_name: String = gp_name.chars().take(24).collect();
-                        ui.label(RichText::new(format!("🎮 {}", short_name)).color(Color32::from_rgb(100, 220, 100)).small());
+                    // Gamepad status badge. Clicking it opens the controller
+                    // config — the badge is the first thing a user looks at
+                    // when a pad misbehaves, so it should also be the fix.
+                    let pad_count = self.gamepad_manager.pads.len();
+                    let badge = match self.gamepad_manager.active_pad_name() {
+                        Some(name) => {
+                            let short: String = name.chars().take(22).collect();
+                            let extra = if pad_count > 1 {
+                                format!(" +{}", pad_count - 1)
+                            } else {
+                                String::new()
+                            };
+                            RichText::new(format!("🎮 {}{}", short, extra))
+                                .color(Color32::from_rgb(100, 220, 100))
+                                .small()
+                        }
+                        None => RichText::new("🎮 No Controller").color(Color32::DARK_GRAY).small(),
+                    };
+                    let hover = if pad_count > 1 {
+                        format!("{} controllers connected — click to choose Player 1 or remap", pad_count)
                     } else {
-                        ui.label(RichText::new("🎮 No Controller").color(Color32::DARK_GRAY).small());
+                        "Click to configure controllers and remap buttons".to_string()
+                    };
+                    if ui.add(egui::Label::new(badge).sense(Sense::click()))
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
+                        self.controls_dialog.open();
                     }
 
                     // Console badge: which core is actually executing.
@@ -1245,62 +1358,14 @@ impl eframe::App for GbaApp {
         // Debug Floating Windows
         self.debug_windows.show(ctx, &mut self.gba);
 
-        // Keybindings & Gamepad Dialog
-        if self.show_controls_dialog {
-            egui::Window::new("Controls & Gamepad Configuration")
-                .open(&mut self.show_controls_dialog)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.heading("🎮 Gamepad (8BitDo & XInput)");
-                    ui.separator();
-                    if let Some(ref name) = self.gamepad_manager.connected_gamepad_name {
-                        ui.label(RichText::new(format!("Connected: {}", name)).color(Color32::GREEN).strong());
-                    } else {
-                        ui.label(RichText::new("No controller detected. Plug in your 8BitDo controller (2.4GHz dongle, Bluetooth, or USB).").color(Color32::YELLOW));
-                    }
-
-                    ui.add_space(6.0);
-                    ui.label("Face Button Layout:");
-                    ui.radio_value(&mut self.gamepad_manager.swap_ab, false, "8BitDo / Nintendo Layout (East=A, South=B) [Recommended]");
-                    ui.radio_value(&mut self.gamepad_manager.swap_ab, true, "Xbox Standard Layout (South=A, East=B)");
-
-                    ui.add_space(4.0);
-                    ui.add(egui::Slider::new(&mut self.gamepad_manager.deadzone, 0.1..=0.8).text("Analog Stick Deadzone"));
-
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Controller Mappings:").strong());
-                    egui::Grid::new("gamepad_mapping_grid").striped(true).show(ui, |ui| {
-                        ui.label("Movement:"); ui.label("D-Pad or Left Analog Stick"); ui.end_row();
-                        ui.label("A / B Buttons:"); ui.label("Physical A / B (or X / Y as alternates)"); ui.end_row();
-                        ui.label("L / R Shoulders:"); ui.label("Bumpers (L1/R1) or Triggers (L2/R2)"); ui.end_row();
-                        ui.label("Start / Select:"); ui.label("Plus (+) and Minus (-) buttons"); ui.end_row();
-                        ui.label("Turbo 4x:"); ui.label("Right Stick Click (R3)"); ui.end_row();
-                        ui.label("Quick Save:"); ui.label("Left Stick Click (L3)"); ui.end_row();
-                        ui.label("Pause:"); ui.label("Home / Guide button"); ui.end_row();
-                    });
-
-                    ui.add_space(12.0);
-                    ui.heading("⌨ Keyboard Controls");
-                    ui.separator();
-                    egui::Grid::new("controls_grid").striped(true).show(ui, |ui| {
-                        ui.label("D-Pad:"); ui.label("Arrow Keys"); ui.end_row();
-                        ui.label("A Button:"); ui.label("Z"); ui.end_row();
-                        ui.label("B Button:"); ui.label("X"); ui.end_row();
-                        ui.label("L Shoulder:"); ui.label("A"); ui.end_row();
-                        ui.label("R Shoulder:"); ui.label("S"); ui.end_row();
-                        ui.label("Start:"); ui.label("Enter"); ui.end_row();
-                        ui.label("Select:"); ui.label("Backspace"); ui.end_row();
-                        ui.label("Turbo (Hold):"); ui.label("Space"); ui.end_row();
-                        ui.label("Pause:"); ui.label("P"); ui.end_row();
-                        ui.label("Quick Save / Load:"); ui.label("F5 / F8"); ui.end_row();
-                        ui.label("Reset:"); ui.label("Ctrl+R"); ui.end_row();
-                    });
-
-                    ui.add_space(8.0);
-                    if ui.button("📖 Open Illustrated Strategy Guide & Manual (F1)").clicked() {
-                        self.guide_dialog.open_at_page(2);
-                    }
-                });
+        // Controllers & Key Mapping dialog (pad selection, profiles, remapping)
+        {
+            let mut dialog_toast: Option<String> = None;
+            self.controls_dialog
+                .show(ctx, &mut self.gamepad_manager, &mut dialog_toast);
+            if let Some(t) = dialog_toast {
+                self.set_toast(t);
+            }
         }
 
         // AI Agent live spectator panel (must be declared before CentralPanel

@@ -28,12 +28,31 @@ const CHAPTER_TITLES: [&str; 8] = [
     "Ch 7: TAS Speedrunning & Troubleshooting",
 ];
 
+/// One frame of controller-driven navigation, handed to the guide by the app.
+///
+/// The guide does not poll gilrs itself: the pad is drained once per frame in
+/// `GamepadManager::poll`, and polling it twice would consume the event queue
+/// and break press-edge detection everywhere else.
+#[derive(Default, Clone, Copy)]
+pub struct GuidePadInput {
+    /// Signed scroll speed, -1.0..=1.0 (positive scrolls up).
+    pub scroll: f32,
+    /// Points per second at full deflection.
+    pub scroll_speed: f32,
+    pub prev_page: bool,
+    pub next_page: bool,
+}
+
 pub struct GuideDialog {
     pub is_open: bool,
     pub current_page: usize,
     textures: [Option<TextureHandle>; 8],
     zoom: f32,
     fit_to_width: bool,
+    /// Pending controller scroll, in points, applied inside the ScrollArea.
+    pad_scroll_delta: f32,
+    /// Shows the on-screen controller hint strip while a pad is driving.
+    pad_active: bool,
 }
 
 impl Default for GuideDialog {
@@ -50,6 +69,59 @@ impl GuideDialog {
             textures: [None, None, None, None, None, None, None, None],
             zoom: 1.0,
             fit_to_width: true,
+            pad_scroll_delta: 0.0,
+            pad_active: false,
+        }
+    }
+
+    /// Applies a frame of controller input.
+    ///
+    /// Called before `show` so a page turn requested by the pad is reflected in
+    /// the same frame it was pressed, with no perceptible lag.
+    pub fn apply_pad_input(&mut self, pad: GuidePadInput, dt: f32) {
+        if !self.is_open {
+            self.pad_scroll_delta = 0.0;
+            self.pad_active = false;
+            return;
+        }
+
+        if pad.next_page && self.current_page < 7 {
+            self.current_page += 1;
+        }
+        if pad.prev_page && self.current_page > 0 {
+            self.current_page -= 1;
+        }
+
+        if pad.scroll.abs() > 0.001 {
+            // Cubic response: small deflections creep line by line for careful
+            // reading, full deflection covers a page quickly. A linear ramp
+            // makes precise positioning near-impossible on a stick.
+            let curve = pad.scroll * pad.scroll.abs() * pad.scroll.abs();
+            // Positive scroll means "read upward", i.e. decrease the offset.
+            self.pad_scroll_delta -= curve * pad.scroll_speed * dt.clamp(0.0, 0.1);
+            self.pad_active = true;
+        }
+
+        if pad.prev_page || pad.next_page {
+            self.pad_active = true;
+            // A page turn starts the new page at the top; continuing from the
+            // middle of the previous page's scroll is disorienting.
+            self.pad_scroll_delta = f32::NEG_INFINITY;
+        }
+    }
+
+    /// Consumes the pending controller scroll delta.
+    ///
+    /// Exposed for tests so the scroll response curve and frame-rate
+    /// independence can be asserted headlessly — the real consumer is inside
+    /// `show`, which needs a live egui context.
+    #[doc(hidden)]
+    pub fn take_pad_scroll_delta_for_test(&mut self) -> f32 {
+        let d = std::mem::replace(&mut self.pad_scroll_delta, 0.0);
+        if d == f32::NEG_INFINITY {
+            0.0
+        } else {
+            d
         }
     }
 
@@ -235,9 +307,36 @@ impl GuideDialog {
 
                 self.ensure_page_texture(ctx, page_idx);
 
-                ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                // Controller hint strip: only while a pad is actually driving
+                // the guide, so keyboard/mouse users are not shown a row of
+                // button glyphs they do not care about.
+                if self.pad_active {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("🎮")
+                                .color(Color32::from_rgb(140, 240, 160)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Stick / D-Pad: scroll   ·   L / R: change page   ·   \
+                                 combo again: close",
+                            )
+                            .small()
+                            .color(Color32::from_rgb(160, 200, 240)),
+                        );
+                    });
+                    ui.add_space(2.0);
+                }
+
+                let pad_delta = std::mem::replace(&mut self.pad_scroll_delta, 0.0);
+
+                let mut area = ScrollArea::both().auto_shrink([false, false]);
+                if pad_delta == f32::NEG_INFINITY {
+                    // Page turn: jump to the top of the new page.
+                    area = area.vertical_scroll_offset(0.0);
+                }
+
+                let out = area.show(ui, |ui| {
                         if let Some(ref texture) = self.textures[page_idx] {
                             let tex_size = texture.size_vec2();
                             let aspect_ratio = tex_size.y / tex_size.x;
@@ -259,6 +358,19 @@ impl GuideDialog {
                             });
                         }
                     });
+
+                // Analog scrolling is applied as a delta on the offset egui
+                // just reported, clamped to the content, so pushing the stick
+                // at the end of a page does not silently accumulate an offset
+                // that has to be "unwound" before scrolling back.
+                if pad_delta != 0.0 && pad_delta != f32::NEG_INFINITY {
+                    let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                    let target = (out.state.offset.y + pad_delta).clamp(0.0, max);
+                    let mut st = out.state;
+                    st.offset.y = target;
+                    st.store(ctx, out.id);
+                    ctx.request_repaint();
+                }
             });
 
         self.is_open = is_open;

@@ -192,14 +192,25 @@ mod tests {
 
     #[test]
     fn test_gamepad_manager_initialization() {
-        use gba_simulator::ui::controls::GamepadManager;
+        use gba_simulator::ui::controls::{
+            ControllerSettings, FaceLayout, GamepadManager, PadProfile,
+        };
 
-        let mut mgr = GamepadManager::new();
-        let keys = mgr.poll();
-        assert_eq!(keys.len(), 10);
-        // Default layout should have swap_ab = false (8BitDo / Nintendo layout)
-        assert!(!mgr.swap_ab);
-        assert!((mgr.deadzone - 0.35).abs() < 0.001);
+        // Constructing with stock settings must not panic even on a machine
+        // with no controller (and no gamepad subsystem at all, as in CI).
+        let mut mgr = GamepadManager::new(ControllerSettings::default());
+        let state = mgr.poll();
+        assert_eq!(state.game_keys.len(), 10);
+
+        // The default profile is the 8BitDo Ultimate 2 (Pro): Nintendo face
+        // labelling, and a Hall-effect-appropriate deadzone.
+        let profile = mgr.active_profile();
+        assert_eq!(profile.name, PadProfile::ultimate2_pro().name);
+        assert_eq!(profile.layout, FaceLayout::Nintendo);
+        assert!((profile.deadzone - 0.18).abs() < 0.001);
+
+        // With nothing connected, nothing is pressed.
+        assert!(state.game_keys.iter().all(|k| !*k));
     }
 
     #[test]
