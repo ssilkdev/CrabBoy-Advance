@@ -68,6 +68,28 @@ impl Default for RunAheadSettings {
     }
 }
 
+/// Save folder synchronization configuration (ROADMAP M4).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct SaveSyncConfig {
+    /// User-selected directory to sync saves with (e.g. Syncthing, Dropbox, Drive folder).
+    pub sync_dir: Option<PathBuf>,
+    /// Whether automatic synchronization on load/save is active.
+    pub enabled: bool,
+    /// Maximum number of historical backup copies to retain per save file.
+    pub max_backups: usize,
+}
+
+impl Default for SaveSyncConfig {
+    fn default() -> Self {
+        Self {
+            sync_dir: None,
+            enabled: false,
+            max_backups: 3,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct AppConfig {
@@ -78,6 +100,8 @@ pub struct AppConfig {
     pub keyboard: KeyBindings,
     /// Run-ahead latency reduction settings (ROADMAP M3).
     pub run_ahead: RunAheadSettings,
+    /// Cloud / folder save sync configuration (ROADMAP M4).
+    pub save_sync: SaveSyncConfig,
 }
 
 impl Default for AppConfig {
@@ -87,6 +111,7 @@ impl Default for AppConfig {
             controllers: ControllerSettings::default(),
             keyboard: KeyBindings::default(),
             run_ahead: RunAheadSettings::default(),
+            save_sync: SaveSyncConfig::default(),
         }
     }
 }
@@ -241,5 +266,22 @@ mod tests {
         let emerald = parsed.run_ahead.per_game.get("Pokemon - Emerald Version (USA, Europe)").unwrap();
         assert_eq!(emerald.frames, 2);
         assert!(emerald.second_instance);
+    }
+
+    #[test]
+    fn round_trips_save_sync_settings() {
+        let mut cfg = AppConfig::default();
+        cfg.save_sync.sync_dir = Some(PathBuf::from("/home/user/Syncthing/CrabBoy"));
+        cfg.save_sync.enabled = true;
+        cfg.save_sync.max_backups = 5;
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let parsed: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            parsed.save_sync.sync_dir,
+            Some(PathBuf::from("/home/user/Syncthing/CrabBoy"))
+        );
+        assert!(parsed.save_sync.enabled);
+        assert_eq!(parsed.save_sync.max_backups, 5);
     }
 }

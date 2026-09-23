@@ -83,6 +83,10 @@ impl Flash {
         }
     }
 
+    pub fn save_path(&self) -> Option<&std::path::Path> {
+        self.save_path.as_deref()
+    }
+
     pub fn read(&self, addr: u32) -> u8 {
         let offset = (addr & 0xFFFF) as usize;
 

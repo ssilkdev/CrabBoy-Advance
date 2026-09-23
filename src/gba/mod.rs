@@ -10,6 +10,7 @@ pub mod mmu;
 pub mod ppu;
 pub mod replay;
 pub mod run_ahead;
+pub mod save_sync;
 pub mod state;
 pub mod timer;
 

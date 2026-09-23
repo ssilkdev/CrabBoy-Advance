@@ -18,6 +18,7 @@ pub mod platform;
 pub mod pokemon_companion;
 pub mod rewind;
 pub mod save_manager;
+pub mod save_sync_dialog;
 pub mod screen;
 pub mod screenshot;
 pub mod sensors_dialog;
@@ -36,6 +37,7 @@ use gif_recorder::GifRecorder;
 use guide_dialog::{GuideDialog, GuidePadInput};
 use link_dialog::LinkDialog;
 use pokemon_companion::PokemonCompanion;
+use save_sync_dialog::SaveSyncDialog;
 use sensors_dialog::SensorsDialog;
 use tas::{TasEngine, TasMode};
 use tas_dialog::TasDialog;
@@ -97,10 +99,12 @@ pub struct GbaApp {
     pub controls_dialog: ControlsDialog,
     pub updater: UpdateManager,
     pub updater_dialog: UpdaterDialog,
+    pub save_sync_dialog: SaveSyncDialog,
 
     // Settings
     pub run_ahead: crate::gba::run_ahead::RunAhead,
     pub run_ahead_config: config::RunAheadSettings,
+    pub save_sync_config: config::SaveSyncConfig,
     pub display_filter: DisplayFilter,
     pub nvidia_sharpen: bool,
     pub nvidia_sharpness: f32,
@@ -195,8 +199,10 @@ impl GbaApp {
             controls_dialog: ControlsDialog::new(),
             updater,
             updater_dialog: UpdaterDialog::new(),
+            save_sync_dialog: SaveSyncDialog::new(),
             run_ahead,
             run_ahead_config,
+            save_sync_config: config.save_sync.clone(),
             display_filter: DisplayFilter::Crisp,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
@@ -279,17 +285,30 @@ impl GbaApp {
                 }
                 Err(e) => self.set_toast(format!("Failed to load GB ROM: {}", e)),
             },
-            ConsoleKind::Gba => match self.gba.load_rom(path) {
-                Ok(()) => {
-                    self.gb = None;
-                    self.console = ConsoleKind::Gba;
-                    self.loaded_rom_name = name;
-                    self.rewind_manager.clear();
-                    self.update_run_ahead_for_rom();
-                    self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
+            ConsoleKind::Gba => {
+                if let Some(parent) = path.parent() {
+                    let dirs = vec![PathBuf::from("saves"), parent.to_path_buf()];
+                    if let Some(ref sync_dir) = self.save_sync_config.sync_dir {
+                        if self.save_sync_config.enabled {
+                            let syncer = crate::gba::save_sync::SaveSync::new(sync_dir, dirs)
+                                .with_max_backups(self.save_sync_config.max_backups);
+                            syncer.sync_all();
+                        }
+                    }
                 }
-                Err(e) => self.set_toast(format!("Failed to load ROM: {}", e)),
-            },
+                match self.gba.load_rom(path) {
+                    Ok(()) => {
+                        self.gb = None;
+                        self.console = ConsoleKind::Gba;
+                        self.loaded_rom_name = name;
+                        self.rewind_manager.clear();
+                        self.update_run_ahead_for_rom();
+                        self.sync_saves();
+                        self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
+                    }
+                    Err(e) => self.set_toast(format!("Failed to load ROM: {}", e)),
+                }
+            }
         }
     }
 
@@ -321,13 +340,18 @@ impl GbaApp {
 
     fn save_active_slot(&mut self, slot: usize) -> Result<(), String> {
         let name = self.loaded_rom_name.clone();
-        match self.gb {
+        let res = match self.gb {
             Some(ref gb) => self.save_manager.save_slot(slot, gb, &name),
             None => self.save_manager.save_slot(slot, &self.gba, &name),
+        };
+        if res.is_ok() {
+            self.sync_saves();
         }
+        res
     }
 
     fn load_active_slot(&mut self, slot: usize) -> Result<(), String> {
+        self.sync_saves();
         let name = self.loaded_rom_name.clone();
         match self.gb {
             Some(ref mut gb) => self.save_manager.load_slot(slot, gb, &name),
@@ -401,6 +425,7 @@ impl GbaApp {
             controllers: self.gamepad_manager.settings.clone(),
             keyboard: self.key_bindings.clone(),
             run_ahead: self.run_ahead_config.clone(),
+            save_sync: self.save_sync_config.clone(),
         };
         if let Err(e) = cfg.save() {
             log::warn!("Could not save config: {}", e);
@@ -463,6 +488,49 @@ impl GbaApp {
         } else {
             "Run-ahead: single instance (rollback)".to_string()
         });
+    }
+
+    /// Returns local directories where saves and states reside on this system.
+    pub fn local_save_directories(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![PathBuf::from("saves")];
+        if let Some(ref cart) = self.gba.mmu.cartridge {
+            if let Some(p) = cart.save.save_path() {
+                if let Some(parent) = p.parent() {
+                    let parent_buf = parent.to_path_buf();
+                    if !dirs.contains(&parent_buf) {
+                        dirs.push(parent_buf);
+                    }
+                }
+            }
+        }
+        if let Some(ref gb) = self.gb {
+            if let Some(ref p) = gb.mmu.cart.save_path {
+                if let Some(parent) = p.parent() {
+                    let parent_buf = parent.to_path_buf();
+                    if !dirs.contains(&parent_buf) {
+                        dirs.push(parent_buf);
+                    }
+                }
+            }
+        }
+        dirs
+    }
+
+    /// Sync saves with configured cloud / shared folder (ROADMAP M4).
+    pub fn sync_saves(&mut self) {
+        if !self.save_sync_config.enabled {
+            return;
+        }
+        if let Some(ref sync_dir) = self.save_sync_config.sync_dir {
+            let dirs = self.local_save_directories();
+            let syncer = crate::gba::save_sync::SaveSync::new(sync_dir, dirs)
+                .with_max_backups(self.save_sync_config.max_backups);
+            let report = syncer.sync_all();
+            if report.total_transferred() > 0 {
+                self.set_toast(report.summary());
+            }
+            self.save_sync_dialog.last_report = Some(report);
+        }
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -995,10 +1063,15 @@ impl eframe::App for GbaApp {
                             None => {
                                 if let Some(ref mut cart) = self.gba.mmu.cartridge {
                                     cart.save.sync_to_disk();
+                                    self.sync_saves();
                                     self.set_toast("Battery Save Synced to Disk");
                                 }
                             }
                         }
+                    }
+                    if ui.button("Cloud & Folder Save Sync...").clicked() {
+                        ui.close_menu();
+                        self.save_sync_dialog.is_open = true;
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
@@ -1904,6 +1977,16 @@ impl eframe::App for GbaApp {
         }
         self.guide_dialog.show(ctx, &mut dialog_toast);
         self.updater_dialog.show(ctx, &self.updater, &mut dialog_toast);
+
+        let local_dirs = self.local_save_directories();
+        self.save_sync_dialog.show(
+            ctx,
+            &mut self.save_sync_config,
+            &mut self.config_dirty,
+            &local_dirs,
+            &self.loaded_rom_name,
+            &mut dialog_toast,
+        );
 
         if self.show_about_dialog {
             let mut close_about = false;

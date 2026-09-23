@@ -89,6 +89,10 @@ impl Eeprom {
         }
     }
 
+    pub fn save_path(&self) -> Option<&std::path::Path> {
+        self.save_path.as_deref()
+    }
+
     fn ensure_size(&mut self, size: EepromSize) {
         if self.size == size {
             return;

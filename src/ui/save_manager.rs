@@ -47,6 +47,12 @@ impl SaveStateManager {
         self.saves_dir.join(format!("{}_slot{}.state", safe_name, slot))
     }
 
+    /// Android primary save-state path ({safe_name}.state) corresponding to Slot 0.
+    pub fn slot_0_alias_path(&self, rom_name: &str) -> PathBuf {
+        let safe_name = Self::sanitize_rom_name(rom_name);
+        self.saves_dir.join(format!("{safe_name}.state"))
+    }
+
     pub fn save_slot<C: SnapshotCore + ?Sized>(
         &mut self,
         slot: usize,
@@ -61,6 +67,12 @@ impl SaveStateManager {
 
         if let Err(e) = fs::write(&path, &data) {
             return Err(format!("Failed to write save state to disk: {}", e));
+        }
+
+        // Also update Android primary state alias for slot 0
+        if slot_idx == 0 {
+            let alt = self.slot_0_alias_path(rom_name);
+            let _ = fs::write(&alt, &data);
         }
 
         self.memory_cache[slot_idx] = Some(data);
@@ -84,6 +96,17 @@ impl SaveStateManager {
 
         // Fall back to reading from disk
         let path = self.slot_file_path(rom_name, slot_idx);
+        let path = if !path.exists() && slot_idx == 0 {
+            let alt = self.slot_0_alias_path(rom_name);
+            if alt.exists() {
+                alt
+            } else {
+                path
+            }
+        } else {
+            path
+        };
+
         if !path.exists() {
             return Err(format!("Save Slot {} is empty", slot_idx));
         }
@@ -100,6 +123,16 @@ impl SaveStateManager {
     pub fn get_slot_metadata(&self, slot: usize, rom_name: &str) -> SlotMetadata {
         let slot_idx = slot.min(9);
         let path = self.slot_file_path(rom_name, slot_idx);
+        let path = if !path.exists() && slot_idx == 0 {
+            let alt = self.slot_0_alias_path(rom_name);
+            if alt.exists() {
+                alt
+            } else {
+                path
+            }
+        } else {
+            path
+        };
 
         if let Ok(meta) = fs::metadata(&path) {
             let size = meta.len();
@@ -145,5 +178,9 @@ impl SaveStateManager {
         self.memory_cache[slot_idx] = None;
         let path = self.slot_file_path(rom_name, slot_idx);
         let _ = fs::remove_file(path);
+        if slot_idx == 0 {
+            let alt = self.slot_0_alias_path(rom_name);
+            let _ = fs::remove_file(alt);
+        }
     }
 }

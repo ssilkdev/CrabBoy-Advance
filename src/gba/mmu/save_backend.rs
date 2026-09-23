@@ -62,6 +62,15 @@ impl SaveBackend {
         }
     }
 
+    pub fn save_path(&self) -> Option<&std::path::Path> {
+        match self {
+            SaveBackend::None => None,
+            SaveBackend::Sram(s) => s.save_path(),
+            SaveBackend::Flash(f) => f.save_path(),
+            SaveBackend::Eeprom(e) => e.save_path(),
+        }
+    }
+
     /// Read from the 0x0E/0x0F (SRAM/Flash) address window. EEPROM is not
     /// addressed here -- it lives in the 0x0D window and is handled by the
     /// DMA engine directly (see `Mmu::execute_dma_channel`).
