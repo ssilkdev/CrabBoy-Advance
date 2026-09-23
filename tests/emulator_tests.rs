@@ -595,6 +595,15 @@ mod tests {
         let res = recorder.stop_and_save("unit_test");
         assert!(res.is_ok());
         let (path, _) = res.unwrap();
+        // Encoding runs on a background thread; wait for it to report.
+        let t0 = std::time::Instant::now();
+        let mut finished = Vec::new();
+        while finished.is_empty() && t0.elapsed() < std::time::Duration::from_secs(10) {
+            finished = recorder.poll_finished();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(finished.as_slice(), [Ok(_)]), "{finished:?}");
+        assert!(!recorder.is_encoding());
         assert!(path.exists());
 
         let bytes = std::fs::read(&path).unwrap();

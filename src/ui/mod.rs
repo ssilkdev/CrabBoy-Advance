@@ -458,6 +458,16 @@ impl eframe::App for GbaApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // GIF clips encode on a background thread; report when they land.
+        for res in self.gif_recorder.poll_finished() {
+            match res {
+                Ok(name) => self.set_toast(format!("🎥 Saved GIF: {}", name)),
+                Err(e) => self.set_toast(format!("GIF Error: {}", e)),
+            }
+        }
+        if self.gif_recorder.is_encoding() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         // Handle drag and drop: ROMs load into the emulator, guides (PDF/text)
         // go into the AI agent's knowledge base. Dropping a walkthrough used to
         // be interpreted as a ROM and fail with a confusing cartridge error.
@@ -685,7 +695,7 @@ impl eframe::App for GbaApp {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::F12) {
                 if self.gif_recorder.is_recording {
                     match self.gif_recorder.stop_and_save(&self.loaded_rom_name) {
-                        Ok((_p, name)) => self.set_toast(format!("🎥 Saved GIF: {}", name)),
+                        Ok((_p, name)) => self.set_toast(format!("🎥 Encoding GIF: {}…", name)),
                         Err(e) => self.set_toast(format!("GIF Error: {}", e)),
                     }
                 } else {
@@ -1120,7 +1130,7 @@ impl eframe::App for GbaApp {
                         ui.close_menu();
                         if self.gif_recorder.is_recording {
                             match self.gif_recorder.stop_and_save(&self.loaded_rom_name) {
-                                Ok((_p, name)) => self.set_toast(format!("🎥 Saved GIF: {}", name)),
+                                Ok((_p, name)) => self.set_toast(format!("🎥 Encoding GIF: {}…", name)),
                                 Err(e) => self.set_toast(format!("GIF Error: {}", e)),
                             }
                         } else {

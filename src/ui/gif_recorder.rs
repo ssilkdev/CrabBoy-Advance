@@ -2,7 +2,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Result of a background GIF encode: the saved file name, or an error
+/// message.
+pub type EncodeResult = Result<String, String>;
 
 pub struct GifRecorder {
     pub is_recording: bool,
@@ -13,6 +18,8 @@ pub struct GifRecorder {
     captured_frames: Vec<Vec<u8>>, // Palette index frames (240x160)
     pub width: usize,
     pub height: usize,
+    /// Encodes running on background threads; poll with `poll_finished`.
+    pending: Vec<mpsc::Receiver<EncodeResult>>,
 }
 
 impl Default for GifRecorder {
@@ -32,6 +39,7 @@ impl GifRecorder {
             captured_frames: Vec::with_capacity(300),
             width: 240,
             height: 160,
+            pending: Vec::new(),
         }
     }
 
@@ -42,9 +50,14 @@ impl GifRecorder {
         self.captured_frames.clear();
     }
 
+    /// Stop recording and encode the clip on a background thread (LZW
+    /// encoding of up to 300 frames takes long enough to stall the UI and
+    /// emulation if done inline; AI_AGENT_FIX_DESIGN Phase 3). Returns the
+    /// file name that will be written; the outcome arrives via
+    /// `poll_finished`.
     pub fn stop_and_save(&mut self, rom_name: &str) -> std::io::Result<(PathBuf, String)> {
         self.is_recording = false;
-        let _ = fs::create_dir_all("recordings");
+        fs::create_dir_all("recordings")?;
 
         let safe_name: String = rom_name
             .chars()
@@ -55,13 +68,41 @@ impl GifRecorder {
         let filename = format!("{}_{}.gif", safe_name, now);
         let path = Path::new("recordings").join(&filename);
 
-        if !self.captured_frames.is_empty() {
-            encode_gif(&path, self.width, self.height, &self.captured_frames, 3)?;
-        }
-
-        self.captured_frames.clear();
+        let frames = std::mem::take(&mut self.captured_frames);
         self.frames_recorded = 0;
+        if !frames.is_empty() {
+            let (tx, rx) = mpsc::channel();
+            let (w, h) = (self.width, self.height);
+            let (out, name) = (path.clone(), filename.clone());
+            std::thread::spawn(move || {
+                let res = encode_gif(&out, w, h, &frames, 3).map(|_| name).map_err(|e| e.to_string());
+                let _ = tx.send(res);
+            });
+            self.pending.push(rx);
+        }
         Ok((path, filename))
+    }
+
+    /// Whether an encode is still running.
+    pub fn is_encoding(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Collect finished background encodes (call once per UI frame).
+    pub fn poll_finished(&mut self) -> Vec<EncodeResult> {
+        let mut done = Vec::new();
+        self.pending.retain(|rx| match rx.try_recv() {
+            Ok(r) => {
+                done.push(r);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                done.push(Err("GIF encoder thread exited".to_string()));
+                false
+            }
+        });
+        done
     }
 
     /// Captures a 240x160 RGBA framebuffer if currently recording
