@@ -312,3 +312,23 @@ impl Arm7Tdmi {
         let _ = comment;
     }
 }
+
+/// ARM7TDMI LDRH: a misaligned halfword load reads the aligned halfword and
+/// rotates the *32-bit* result right by 8, so the low byte lands in bits
+/// 24-31 (jsmolka arm.gba #408, thumb.gba #211). ROADMAP M1.
+#[inline(always)]
+pub fn load_halfword(mmu: &crate::gba::mmu::Mmu, addr: u32) -> u32 {
+    let val = mmu.read16(addr & !1) as u32;
+    val.rotate_right((addr & 1) * 8)
+}
+
+/// ARM7TDMI LDRSH: a misaligned signed halfword load returns the *byte* at
+/// the address, sign-extended (it behaves like LDRSB). jsmolka #409.
+#[inline(always)]
+pub fn load_signed_halfword(mmu: &crate::gba::mmu::Mmu, addr: u32) -> u32 {
+    if addr & 1 != 0 {
+        mmu.read8(addr) as i8 as i32 as u32
+    } else {
+        mmu.read16(addr) as i16 as i32 as u32
+    }
+}

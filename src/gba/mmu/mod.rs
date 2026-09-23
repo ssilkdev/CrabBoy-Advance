@@ -43,7 +43,11 @@ pub struct Mmu {
     pub post_flg: u8,
     pub haltcnt: u8,
 
-    pub last_read: u32,
+    /// Open-bus value: what a read from unmapped memory or a write-only IO
+    /// register returns. On the ARM7TDMI this is the most recently
+    /// prefetched opcode, which the CPU updates before each instruction
+    /// (see `set_open_bus_*` in cpu/arm.rs and cpu/thumb.rs). ROADMAP M1.
+    pub open_bus: u32,
 
     pub flight_recorder: FlightRecorder,
     pub current_pc: u32,
@@ -129,7 +133,7 @@ impl Mmu {
             waitcnt: 0,
             post_flg: 0,
             haltcnt: 0,
-            last_read: 0,
+            open_bus: 0,
             flight_recorder: FlightRecorder::new(),
             current_pc: 0,
             bios_latch: BIOS_LATCH_BOOT,
@@ -162,6 +166,10 @@ impl Mmu {
                 self.iwram[off]
             }
             0x04 if debug_port::DebugPort::contains(addr) => self.debug_port.read8(addr),
+            // Only 0x04000000-0x040003FF holds IO registers (plus the
+            // memory-control mirror at 0x0400_0800, which reads as open bus
+            // on the GBA); the rest of the region is unmapped.
+            0x04 if (addr & 0x00FF_FFFF) >= 0x400 => self.open_bus8(addr),
             0x04 => self.read_io8(addr),
             0x05 => {
                 let off = (addr & 0x3FF) as usize;
@@ -185,8 +193,14 @@ impl Mmu {
                     0
                 }
             }
-            _ => (self.last_read & 0xFF) as u8,
+            _ => self.open_bus8(addr),
         }
+    }
+
+    /// The open-bus byte for `addr`: the lane of the latched opcode word.
+    #[inline(always)]
+    fn open_bus8(&self, addr: u32) -> u8 {
+        (self.open_bus >> ((addr & 3) * 8)) as u8
     }
 
     /// True for the SRAM/Flash save region (0x0E000000-0x0FFFFFFF), which
@@ -203,17 +217,12 @@ impl Mmu {
         if Self::is_save_bus(addr) {
             return self.read8(addr) as u16 * 0x0101;
         }
+        // Plain aligned bus read. The CPU-visible rotation for misaligned
+        // LDRH is 32-bit, so it lives in cpu::load_halfword, not here.
         let aligned = addr & !1;
         let b0 = self.read8(aligned) as u16;
         let b1 = self.read8(aligned + 1) as u16;
-        let val = b0 | (b1 << 8);
-
-        if (addr & 1) != 0 {
-            // Unaligned 16-bit read rotates right by 8
-            val.rotate_right(8)
-        } else {
-            val
-        }
+        b0 | (b1 << 8)
     }
 
     #[inline(always)]
@@ -248,6 +257,7 @@ impl Mmu {
                 self.iwram[off] = val;
             }
             0x04 if debug_port::DebugPort::contains(addr) => self.debug_port.write8(addr, val),
+            0x04 if (addr & 0x00FF_FFFF) >= 0x400 => {} // unmapped (see read8)
             0x04 => self.write_io8(addr, val),
             0x05 => {
                 // Byte writes to palette RAM write to both bytes of the halfword
@@ -292,6 +302,7 @@ impl Mmu {
         let aligned = addr & !1;
         match (aligned >> 24) & 0xFF {
             0x04 if debug_port::DebugPort::contains(aligned) => self.debug_port.write16(aligned, val),
+            0x04 if (aligned & 0x00FF_FFFF) >= 0x400 => {} // unmapped (see read8)
             0x04 => self.write_io16(aligned, val),
             0x05 => {
                 let off = (aligned & 0x3FE) as usize;
@@ -346,44 +357,62 @@ impl Mmu {
     }
 
     fn read_io16(&self, addr: u32) -> u16 {
-        match addr & 0x3FE {
+        let off = addr & 0x3FE;
+        // Readback rules, verified against mGBA's "I/O read" suite
+        // (ROADMAP M1):
+        match off {
+            // Write-only registers read as open bus: BG scroll/affine,
+            // windows, mosaic, BLDY, sound FIFOs, DMA addresses, and the
+            // unused gaps between them.
+            0x010..=0x046 | 0x04C..=0x04E | 0x054..=0x05E | 0x08C | 0x08E
+            | 0x0A0..=0x0B6 | 0x0BC..=0x0C2 | 0x0C8..=0x0CE | 0x0D4..=0x0DA
+            | 0x0E0..=0x0FE => return (self.open_bus >> ((addr & 2) * 8)) as u16,
+            // Write-only DMA word counts read as zero.
+            0x0B8 | 0x0C4 | 0x0D0 | 0x0DC => return 0,
+            // Unused registers in the 0x100+ area read as zero.
+            0x136 | 0x138..=0x13E | 0x142..=0x14E | 0x15A..=0x1FE | 0x206
+            | 0x20A..=0x2FE | 0x302..=0x3FE => return 0,
+            _ => {}
+        }
+        match off {
             0x000 => self.ppu.dispcnt,
             0x004 => self.ppu.dispstat,
             0x006 => self.ppu.vcount,
-            0x008 => self.ppu.bgcnt[0],
-            0x00A => self.ppu.bgcnt[1],
+            // BG0/BG1 have no display-overflow bit (13).
+            0x008 => self.ppu.bgcnt[0] & 0xDFFF,
+            0x00A => self.ppu.bgcnt[1] & 0xDFFF,
             0x00C => self.ppu.bgcnt[2],
             0x00E => self.ppu.bgcnt[3],
-            0x048 => self.ppu.winin,
-            0x04A => self.ppu.winout,
+            0x048 => self.ppu.winin & 0x3F3F,
+            0x04A => self.ppu.winout & 0x3F3F,
             0x04C => self.ppu.mosaic,
-            0x050 => self.ppu.bldcnt,
-            0x052 => self.ppu.bldalpha,
+            0x050 => self.ppu.bldcnt & 0x3FFF,
+            0x052 => self.ppu.bldalpha & 0x1F1F,
             0x060..=0x0A6 => self.apu.read_reg16(addr),
             0x0B0 => self.dma.channels[0].sad as u16,
             0x0B2 => (self.dma.channels[0].sad >> 16) as u16,
             0x0B4 => self.dma.channels[0].dad as u16,
             0x0B6 => (self.dma.channels[0].dad >> 16) as u16,
             0x0B8 => self.dma.channels[0].count,
-            0x0BA => self.dma.channels[0].cnt_h,
+            0x0BA => self.dma.channels[0].cnt_h & 0xF7E0,
             0x0BC => self.dma.channels[1].sad as u16,
             0x0BE => (self.dma.channels[1].sad >> 16) as u16,
             0x0C0 => self.dma.channels[1].dad as u16,
             0x0C2 => (self.dma.channels[1].dad >> 16) as u16,
             0x0C4 => self.dma.channels[1].count,
-            0x0C6 => self.dma.channels[1].cnt_h,
+            0x0C6 => self.dma.channels[1].cnt_h & 0xF7E0,
             0x0C8 => self.dma.channels[2].sad as u16,
             0x0CA => (self.dma.channels[2].sad >> 16) as u16,
             0x0CC => self.dma.channels[2].dad as u16,
             0x0CE => (self.dma.channels[2].dad >> 16) as u16,
             0x0D0 => self.dma.channels[2].count,
-            0x0D2 => self.dma.channels[2].cnt_h,
+            0x0D2 => self.dma.channels[2].cnt_h & 0xF7E0,
             0x0D4 => self.dma.channels[3].sad as u16,
             0x0D6 => (self.dma.channels[3].sad >> 16) as u16,
             0x0D8 => self.dma.channels[3].dad as u16,
             0x0DA => (self.dma.channels[3].dad >> 16) as u16,
             0x0DC => self.dma.channels[3].count,
-            0x0DE => self.dma.channels[3].cnt_h,
+            0x0DE => self.dma.channels[3].cnt_h & 0xFFE0,
             0x100 => self.timers.timers[0].counter,
             0x102 => self.timers.timers[0].cnt_h,
             0x104 => self.timers.timers[1].counter,
