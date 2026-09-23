@@ -313,6 +313,7 @@ impl Ppu {
                         self.bg_pd[0],
                         &self.vram[..],
                         &self.palette_ram[..],
+                        self.bg_mosaic_for(self.bgcnt[2]),
                         &mut bg_layer_bufs[2],
                     );
                 }
@@ -337,6 +338,7 @@ impl Ppu {
                             self.bg_pd[i],
                             &self.vram[..],
                             &self.palette_ram[..],
+                            self.bg_mosaic_for(self.bgcnt[bg_idx]),
                             &mut bg_layer_bufs[bg_idx],
                         );
                     }

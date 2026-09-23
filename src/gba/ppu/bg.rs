@@ -121,16 +121,17 @@ pub fn render_text_bg(
 #[allow(clippy::too_many_arguments)]
 pub fn render_affine_bg(
     bg_idx: u8,
-    _y: u32,
+    y: u32,
     bgcnt: u16,
     ref_x: i32,
     ref_y: i32,
     pa: i16,
-    _pb: i16,
+    pb: i16,
     pc: i16,
-    _pd: i16,
+    pd: i16,
     vram: &[u8],
     palette_ram: &[u8],
+    mosaic: Option<(u32, u32)>,
     line_buf: &mut [Pixel; 240],
 ) {
     let priority = (bgcnt & 3) as u8;
@@ -141,12 +142,22 @@ pub fn render_affine_bg(
     let size_px = 128 << size_shift;
     let tiles_per_row = 16 << size_shift;
 
-    let mut cur_x = ref_x;
-    let mut cur_y = ref_y;
+    // Mosaic (ROADMAP M1): vertically, every line of a block uses the
+    // reference point of the block's first line (the internal reference
+    // advances by PB/PD per line, so step it back); horizontally, every
+    // pixel of a block uses the sample of the block's first pixel.
+    let (mos_h, mos_v) = mosaic.unwrap_or((1, 1));
+    let back = (y % mos_v.max(1)) as i32;
+    let mut cur_x = ref_x - back * pb as i32;
+    let mut cur_y = ref_y - back * pd as i32;
+    let mos_h = mos_h.max(1) as usize;
+    let (mut px, mut py) = (0, 0);
 
     for x in 0..240 {
-        let px = cur_x >> 8;
-        let py = cur_y >> 8;
+        if x % mos_h == 0 {
+            px = cur_x >> 8;
+            py = cur_y >> 8;
+        }
 
         cur_x += pa as i32;
         cur_y += pc as i32;
@@ -278,6 +289,47 @@ pub fn render_bitmap_bg(
                 }
             }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod affine_mosaic_tests {
+    use super::*;
+
+    /// 128x128 affine BG whose tile row 0 holds tiles 0..16, where tile n is
+    /// filled with colour index n+1, so each 8-pixel column has its own
+    /// colour.
+    fn scene() -> (Vec<u8>, Vec<u8>) {
+        let mut vram = vec![0u8; 0x10000];
+        for t in 0..16usize {
+            vram[0x800 + t] = t as u8; // screen base 1 (0x800), row 0
+            for p in 0..64 {
+                vram[t * 64 + p] = (t + 1) as u8;
+            }
+        }
+        let mut pal = vec![0u8; 512];
+        for i in 0..32usize {
+            pal[i * 2] = i as u8;
+        }
+        (vram, pal)
+    }
+
+    fn render(mosaic: Option<(u32, u32)>) -> Vec<u16> {
+        let (vram, pal) = scene();
+        let mut line = [Pixel::default(); 240];
+        let bgcnt = 1 << 8; // screen base 1, 128x128, no wrap
+        render_affine_bg(2, 0, bgcnt, 0, 0, 0x100, 0, 0, 0x100, &vram, &pal, mosaic, &mut line);
+        line[..32].iter().map(|p| p.color).collect()
+    }
+
+    #[test]
+    fn horizontal_mosaic_holds_block_sample() {
+        let plain = render(None);
+        assert_eq!(&plain[6..10], &[1, 1, 2, 2]);
+        // 16-pixel blocks: pixels 0-15 all take the sample at x=0.
+        let mos = render(Some((16, 1)));
+        assert!(mos[..16].iter().all(|&c| c == 1));
+        assert!(mos[16..32].iter().all(|&c| c == 3));
     }
 }
 
