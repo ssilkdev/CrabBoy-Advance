@@ -18,6 +18,12 @@ pub struct Rtc {
     buf_bit_idx: usize,
 }
 
+/// S-3511A register numbers (bits 1-3 of the MSB-first command byte).
+const REG_RESET: u8 = 0;
+const REG_CONTROL: u8 = 1;
+const REG_DATETIME: u8 = 2;
+const REG_TIME: u8 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RtcState {
     Idle,
@@ -162,15 +168,19 @@ impl Rtc {
         self.buf_bit_idx = 0;
         self.state = RtcState::TransferData;
 
+        // Register numbers as in the S-3511A datasheet, in the MSB-first
+        // command byte the game sends (`0110 bbb r`). (ROADMAP M1: an earlier
+        // fix switched the command byte to MSB-first but kept the register
+        // table of the old bit-reversed decode, so status/control (1) and
+        // time (3) were ignored. Pokemon games then saw a 12-hour clock with
+        // no status and reported "The internal battery has run dry".)
         match cmd {
-            0 => {
-                // RTC_RESET
+            REG_RESET => {
                 self.rtc_control = 0;
                 self.bytes_to_transfer = 0;
                 self.state = RtcState::Idle;
             }
-            2 => {
-                // RTC_DATETIME (7 bytes)
+            REG_DATETIME => {
                 self.bytes_to_transfer = 7;
                 if is_read {
                     self.load_current_time();
@@ -178,13 +188,7 @@ impl Rtc {
                     self.buffer = [0; 7];
                 }
             }
-            3 => {
-                // RTC_FORCE_IRQ
-                self.bytes_to_transfer = 0;
-                self.state = RtcState::Idle;
-            }
-            4 => {
-                // RTC_CONTROL (1 byte)
+            REG_CONTROL => {
                 self.bytes_to_transfer = 1;
                 if is_read {
                     self.buffer[0] = self.rtc_control;
@@ -192,8 +196,7 @@ impl Rtc {
                     self.buffer[0] = 0;
                 }
             }
-            6 => {
-                // RTC_TIME (3 bytes: hours, minutes, seconds)
+            REG_TIME => {
                 self.bytes_to_transfer = 3;
                 if is_read {
                     self.load_current_time();
@@ -204,6 +207,7 @@ impl Rtc {
                     self.buffer = [0; 7];
                 }
             }
+            // Alarm / interrupt / free registers: no data, no effect.
             _ => {
                 self.bytes_to_transfer = 0;
                 self.state = RtcState::Idle;
@@ -213,7 +217,7 @@ impl Rtc {
 
     fn finish_write(&mut self) {
         let cmd = (self.command >> 1) & 0x07;
-        if cmd == 4 {
+        if cmd == REG_CONTROL {
             self.rtc_control = self.buffer[0];
         }
     }
@@ -309,11 +313,10 @@ mod tests {
 
     #[test]
     fn command_register_decode_is_not_bit_reversed() {
-        // Every documented register number (0,2,3,4,6) must decode to itself,
-        // not a bit-reversed value. Registers 0 and 2 are palindromic in the
-        // 3-bit field and would pass even with the old buggy LSB-first assembly;
-        // 3, 4, and 6 are not, so they're the ones that catch the regression.
-        for &register in &[0u8, 2, 3, 4, 6] {
+        // Every register number must decode to itself, not a bit-reversed
+        // value. Registers 0 and 2 are palindromic in the 3-bit field and
+        // would pass even with a bit-reversed decode; 1, 3, 4 and 6 are not.
+        for &register in &[0u8, 1, 2, 3, 4, 6] {
             for &is_read in &[false, true] {
                 let mut rtc = Rtc::new();
                 rtc.command = command_byte(register, is_read);
@@ -332,17 +335,17 @@ mod tests {
     fn rtc_control_write_then_read_roundtrips() {
         let mut rtc = Rtc::new();
 
-        // WRITE to RTC_CONTROL (register 4): process_command() puts us in
+        // WRITE to the control register (1): process_command() puts us in
         // TransferData with a zeroed buffer ready to receive the incoming byte.
-        rtc.command = command_byte(4, false);
+        rtc.command = command_byte(REG_CONTROL, false);
         rtc.process_command();
         assert_eq!(rtc.bytes_to_transfer, 1);
         rtc.buffer[0] = 0x40; // 24-hour mode
         rtc.finish_write();
         assert_eq!(rtc.rtc_control, 0x40);
 
-        // READ from RTC_CONTROL (register 4) should reflect the value just written.
-        rtc.command = command_byte(4, true);
+        // READ from the control register should reflect the value just written.
+        rtc.command = command_byte(REG_CONTROL, true);
         rtc.process_command();
         assert_eq!(rtc.buffer[0], 0x40);
     }
@@ -353,5 +356,60 @@ mod tests {
         rtc.command = 0x00; // magic nibble wrong (not 0110)
         rtc.process_command();
         assert_eq!(rtc.state, RtcState::Idle);
+    }
+
+    /// Drive the GPIO pins the way Nintendo's SiiRtc library does (as used by
+    /// every Pokemon Gen 3 game) and read one register back.
+    fn sii_read(rtc: &mut Rtc, register: u8, len: usize) -> Vec<u8> {
+        const SCK: u8 = 1;
+        const SIO: u8 = 2;
+        const CS: u8 = 4;
+        rtc.write8(0xC8, 1); // GPIO readable
+        rtc.write8(0xC6, 0b111); // SCK/SIO/CS all outputs
+        rtc.write8(0xC4, SCK);
+        rtc.write8(0xC4, SCK | CS);
+        let cmd = command_byte(register, true);
+        for i in 0..8 {
+            let bit = (cmd >> (7 - i)) & 1; // MSB first
+            rtc.write8(0xC4, (bit << 1) | CS);
+            rtc.write8(0xC4, (bit << 1) | CS | SCK);
+        }
+        rtc.write8(0xC6, 0b101); // SIO becomes an input
+        let mut out = Vec::new();
+        for _ in 0..len {
+            let mut byte = 0u8;
+            for i in 0..8 {
+                rtc.write8(0xC4, CS);
+                rtc.write8(0xC4, CS | SCK);
+                byte |= ((rtc.read8(0xC4) & SIO) >> 1) << i; // LSB first
+            }
+            out.push(byte);
+        }
+        rtc.write8(0xC4, SCK);
+        out
+    }
+
+    #[test]
+    fn sii_library_reads_status_with_24_hour_flag() {
+        // Regression: Pokemon Emerald reported "The internal battery has run
+        // dry" because this read returned nothing.
+        let mut rtc = Rtc::new();
+        let status = sii_read(&mut rtc, REG_CONTROL, 1);
+        assert_eq!(status[0] & 0x40, 0x40, "24-hour flag must be set");
+        assert_eq!(status[0] & 0x80, 0, "power-failure flag must be clear");
+    }
+
+    #[test]
+    fn sii_library_reads_a_valid_datetime() {
+        let mut rtc = Rtc::new();
+        let dt = sii_read(&mut rtc, REG_DATETIME, 7);
+        let bcd_ok = |b: u8| (b & 0x0F) <= 9 && (b >> 4) <= 9;
+        assert!(dt.iter().enumerate().all(|(i, &b)| i == 3 || bcd_ok(b)), "{dt:02X?}");
+        assert!((1..=0x12).contains(&dt[1]), "month {:02X}", dt[1]);
+        assert!((1..=0x31).contains(&dt[2]), "day {:02X}", dt[2]);
+        assert!(dt[4] <= 0x23, "hour {:02X}", dt[4]);
+        // The time-only register returns the same hour/minute as datetime.
+        let t = sii_read(&mut rtc, REG_TIME, 3);
+        assert_eq!(t[0], dt[4]);
     }
 }
