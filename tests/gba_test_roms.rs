@@ -126,8 +126,88 @@ fn jsmolka_gba_tests() {
     );
 }
 
+/// The mGBA suite's menu, in order.
+const MGBA_SUITES: &[&str] = &[
+    "Memory tests",
+    "I/O read tests",
+    "Timing tests",
+    "Timer count-up tests",
+    "Timer IRQ tests",
+    "Shifter tests",
+    "Carry tests",
+    "Multiply long tests",
+    "BIOS math tests",
+    "DMA tests",
+    "SIO register R/W tests",
+    "SIO timing tests",
+    "Misc. edge case tests",
+    // "Video tests" (last menu entry) is interactive: each test is viewed
+    // by hand and has no pass/fail count, so it isn't run here.
+];
+
+/// Baseline pass counts. Update when a fix raises one; the test fails if
+/// any suite drops below its baseline (a regression) or rises above it (so
+/// the baseline gets bumped and the progress is recorded).
+const MGBA_BASELINE: &[u32] = &[
+    989,  // Memory            /1552
+    31,   // I/O read          /130
+    185,  // Timing            /2020
+    345,  // Timer count-up    /936
+    0,    // Timer IRQ         /90
+    140,  // Shifter           /140
+    93,   // Carry             /93
+    52,   // Multiply long     /72
+    310,  // BIOS math         /615
+    1032, // DMA               /1244
+    7,    // SIO register R/W  /90
+    0,    // SIO timing        /4
+    1,    // Misc. edge case   /12
+];
+
+fn press(gba: &mut Gba, key: gba_simulator::gba::keypad::Key) {
+    gba.mmu.keypad.set_key_state(key, true);
+    for _ in 0..4 {
+        gba.run_frame();
+    }
+    gba.mmu.keypad.set_key_state(key, false);
+    for _ in 0..8 {
+        gba.run_frame();
+    }
+}
+
+/// Run one mGBA sub-suite and return (passed, total) from its
+/// `END: passed/total` debug message.
+fn run_mgba_suite(path: &Path, index: usize) -> Option<(u32, u32)> {
+    use gba_simulator::gba::keypad::Key;
+    let tmp = std::env::temp_dir().join(format!("crabboy-mgba-suite-{}-{index}", std::process::id()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    let rom = tmp.join("suite.gba");
+    std::fs::copy(path, &rom).ok()?;
+    let mut gba = Gba::new();
+    gba.load_rom(&rom).ok()?;
+    for _ in 0..30 {
+        gba.run_frame();
+    }
+    for _ in 0..index {
+        press(&mut gba, Key::Down);
+    }
+    press(&mut gba, Key::A);
+    // Suites run to completion inside `run()` before drawing results; the
+    // slowest (timing) takes a few seconds of emulated time.
+    for _ in 0..(60 * 60) {
+        gba.run_frame();
+        if let Some(end) = gba.mmu.debug_port.messages.iter().find_map(|(_, m)| m.strip_prefix("END: ")) {
+            let (p, t) = end.trim().split_once('/')?;
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Some((p.parse().ok()?, t.parse().ok()?));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    None
+}
+
 #[test]
-fn mgba_suite_boots_and_runs() {
+fn mgba_suite() {
     let Some(dir) = rom_dir() else {
         eprintln!("skipping: no GBA test ROM dir (set GBA_TEST_ROM_DIR)");
         return;
@@ -137,17 +217,38 @@ fn mgba_suite_boots_and_runs() {
         eprintln!("skipping: suite.gba not found");
         return;
     }
-    let mut gba = Gba::new();
-    gba.load_rom(&path).expect("load suite.gba");
-    for _ in 0..300 {
-        gba.run_frame();
+    // Run the sub-suites in parallel; each is an independent emulator.
+    let results: Vec<Option<(u32, u32)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..MGBA_SUITES.len())
+            .map(|i| {
+                let path = &path;
+                s.spawn(move || run_mgba_suite(path, i))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let (mut passed, mut total) = (0, 0);
+    let mut problems = Vec::new();
+    for (i, result) in results.iter().enumerate() {
+        let name = MGBA_SUITES[i];
+        match *result {
+            Some((p, t)) => {
+                passed += p;
+                total += t;
+                eprintln!("  {p:>4}/{t:<4} {name}");
+                if p < MGBA_BASELINE[i] {
+                    problems.push(format!("{name}: {p}/{t}, baseline {}", MGBA_BASELINE[i]));
+                } else if p > MGBA_BASELINE[i] {
+                    problems.push(format!("{name}: now {p}/{t}; raise MGBA_BASELINE[{i}] from {}", MGBA_BASELINE[i]));
+                }
+            }
+            None => {
+                eprintln!("     ?/?    {name} (did not report)");
+                problems.push(format!("{name}: did not report a result"));
+            }
+        }
     }
-    let pc = gba.cpu.regs[15];
-    // The suite runs from ROM (0x08..) or IWRAM/EWRAM; anything else means
-    // the CPU jumped into unmapped memory.
-    let in_code = (0x0800_0000..0x0E00_0000).contains(&pc)
-        || (0x0200_0000..0x0204_0000).contains(&pc)
-        || (0x0300_0000..0x0300_8000).contains(&pc)
-        || pc < 0x4000;
-    assert!(in_code, "mGBA suite lost control: pc={pc:#010x}");
+    eprintln!("mGBA suite: {passed}/{total} passing");
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
