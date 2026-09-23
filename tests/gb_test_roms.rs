@@ -12,6 +12,15 @@
 use gba_simulator::dmg::GameBoy;
 use std::path::PathBuf;
 
+/// A test ROM is missing. Locally that just skips the test, but CI sets
+/// `CRABBOY_REQUIRE_TEST_ROMS=1` so a failed download can't pass as green.
+fn missing(what: &str) {
+    if std::env::var_os("CRABBOY_REQUIRE_TEST_ROMS").is_some() {
+        panic!("required test ROM missing: {what}");
+    }
+    eprintln!("skipping: {what} not found");
+}
+
 fn rom_dir() -> Option<PathBuf> {
     let dir = std::env::var("GB_TEST_ROM_DIR")
         .ok()
@@ -45,12 +54,12 @@ fn run_serial(rom: &PathBuf, frames: u64) -> String {
 
 fn check(name: &str, frames: u64) {
     let Some(dir) = rom_dir() else {
-        eprintln!("skipping {name}: no GB test ROM dir");
+        missing("GB test ROM dir (set GB_TEST_ROM_DIR)");
         return;
     };
     let rom = dir.join(name);
     if !rom.is_file() {
-        eprintln!("skipping {name}: not present in {}", dir.display());
+        missing(name);
         return;
     }
     let out = run_serial(&rom, frames);
@@ -75,10 +84,10 @@ fn blargg_instr_timing_passes() {
 fn dmg_acid2_renders_without_crashing() {
     // dmg-acid2 is a visual test: no serial output, so this only asserts the
     // core runs it to a stable, non-blank frame. Compare the PNG by eye.
-    let Some(dir) = rom_dir() else { return };
+    let Some(dir) = rom_dir() else { return missing("GB test ROM dir") };
     let rom = dir.join("dmg-acid2.gb");
     if !rom.is_file() {
-        return;
+        return missing("dmg-acid2.gb");
     }
     let mut gb = GameBoy::from_file(&rom, false).expect("load dmg-acid2");
     for _ in 0..200 {
@@ -95,10 +104,10 @@ fn dmg_acid2_renders_without_crashing() {
 
 #[test]
 fn cgb_acid2_runs_in_color_mode() {
-    let Some(dir) = rom_dir() else { return };
+    let Some(dir) = rom_dir() else { return missing("GB test ROM dir") };
     let rom = dir.join("cgb-acid2.gbc");
     if !rom.is_file() {
-        return;
+        return missing("cgb-acid2.gbc");
     }
     let mut gb = GameBoy::from_file(&rom, false).expect("load cgb-acid2");
     assert!(gb.is_cgb(), "cgb-acid2 must select CGB mode from its header");

@@ -22,6 +22,15 @@
 use gba_simulator::gba::Gba;
 use std::path::{Path, PathBuf};
 
+/// A test ROM is missing. Locally that just skips the test, but CI sets
+/// `CRABBOY_REQUIRE_TEST_ROMS=1` so a failed download can't pass as green.
+fn missing(what: &str) {
+    if std::env::var_os("CRABBOY_REQUIRE_TEST_ROMS").is_some() {
+        panic!("required test ROM missing: {what}");
+    }
+    eprintln!("skipping: {what} not found");
+}
+
 fn rom_dir() -> Option<PathBuf> {
     let dir = std::env::var("GBA_TEST_ROM_DIR").map(PathBuf::from).unwrap_or_else(|_| {
         PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -115,7 +124,7 @@ const JSMOLKA: &[(&str, bool)] = &[
 #[test]
 fn jsmolka_gba_tests() {
     let Some(dir) = rom_dir() else {
-        eprintln!("skipping: no GBA test ROM dir (set GBA_TEST_ROM_DIR)");
+        missing("GBA test ROM dir (set GBA_TEST_ROM_DIR)");
         return;
     };
     let mut ran = 0;
@@ -125,7 +134,7 @@ fn jsmolka_gba_tests() {
     for &(name, expected) in JSMOLKA {
         let path = dir.join(name);
         if !path.is_file() {
-            eprintln!("  skip  {name} (not found)");
+            missing(name);
             continue;
         }
         ran += 1;
@@ -238,12 +247,12 @@ fn run_mgba_suite(path: &Path, index: usize) -> Option<(u32, u32)> {
 #[test]
 fn mgba_suite() {
     let Some(dir) = rom_dir() else {
-        eprintln!("skipping: no GBA test ROM dir (set GBA_TEST_ROM_DIR)");
+        missing("GBA test ROM dir (set GBA_TEST_ROM_DIR)");
         return;
     };
     let path = dir.join("suite.gba");
     if !path.is_file() {
-        eprintln!("skipping: suite.gba not found");
+        missing("suite.gba");
         return;
     }
     // Run the sub-suites in parallel; each is an independent emulator.

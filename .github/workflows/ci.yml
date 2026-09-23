@@ -58,6 +58,32 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+      # ROADMAP M1: hardware test ROMs. These are downloaded, not vendored.
+      # CRABBOY_REQUIRE_TEST_ROMS makes a missing ROM fail instead of skip,
+      # and tests/gba_test_roms.rs fails if any per-suite pass count drops
+      # below its recorded baseline, so the pass rate can only go up.
+      - name: Fetch hardware test ROMs
+        if: runner.os == 'Linux'
+        run: ./scripts/fetch_test_roms.sh "$RUNNER_TEMP/test-roms"
+
+      - name: Hardware test ROMs
+        if: runner.os == 'Linux'
+        env:
+          GBA_TEST_ROM_DIR: ${{ runner.temp }}/test-roms/gba
+          GB_TEST_ROM_DIR: ${{ runner.temp }}/test-roms/gb
+          CRABBOY_REQUIRE_TEST_ROMS: "1"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release --test gba_test_roms --test gb_test_roms \
+            -- --nocapture --test-threads=1 2>&1 | tee test-roms.log
+          {
+            echo "## Hardware test ROM pass rate"
+            echo '```'
+            grep -E "^ *[0-9]+/[0-9]+ |passing|^(PASS|FAIL) " test-roms.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
         continue-on-error: true
