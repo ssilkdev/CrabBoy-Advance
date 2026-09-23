@@ -169,3 +169,50 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
 - **"Done when" check:** measured input-to-screen latency drops by configured
   frames with no audio artifacts or timeline divergence ✅.
 
+### M4. Save sync between desktop and Android ✅
+
+- ✅ **Cross-platform sync coordinator** (`src/gba/save_sync.rs`):
+  - User-selected sync directory (Syncthing, Google Drive, Dropbox, Nextcloud).
+  - Handles battery saves (`.sav`) and save states (`.state`).
+  - **Newest wins**: evaluates file modification timestamps so the device with
+    latest progress takes precedence.
+  - **Zero data loss automatic backups**: when an older file is overwritten, it is
+    archived into a timestamped `.bak.<timestamp>_<seq>` file, with configurable
+    retention limit rotation (`max_backups`, default 3).
+  - **Byte-level identity check**: identical files skip copying and disk writes
+    (`SyncStatus::UpToDate`), conserving disk lifetime and sync bandwidth.
+  - **Timestamp preservation**: `copy_preserving_mtime` maintains original file
+    mtimes to eliminate ping-pong sync cycles.
+  - **Smart directory routing**: `target_dir_for_file` routes incoming files to
+    proper subdirectories (`states/` vs `roms/` vs `saves/`) based on file extension
+    and existing ROM presence.
+- ✅ **Desktop Slot 0 & Android Primary State Linking** (`src/ui/save_manager.rs`,
+  `src/gba/save_sync.rs`):
+  - Desktop convention (`saves/{stem}_slot0.state`) and Android convention
+    (`states/{stem}.state`) are transparently mapped.
+  - Saving slot 0 on desktop mirrors to `{stem}.state`, and loading slot 0 falls
+    back to `{stem}.state` when slot 0 file is absent.
+  - Bidirectional alias synchronization mirrors states between the two naming
+    schemes during cloud sync.
+- ✅ **Desktop UI & Automatic Triggers** (`src/ui/save_sync_dialog.rs`, `src/ui/config.rs`, `src/ui/mod.rs`):
+  - `SaveSyncDialog`: graphical sync management with folder picker (`rfd`), auto-sync
+    checkbox, backup retention slider (1..=10), manual "Sync All" and "Sync Current Game"
+    triggers, and real-time status reporting with color-coded badges and backup logs.
+  - Auto-sync triggers hooked into ROM loading, save state save/load, and battery
+    save flushing to disk.
+  - Settings persisted in `config.json` under `save_sync`.
+- ✅ **Tests** (`tests/save_sync.rs`):
+  - `save_sync_bidirectional_and_alias_mapping`: verifies roundtrip sync where desktop
+    starts Emerald, Android receives states and plays forward 1 hour, and desktop syncs
+    back with older desktop saves archived into `.bak` files.
+  - `save_sync_newest_wins_and_backup_rotation`: verifies newest-wins overwrite and
+    monotonic backup rotation enforcing the maximum backup retention limit.
+  - `save_sync_identical_files_detected_and_skipped`: verifies that byte-identical files
+    are detected and skipped with zero writes.
+  - `save_sync_real_v3_state_roundtrip`: boots real GBA cores, saves v3 state on desktop,
+    syncs through cloud to Android, loads state on a fresh Android core, and verifies
+    framebuffers and CPU state continue running bit-identically.
+- **"Done when" check:** a game started on desktop continues on Android and back again
+  with nothing lost ✅.
+
+
