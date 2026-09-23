@@ -5,12 +5,14 @@ pub mod cheats;
 pub mod cpu;
 pub mod diagnostics;
 pub mod dma;
+pub mod frame_blend;
 pub mod keypad;
 pub mod mmu;
 pub mod ppu;
 pub mod replay;
 pub mod run_ahead;
 pub mod save_sync;
+pub mod shader;
 pub mod state;
 pub mod timer;
 
@@ -87,6 +89,26 @@ impl Gba {
     pub fn set_speculative(&mut self, spec: bool) {
         self.speculative = spec;
         self.mmu.apu.speculative = spec;
+    }
+
+    /// Enable or disable isolated per-layer framebuffer capture and draw commands (ROADMAP M5).
+    pub fn set_layer_capture(&mut self, enable: bool) {
+        self.mmu.ppu.set_layer_capture(enable);
+    }
+
+    /// Access isolated RGBA framebuffer surface for a specific layer.
+    pub fn get_layer_framebuffer(&self, layer: ppu::layers::PpuLayer) -> Option<&[u32; ppu::SCREEN_WIDTH * ppu::SCREEN_HEIGHT]> {
+        self.mmu.ppu.get_layer_framebuffer(layer)
+    }
+
+    /// Access all isolated layer framebuffers.
+    pub fn get_layer_framebuffers(&self) -> Option<&ppu::layers::PpuLayerBuffers> {
+        self.mmu.ppu.get_layer_framebuffers()
+    }
+
+    /// Access recorded draw commands for the current frame.
+    pub fn get_draw_commands(&self) -> &[ppu::layers::LayerDrawCommand] {
+        self.mmu.ppu.get_draw_commands()
     }
 
     pub fn load_rom<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {

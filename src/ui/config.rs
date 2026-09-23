@@ -90,6 +90,25 @@ impl Default for SaveSyncConfig {
     }
 }
 
+/// Rendering pipeline configuration (ROADMAP M5).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct RenderConfig {
+    pub filter: String,
+    pub frame_blend: String,
+    pub custom_shader_path: Option<PathBuf>,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            filter: "crisp".to_string(),
+            frame_blend: "off".to_string(),
+            custom_shader_path: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct AppConfig {
@@ -102,6 +121,8 @@ pub struct AppConfig {
     pub run_ahead: RunAheadSettings,
     /// Cloud / folder save sync configuration (ROADMAP M4).
     pub save_sync: SaveSyncConfig,
+    /// Rendering and shader pipeline configuration (ROADMAP M5).
+    pub render: RenderConfig,
 }
 
 impl Default for AppConfig {
@@ -112,6 +133,7 @@ impl Default for AppConfig {
             keyboard: KeyBindings::default(),
             run_ahead: RunAheadSettings::default(),
             save_sync: SaveSyncConfig::default(),
+            render: RenderConfig::default(),
         }
     }
 }

@@ -3,10 +3,12 @@
 
 pub mod bg;
 pub mod blend;
+pub mod layers;
 pub mod obj;
 
 use bg::{render_affine_bg, render_bitmap_bg, render_text_bg};
 use blend::{apply_color_effects, bgr555_to_rgb888, Pixel};
+pub use layers::{LayerDrawCommand, LayerKind, PpuLayer, PpuLayerBuffers};
 use obj::render_sprites;
 
 pub const SCREEN_WIDTH: usize = 240;
@@ -64,6 +66,11 @@ pub struct Ppu {
 
     // Front/back RGBA8888 framebuffers (240x160)
     pub framebuffer: Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]>,
+
+    // Per-layer capture and draw commands (ROADMAP M5)
+    pub layer_capture: bool,
+    pub layer_buffers: Option<PpuLayerBuffers>,
+    pub draw_commands: Vec<LayerDrawCommand>,
 }
 
 impl Default for Ppu {
@@ -106,7 +113,36 @@ impl Ppu {
             frame_ready: false,
             layer_mask: 0x1F,
             framebuffer: Box::new([0xFF00_0000; SCREEN_WIDTH * SCREEN_HEIGHT]),
+            layer_capture: false,
+            layer_buffers: None,
+            draw_commands: Vec::new(),
         }
+    }
+
+    /// Enable or disable isolated per-layer framebuffer capture and draw command emission (ROADMAP M5).
+    pub fn set_layer_capture(&mut self, enable: bool) {
+        self.layer_capture = enable;
+        if enable && self.layer_buffers.is_none() {
+            self.layer_buffers = Some(PpuLayerBuffers::new());
+        } else if !enable {
+            self.layer_buffers = None;
+            self.draw_commands.clear();
+        }
+    }
+
+    /// Access isolated RGBA framebuffer surface for a specific layer.
+    pub fn get_layer_framebuffer(&self, layer: PpuLayer) -> Option<&[u32; SCREEN_WIDTH * SCREEN_HEIGHT]> {
+        self.layer_buffers.as_ref().map(|lb| lb.get_layer(layer))
+    }
+
+    /// Access all isolated layer framebuffers.
+    pub fn get_layer_framebuffers(&self) -> Option<&PpuLayerBuffers> {
+        self.layer_buffers.as_ref()
+    }
+
+    /// Access recorded draw commands for the current frame.
+    pub fn get_draw_commands(&self) -> &[LayerDrawCommand] {
+        &self.draw_commands
     }
 
     pub fn bg_mosaic_h(&self) -> u32 {
@@ -240,11 +276,25 @@ impl Ppu {
     }
 
     fn render_scanline(&mut self, y: u32) {
+        if y == 0 && self.layer_capture {
+            if let Some(ref mut lb) = self.layer_buffers {
+                lb.clear();
+            }
+            self.draw_commands.clear();
+        }
+
         if (self.dispcnt & (1 << 7)) != 0 {
             // Forced blank: render white
             let row = (y as usize) * SCREEN_WIDTH;
             for x in 0..SCREEN_WIDTH {
                 self.framebuffer[row + x] = 0xFFFF_FFFF;
+            }
+            if self.layer_capture {
+                if let Some(ref mut lb) = self.layer_buffers {
+                    let y_us = y as usize;
+                    let b_slice = &mut lb.buffers[PpuLayer::Backdrop.index()][y_us * SCREEN_WIDTH..(y_us + 1) * SCREEN_WIDTH];
+                    b_slice.fill(0xFFFF_FFFF);
+                }
             }
             return;
         }
@@ -466,6 +516,92 @@ impl Ppu {
             let (r, g, b) = bgr555_to_rgb888(final_bgr555);
             // Format: 0xFF_AA_BB_GG_RR in little-endian (or RGBA 0xFF_BB_GG_RR)
             self.framebuffer[row_offset + x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+        }
+
+        if self.layer_capture {
+            let (br, bg, bb) = bgr555_to_rgb888(backdrop_color);
+            let backdrop_rgba = 0xFF00_0000 | ((bb as u32) << 16) | ((bg as u32) << 8) | (br as u32);
+            if let Some(ref mut lb) = self.layer_buffers {
+                let y_us = y as usize;
+                let b_slice = &mut lb.buffers[PpuLayer::Backdrop.index()][y_us * SCREEN_WIDTH..(y_us + 1) * SCREEN_WIDTH];
+                b_slice.fill(backdrop_rgba);
+
+                // Populate BG0..3
+                let layers = [PpuLayer::Bg0, PpuLayer::Bg1, PpuLayer::Bg2, PpuLayer::Bg3];
+                for i in 0..4 {
+                    let bg_buf = &mut lb.buffers[layers[i].index()];
+                    for x in 0..SCREEN_WIDTH {
+                        let pix = &bg_layer_bufs[i][x];
+                        if !pix.is_transparent {
+                            let (r, g, b) = bgr555_to_rgb888(pix.color);
+                            bg_buf[y_us * SCREEN_WIDTH + x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+                        }
+                    }
+                }
+
+                // Populate OBJ
+                let obj_layer_buf = &mut lb.buffers[PpuLayer::Obj.index()];
+                for x in 0..SCREEN_WIDTH {
+                    let pix = &obj_buf[x];
+                    if !pix.is_transparent {
+                        let (r, g, b) = bgr555_to_rgb888(pix.color);
+                        obj_layer_buf[y_us * SCREEN_WIDTH + x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+                    }
+                }
+            }
+
+            // Record draw commands for the scanline
+            let bldcnt_mode = ((self.bldcnt >> 6) & 3) as u8;
+            for i in 0..4 {
+                if (self.dispcnt & (1 << (8 + i))) != 0 {
+                    let kind = match mode {
+                        0 => LayerKind::Text,
+                        1 if i < 2 => LayerKind::Text,
+                        1 if i == 2 => LayerKind::Affine,
+                        2 if i >= 2 => LayerKind::Affine,
+                        3..=5 if i == 2 => LayerKind::Bitmap,
+                        _ => LayerKind::Text,
+                    };
+                    let (matrix, origin) = if kind == LayerKind::Affine && (i == 2 || i == 3) {
+                        let aff_idx = i - 2;
+                        ([self.bg_pa[aff_idx], self.bg_pb[aff_idx], self.bg_pc[aff_idx], self.bg_pd[aff_idx]],
+                         [self.bg_x_internal[aff_idx], self.bg_y_internal[aff_idx]])
+                    } else {
+                        ([0x0100, 0, 0, 0x0100], [0, 0])
+                    };
+                    self.draw_commands.push(LayerDrawCommand {
+                        scanline: y as u16,
+                        layer: match i {
+                            0 => PpuLayer::Bg0,
+                            1 => PpuLayer::Bg1,
+                            2 => PpuLayer::Bg2,
+                            _ => PpuLayer::Bg3,
+                        },
+                        kind,
+                        priority: (self.bgcnt[i] & 3) as u8,
+                        h_offset: self.bghofs[i],
+                        v_offset: self.bgvofs[i],
+                        affine_matrix: matrix,
+                        affine_origin: origin,
+                        blend_mode: bldcnt_mode,
+                        window_enabled: any_win,
+                    });
+                }
+            }
+            if (self.dispcnt & (1 << 12)) != 0 {
+                self.draw_commands.push(LayerDrawCommand {
+                    scanline: y as u16,
+                    layer: PpuLayer::Obj,
+                    kind: LayerKind::Obj,
+                    priority: 0,
+                    h_offset: 0,
+                    v_offset: 0,
+                    affine_matrix: [0x0100, 0, 0, 0x0100],
+                    affine_origin: [0, 0],
+                    blend_mode: bldcnt_mode,
+                    window_enabled: any_win,
+                });
+            }
         }
     }
 }

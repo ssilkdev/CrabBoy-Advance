@@ -105,6 +105,8 @@ pub struct GbaApp {
     pub run_ahead: crate::gba::run_ahead::RunAhead,
     pub run_ahead_config: config::RunAheadSettings,
     pub save_sync_config: config::SaveSyncConfig,
+    pub frame_blend_mode: crate::gba::frame_blend::FrameBlendMode,
+    pub custom_shader_path: Option<PathBuf>,
     pub display_filter: DisplayFilter,
     pub nvidia_sharpen: bool,
     pub nvidia_sharpness: f32,
@@ -172,13 +174,39 @@ impl GbaApp {
             run_ahead_config.second_instance,
         );
 
-        let mut app = Self {
+            let frame_blend_mode = match config.render.frame_blend.to_lowercase().as_str() {
+                "simple50" | "50" => crate::gba::frame_blend::FrameBlendMode::Simple50,
+                "smart" | "deflicker" => crate::gba::frame_blend::FrameBlendMode::SmartDeFlicker,
+                "lcd" | "ghosting" => crate::gba::frame_blend::FrameBlendMode::LcdGhosting { decay: 0.65 },
+                _ => crate::gba::frame_blend::FrameBlendMode::Off,
+            };
+            let display_filter = match config.render.filter.to_lowercase().as_str() {
+                "linear" => DisplayFilter::Linear,
+                "lcdgrid" => DisplayFilter::LcdGrid,
+                "lcdsubpixel" => DisplayFilter::LcdSubpixel,
+                "crtscanlines" => DisplayFilter::CrtScanlines,
+                "crtgeom" => DisplayFilter::CrtGeom,
+                "nvidiasharpen" => DisplayFilter::NvidiaSharpen,
+                "xbrz" => DisplayFilter::Xbrz,
+                "custom" => DisplayFilter::Custom,
+                _ => DisplayFilter::Crisp,
+            };
+            let mut screen_renderer = ScreenRenderer::new();
+            if let Some(ref path) = config.render.custom_shader_path {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    if let Ok(params) = crate::gba::shader::CustomShaderParams::parse(&content) {
+                        screen_renderer.custom_shader = Some(params);
+                    }
+                }
+            }
+
+            let mut app = Self {
             gba,
             gb: None,
             console: ConsoleKind::Gba,
             gb_framebuffer: Box::new([0xFF00_0000; 240 * 160]),
             gb_force_dmg: false,
-            screen_renderer: ScreenRenderer::new(),
+            screen_renderer,
             debug_windows: DebugWindows::default(),
             key_bindings: config.keyboard.clone(),
             gamepad_manager: GamepadManager::new(config.controllers.clone()),
@@ -203,7 +231,9 @@ impl GbaApp {
             run_ahead,
             run_ahead_config,
             save_sync_config: config.save_sync.clone(),
-            display_filter: DisplayFilter::Crisp,
+            frame_blend_mode,
+            custom_shader_path: config.render.custom_shader_path.clone(),
+            display_filter,
             nvidia_sharpen: false,
             nvidia_sharpness: 0.6,
             xbrz_factor: 4,
@@ -426,6 +456,26 @@ impl GbaApp {
             keyboard: self.key_bindings.clone(),
             run_ahead: self.run_ahead_config.clone(),
             save_sync: self.save_sync_config.clone(),
+            render: config::RenderConfig {
+                filter: match self.display_filter {
+                    DisplayFilter::Crisp => "crisp",
+                    DisplayFilter::Linear => "linear",
+                    DisplayFilter::LcdGrid => "lcdgrid",
+                    DisplayFilter::LcdSubpixel => "lcdsubpixel",
+                    DisplayFilter::CrtScanlines => "crtscanlines",
+                    DisplayFilter::CrtGeom => "crtgeom",
+                    DisplayFilter::NvidiaSharpen => "nvidiasharpen",
+                    DisplayFilter::Xbrz => "xbrz",
+                    DisplayFilter::Custom => "custom",
+                }.to_string(),
+                frame_blend: match self.frame_blend_mode {
+                    crate::gba::frame_blend::FrameBlendMode::Off => "off",
+                    crate::gba::frame_blend::FrameBlendMode::Simple50 => "simple50",
+                    crate::gba::frame_blend::FrameBlendMode::SmartDeFlicker => "smart",
+                    crate::gba::frame_blend::FrameBlendMode::LcdGhosting { .. } => "lcd",
+                }.to_string(),
+                custom_shader_path: self.custom_shader_path.clone(),
+            },
         };
         if let Err(e) = cfg.save() {
             log::warn!("Could not save config: {}", e);
@@ -1150,22 +1200,57 @@ impl eframe::App for GbaApp {
                 });
 
                 ui.menu_button("Video", |ui| {
-                    ui.label("Filter / Scaler:");
-                    ui.radio_value(&mut self.display_filter, DisplayFilter::Crisp, "Crisp Pixel (Nearest)");
-                    ui.radio_value(&mut self.display_filter, DisplayFilter::Xbrz, "xBRZ High-Definition (AI Edge Smoothing)");
+                    ui.label(RichText::new("Frame Blending (LCD Ghosting):").strong());
+                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::Off, "Off (Instant 60 Hz)").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::Simple50, "50/50 Blend (Smooth Transparency)").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::SmartDeFlicker, "Smart De-Flicker (Motion-Preserving)").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.frame_blend_mode, crate::gba::frame_blend::FrameBlendMode::LcdGhosting { decay: 0.65 }, "Authentic LCD Ghosting (AGB-001)").clicked() { self.config_dirty = true; }
+                    ui.separator();
+                    ui.label(RichText::new("Filter / Shader Preset:").strong());
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Crisp, "Crisp Pixel (Nearest)").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Linear, "Smooth (Bilinear)").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::LcdGrid, "Retro LCD Grid").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::LcdSubpixel, "Authentic GBA LCD Subpixels").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::CrtScanlines, "CRT Scanlines").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::CrtGeom, "CRT Aperture Grille & Bloom").clicked() { self.config_dirty = true; }
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Xbrz, "xBRZ High-Definition (AI Edge Smoothing)").clicked() { self.config_dirty = true; }
                     if self.display_filter == DisplayFilter::Xbrz {
                         ui.indent("xbrz_selector", |ui| {
                             ui.label("xBRZ Scale Factor:");
-                            ui.radio_value(&mut self.xbrz_factor, 2, "2x (480p)");
-                            ui.radio_value(&mut self.xbrz_factor, 3, "3x (720p)");
-                            ui.radio_value(&mut self.xbrz_factor, 4, "4x (960p - Recommended)");
-                            ui.radio_value(&mut self.xbrz_factor, 5, "5x (1200p)");
-                            ui.radio_value(&mut self.xbrz_factor, 6, "6x (1440p HD)");
+                            if ui.radio_value(&mut self.xbrz_factor, 2, "2x (480p)").clicked() { self.config_dirty = true; }
+                            if ui.radio_value(&mut self.xbrz_factor, 3, "3x (720p)").clicked() { self.config_dirty = true; }
+                            if ui.radio_value(&mut self.xbrz_factor, 4, "4x (960p - Recommended)").clicked() { self.config_dirty = true; }
+                            if ui.radio_value(&mut self.xbrz_factor, 5, "5x (1200p)").clicked() { self.config_dirty = true; }
+                            if ui.radio_value(&mut self.xbrz_factor, 6, "6x (1440p HD)").clicked() { self.config_dirty = true; }
                         });
                     }
-                    ui.radio_value(&mut self.display_filter, DisplayFilter::Linear, "Smooth (Bilinear)");
-                    ui.radio_value(&mut self.display_filter, DisplayFilter::LcdGrid, "Retro LCD Grid");
-                    ui.radio_value(&mut self.display_filter, DisplayFilter::CrtScanlines, "CRT Scanlines");
+                    let custom_label = if let Some(ref path) = self.custom_shader_path {
+                        format!("Custom Shader ({})", path.file_name().and_then(|n| n.to_str()).unwrap_or("active"))
+                    } else {
+                        "Custom User Shader".to_string()
+                    };
+                    if ui.radio_value(&mut self.display_filter, DisplayFilter::Custom, custom_label).clicked() { self.config_dirty = true; }
+                    if ui.button("Load Custom Shader (.shader / .json)...").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("Shader Profile", &["shader", "json", "txt"])
+                            .pick_file()
+                        {
+                            if let Ok(content) = std::fs::read_to_string(&file) {
+                                match crate::gba::shader::CustomShaderParams::parse(&content) {
+                                    Ok(params) => {
+                                        self.set_toast(format!("Loaded shader: {}", params.name));
+                                        self.screen_renderer.custom_shader = Some(params);
+                                        self.custom_shader_path = Some(file);
+                                        self.display_filter = DisplayFilter::Custom;
+                                        self.config_dirty = true;
+                                    }
+                                    Err(e) => {
+                                        self.set_toast(format!("Failed to parse shader: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     ui.separator();
                     ui.label("Enhancements & Post-Processing:");
                     ui.checkbox(&mut self.nvidia_sharpen, "NVIDIA Adaptive Sharpening (NIS / CAS)");
@@ -1587,6 +1672,7 @@ impl eframe::App for GbaApp {
                     ctx,
                     frame,
                     self.display_filter,
+                    self.frame_blend_mode,
                     self.nvidia_sharpen,
                     self.nvidia_sharpness,
                     self.color_correction,

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
 use gba_simulator::dmg::mmu::GbKey;
 use gba_simulator::dmg::GameBoy;
+use gba_simulator::gba::frame_blend::{FrameBlendMode, FrameBlender};
 use gba_simulator::gba::keypad::Key;
+use gba_simulator::gba::shader::{apply_shader, ShaderPreset};
 use gba_simulator::gba::Gba;
 use winit::platform::android::activity::AndroidApp;
 
@@ -193,6 +195,9 @@ struct CrabBoyApp {
     /// Frames emulated / UI frames drawn since `stats_since` (logged for tuning).
     stats: (u32, u32),
     stats_since: Instant,
+    frame_blender: FrameBlender,
+    blend_mode: FrameBlendMode,
+    shader_preset: ShaderPreset,
 }
 
 impl CrabBoyApp {
@@ -234,6 +239,9 @@ impl CrabBoyApp {
             last_inset_poll: Instant::now() - Duration::from_secs(10),
             stats: (0, 0),
             stats_since: Instant::now(),
+            frame_blender: FrameBlender::new(),
+            blend_mode: FrameBlendMode::Off,
+            shader_preset: ShaderPreset::Crisp,
         };
         app.refresh_library();
         app
@@ -360,6 +368,24 @@ impl CrabBoyApp {
     fn upload_frame(&mut self, ctx: &egui::Context) {
         let Some(game) = self.game.as_ref() else { return };
         let size = game.core.frame_rgba(&mut self.rgba);
+
+        // Apply frame blending and shader pipeline on 240x160 GBA framebuffers (ROADMAP M5)
+        if size == [240, 160] {
+            let mut words = [0u32; 240 * 160];
+            for (i, chunk) in self.rgba.chunks_exact(4).enumerate() {
+                words[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+
+            let blended = self.frame_blender.blend(&words, self.blend_mode);
+            let mut post_shader = [0u32; 240 * 160];
+            apply_shader(blended, &mut post_shader, self.shader_preset, None);
+
+            for (i, &word) in post_shader.iter().enumerate() {
+                let bytes = word.to_le_bytes();
+                self.rgba[i * 4..i * 4 + 4].copy_from_slice(&bytes);
+            }
+        }
+
         let image = ColorImage::from_rgba_unmultiplied(size, &self.rgba);
         match self.texture.as_mut() {
             Some(t) if t.size() == size => t.set(image, TextureOptions::NEAREST),
@@ -476,6 +502,39 @@ impl CrabBoyApp {
                     let mute = if self.muted { "Sound: muted" } else { "Sound: on" };
                     if ui.button(mute).clicked() {
                         self.muted = !self.muted;
+                    }
+                    let blend_label = match self.blend_mode {
+                        FrameBlendMode::Off => "Blend: Off (Instant)",
+                        FrameBlendMode::Simple50 => "Blend: 50/50",
+                        FrameBlendMode::SmartDeFlicker => "Blend: De-Flicker",
+                        FrameBlendMode::LcdGhosting { .. } => "Blend: LCD Ghosting",
+                    };
+                    if ui.button(blend_label).clicked() {
+                        self.blend_mode = match self.blend_mode {
+                            FrameBlendMode::Off => FrameBlendMode::Simple50,
+                            FrameBlendMode::Simple50 => FrameBlendMode::SmartDeFlicker,
+                            FrameBlendMode::SmartDeFlicker => FrameBlendMode::LcdGhosting { decay: 0.65 },
+                            FrameBlendMode::LcdGhosting { .. } => FrameBlendMode::Off,
+                        };
+                    }
+                    let shader_label = match self.shader_preset {
+                        ShaderPreset::Crisp => "Shader: Crisp",
+                        ShaderPreset::Linear => "Shader: Bilinear",
+                        ShaderPreset::LcdGrid => "Shader: LCD Grid",
+                        ShaderPreset::LcdSubpixel => "Shader: LCD Subpixels",
+                        ShaderPreset::CrtScanlines => "Shader: CRT Scanlines",
+                        ShaderPreset::CrtGeom => "Shader: CRT Aperture",
+                        _ => "Shader: Crisp",
+                    };
+                    if ui.button(shader_label).clicked() {
+                        self.shader_preset = match self.shader_preset {
+                            ShaderPreset::Crisp => ShaderPreset::LcdGrid,
+                            ShaderPreset::LcdGrid => ShaderPreset::LcdSubpixel,
+                            ShaderPreset::LcdSubpixel => ShaderPreset::CrtScanlines,
+                            ShaderPreset::CrtScanlines => ShaderPreset::CrtGeom,
+                            ShaderPreset::CrtGeom => ShaderPreset::Linear,
+                            _ => ShaderPreset::Crisp,
+                        };
                     }
                     if ui.button("Reset").clicked() {
                         if let Some(p) = self.game.as_ref().map(|g| g.rom_path.clone()) {

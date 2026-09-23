@@ -1,21 +1,38 @@
-//! GBA LCD Viewport Rendering, Post-Processing Filters, and Aspect Ratio Management
-
+use crate::gba::frame_blend::{FrameBlendMode, FrameBlender};
+use crate::gba::shader::{apply_shader, CustomShaderParams, ShaderPreset};
 use crate::gba::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayFilter {
     Crisp,
-    NvidiaSharpen,
-    Xbrz,
     Linear,
     LcdGrid,
+    LcdSubpixel,
     CrtScanlines,
+    CrtGeom,
+    NvidiaSharpen,
+    Xbrz,
+    Custom,
 }
 
 impl DisplayFilter {
     #[allow(non_upper_case_globals)]
     pub const Nearest: Self = Self::Crisp;
+
+    pub fn to_shader_preset(self) -> Option<ShaderPreset> {
+        match self {
+            DisplayFilter::Crisp => Some(ShaderPreset::Crisp),
+            DisplayFilter::Linear => Some(ShaderPreset::Linear),
+            DisplayFilter::LcdGrid => Some(ShaderPreset::LcdGrid),
+            DisplayFilter::LcdSubpixel => Some(ShaderPreset::LcdSubpixel),
+            DisplayFilter::CrtScanlines => Some(ShaderPreset::CrtScanlines),
+            DisplayFilter::CrtGeom => Some(ShaderPreset::CrtGeom),
+            DisplayFilter::NvidiaSharpen => Some(ShaderPreset::NvidiaSharpen),
+            DisplayFilter::Xbrz => Some(ShaderPreset::Xbrz),
+            DisplayFilter::Custom => Some(ShaderPreset::Custom),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,8 +192,10 @@ impl AspectRatio {
 }
 
 pub struct ScreenRenderer {
-    texture: Option<TextureHandle>,
-    image_buffer: ColorImage,
+    pub texture: Option<TextureHandle>,
+    pub image_buffer: ColorImage,
+    pub frame_blender: FrameBlender,
+    pub custom_shader: Option<CustomShaderParams>,
 }
 
 impl Default for ScreenRenderer {
@@ -190,6 +209,8 @@ impl ScreenRenderer {
         Self {
             texture: None,
             image_buffer: ColorImage::new([240, 160], Color32::BLACK),
+            frame_blender: FrameBlender::new(),
+            custom_shader: None,
         }
     }
 
@@ -203,11 +224,13 @@ impl ScreenRenderer {
         ctx: &egui::Context,
         raw_fb: &[u32; 240 * 160],
         filter: DisplayFilter,
+        blend_mode: FrameBlendMode,
         nvidia_sharpen: bool,
         nvidia_sharpness: f32,
         color_correction: bool,
         xbrz_factor: usize,
     ) -> &TextureHandle {
+        let blended_fb = self.frame_blender.blend(raw_fb, blend_mode);
         let should_sharpen = nvidia_sharpen || filter == DisplayFilter::NvidiaSharpen;
 
         if filter == DisplayFilter::Xbrz {
@@ -216,7 +239,7 @@ impl ScreenRenderer {
             let target_h = 160 * factor;
 
             let mut src_rgba = Vec::with_capacity(240 * 160 * 4);
-            for &pixel in raw_fb {
+            for &pixel in blended_fb {
                 let mut r = (pixel & 0xFF) as u8;
                 let mut g = ((pixel >> 8) & 0xFF) as u8;
                 let mut b = ((pixel >> 16) & 0xFF) as u8;
@@ -253,76 +276,29 @@ impl ScreenRenderer {
             self.image_buffer = ColorImage::new([240, 160], Color32::BLACK);
         }
 
-        match filter {
-            DisplayFilter::LcdGrid => {
-                for y in 0..160 {
-                    let is_grid_y = y % 2 == 1;
-                    for x in 0..240 {
-                        let is_grid_x = x % 2 == 1;
-                        let pixel = raw_fb[y * 240 + x];
-                        let mut r = (pixel & 0xFF) as u8;
-                        let mut g = ((pixel >> 8) & 0xFF) as u8;
-                        let mut b = ((pixel >> 16) & 0xFF) as u8;
+        let mut pre_shader = [0u32; 240 * 160];
+        for i in 0..240 * 160 {
+            let pixel = blended_fb[i];
+            let r = (pixel & 0xFF) as u8;
+            let g = ((pixel >> 8) & 0xFF) as u8;
+            let b = ((pixel >> 16) & 0xFF) as u8;
+            let (cr, cg, cb) = if color_correction {
+                apply_gba_color_correction(r, g, b)
+            } else {
+                (r, g, b)
+            };
+            pre_shader[i] = 0xFF00_0000 | ((cb as u32) << 16) | ((cg as u32) << 8) | (cr as u32);
+        }
 
-                        if color_correction {
-                            let (cr, cg, cb) = apply_gba_color_correction(r, g, b);
-                            r = cr;
-                            g = cg;
-                            b = cb;
-                        }
+        let mut post_shader = [0u32; 240 * 160];
+        let preset = filter.to_shader_preset().unwrap_or(ShaderPreset::Crisp);
+        apply_shader(&pre_shader, &mut post_shader, preset, self.custom_shader.as_ref());
 
-                        if is_grid_x || is_grid_y {
-                            r = (r as u16 * 220 / 256) as u8;
-                            g = (g as u16 * 220 / 256) as u8;
-                            b = (b as u16 * 220 / 256) as u8;
-                        }
-
-                        self.image_buffer.pixels[y * 240 + x] = Color32::from_rgb(r, g, b);
-                    }
-                }
-            }
-            DisplayFilter::CrtScanlines => {
-                for y in 0..160 {
-                    let is_scanline = y % 2 == 1;
-                    for x in 0..240 {
-                        let pixel = raw_fb[y * 240 + x];
-                        let mut r = (pixel & 0xFF) as u8;
-                        let mut g = ((pixel >> 8) & 0xFF) as u8;
-                        let mut b = ((pixel >> 16) & 0xFF) as u8;
-
-                        if color_correction {
-                            let (cr, cg, cb) = apply_gba_color_correction(r, g, b);
-                            r = cr;
-                            g = cg;
-                            b = cb;
-                        }
-
-                        if is_scanline {
-                            r = (r as u16 * 190 / 256) as u8;
-                            g = (g as u16 * 190 / 256) as u8;
-                            b = (b as u16 * 190 / 256) as u8;
-                        }
-
-                        self.image_buffer.pixels[y * 240 + x] = Color32::from_rgb(r, g, b);
-                    }
-                }
-            }
-            _ => {
-                // Crisp / Nearest & Linear & NvidiaSharpen direct pixel copy
-                for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(raw_fb.iter()) {
-                    let r = (pixel & 0xFF) as u8;
-                    let g = ((pixel >> 8) & 0xFF) as u8;
-                    let b = ((pixel >> 16) & 0xFF) as u8;
-
-                    let (final_r, final_g, final_b) = if color_correction {
-                        apply_gba_color_correction(r, g, b)
-                    } else {
-                        (r, g, b)
-                    };
-
-                    *dst = Color32::from_rgb(final_r, final_g, final_b);
-                }
-            }
+        for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(post_shader.iter()) {
+            let r = (pixel & 0xFF) as u8;
+            let g = ((pixel >> 8) & 0xFF) as u8;
+            let b = ((pixel >> 16) & 0xFF) as u8;
+            *dst = Color32::from_rgb(r, g, b);
         }
 
         if should_sharpen {
