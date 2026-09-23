@@ -25,6 +25,17 @@ impl Buttons {
     pub const FAST: u16 = 1 << 15;
 }
 
+/// Which hand the controls are laid out for (ROADMAP M10). Mirrors
+/// `gba::accessibility::Handedness`; kept separate so this module stays
+/// buildable and testable on the host without the emulator crate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Hand {
+    #[default]
+    Both,
+    Left,
+    Right,
+}
+
 /// Where everything goes on screen, in egui points.
 pub struct Layout {
     /// The game image.
@@ -45,11 +56,20 @@ impl Layout {
     /// Portrait: game on top, controls below. Landscape: a control column on
     /// each side and the game scaled to fit between them.
     pub fn compute(safe: Rect, tex_size: Option<[usize; 2]>) -> Self {
+        Self::compute_for(safe, tex_size, Hand::Both)
+    }
+
+    /// Layout for a given hand. One-handed layouts stack every control in
+    /// one column on that side, so a single thumb reaches all of it.
+    pub fn compute_for(safe: Rect, tex_size: Option<[usize; 2]>, hand: Hand) -> Self {
         let [tw, th] = tex_size.unwrap_or([240, 160]);
         let aspect = tw as f32 / th as f32;
         let (w, h) = (safe.width(), safe.height());
         // A comfortable thumb target: ~13% of the short side, within limits.
         let unit = (w.min(h) * 0.135).clamp(34.0, 80.0);
+        if hand != Hand::Both {
+            return Self::one_handed(safe, aspect, unit, hand == Hand::Left);
+        }
         if h > w {
             Self::portrait(safe, aspect, unit)
         } else {
@@ -120,6 +140,83 @@ impl Layout {
         let pill = Vec2::new(unit * 1.6, unit * 0.62);
         let select = Rect::from_center_size(Pos2::new(dpad_center.x, bottom_y), pill);
         let start = Rect::from_center_size(Pos2::new((a.0.x + b.0.x) / 2.0, bottom_y), pill);
+
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
+    }
+
+    /// Height of the one-handed control stack, in units.
+    const STACK_UNITS: f32 = 9.2;
+    /// Width of the one-handed control stack, in units (without margins).
+    const STACK_WIDTH_UNITS: f32 = 3.5;
+
+    fn one_handed(safe: Rect, aspect: f32, unit: f32, left: bool) -> Self {
+        let portrait = safe.height() > safe.width();
+        let (screen, area) = if portrait {
+            let screen_h = (safe.width() / aspect).min(safe.height() * 0.45);
+            let screen_w = screen_h * aspect;
+            let screen = Rect::from_min_size(
+                Pos2::new(safe.center().x - screen_w / 2.0, safe.top()),
+                Vec2::new(screen_w, screen_h),
+            );
+            (screen, Rect::from_min_max(Pos2::new(safe.left(), screen.bottom()), safe.max))
+        } else {
+            // Column on the chosen side; the game fills the rest.
+            let u = unit.min(safe.height() / Self::STACK_UNITS);
+            let col_w = u * (Self::STACK_WIDTH_UNITS + 0.8);
+            let (col, rest) = if left {
+                (
+                    Rect::from_min_max(safe.min, Pos2::new(safe.left() + col_w, safe.bottom())),
+                    Rect::from_min_max(Pos2::new(safe.left() + col_w, safe.top()), safe.max),
+                )
+            } else {
+                (
+                    Rect::from_min_max(Pos2::new(safe.right() - col_w, safe.top()), safe.max),
+                    Rect::from_min_max(safe.min, Pos2::new(safe.right() - col_w, safe.bottom())),
+                )
+            };
+            let screen_w = (rest.height() * aspect).min(rest.width());
+            let screen = Rect::from_center_size(rest.center(), Vec2::new(screen_w, screen_w / aspect));
+            (screen, col)
+        };
+
+        let unit = unit
+            .min(area.height() / Self::STACK_UNITS)
+            .min(area.width() / (Self::STACK_WIDTH_UNITS + 0.8));
+        let margin = unit * 0.4;
+        let half_w = unit * Self::STACK_WIDTH_UNITS / 2.0;
+        let cx = if left { area.left() + margin + half_w } else { area.right() - margin - half_w };
+        let gap = unit * 0.3;
+        // Stack from the bottom up, where the thumb rests: Select/Start,
+        // D-pad, A/B, shoulders, then menu / fast-forward.
+        let mut y = area.bottom() - margin;
+
+        let pill = Vec2::new(unit * 1.5, unit * 0.62);
+        y -= pill.y / 2.0;
+        let select = Rect::from_center_size(Pos2::new(cx - pill.x / 2.0 - gap / 2.0, y), pill);
+        let start = Rect::from_center_size(Pos2::new(cx + pill.x / 2.0 + gap / 2.0, y), pill);
+        y -= pill.y / 2.0 + gap;
+
+        let dpad_radius = unit * 1.35;
+        y -= dpad_radius;
+        let dpad_center = Pos2::new(cx, y);
+        y -= dpad_radius * 1.25 + gap;
+
+        let face_r = unit * 0.6;
+        y -= face_r * 1.6;
+        let a = (Pos2::new(cx + face_r * 1.25, y - face_r * 0.3), face_r);
+        let b = (Pos2::new(cx - face_r * 1.25, y + face_r * 0.3), face_r);
+        y -= face_r * 1.6 + gap;
+
+        let shoulder = Vec2::new(unit * 1.6, unit * 0.8);
+        y -= shoulder.y / 2.0;
+        let l = Rect::from_center_size(Pos2::new(cx - shoulder.x / 2.0 - gap / 2.0, y), shoulder);
+        let r = Rect::from_center_size(Pos2::new(cx + shoulder.x / 2.0 + gap / 2.0, y), shoulder);
+        y -= shoulder.y / 2.0 + gap;
+
+        let small = Vec2::splat(unit * 0.8);
+        y -= small.y / 2.0;
+        let menu = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
+        let fast = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
 
         Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
     }
@@ -330,6 +427,56 @@ mod tests {
         assert!(l.dpad_center.x + l.dpad_radius <= l.screen.left());
         assert!(l.b.0.x - l.b.1 >= l.screen.right());
         assert!(l.screen.height() > 411.0 * 0.8, "game should still be large");
+    }
+
+    fn all_controls(l: &Layout) -> Vec<Rect> {
+        let circle = |(c, r): (Pos2, f32)| Rect::from_center_size(c, Vec2::splat(r * 2.0));
+        vec![
+            Rect::from_center_size(l.dpad_center, Vec2::splat(l.dpad_radius * 2.0)),
+            circle(l.a),
+            circle(l.b),
+            l.l, l.r, l.start, l.select, l.menu, l.fast,
+        ]
+    }
+
+    #[test]
+    fn one_handed_layouts_fit_one_side_and_every_button_works() {
+        for size in [Vec2::new(360.0, 780.0), Vec2::new(412.0, 915.0), Vec2::new(915.0, 412.0), Vec2::new(780.0, 360.0)] {
+            let safe = Rect::from_min_size(Pos2::ZERO, size);
+            for hand in [Hand::Left, Hand::Right] {
+                let l = Layout::compute_for(safe, Some([240, 160]), hand);
+                let ctx = format!("{size:?} {hand:?}");
+                // Every control is on screen, off the game image, and in a
+                // band a thumb on that side can reach (the side 60% of the
+                // width in portrait).
+                for rect in all_controls(&l) {
+                    assert!(safe.expand(1.0).contains_rect(rect), "{ctx}: {rect:?} off screen");
+                    assert!(!rect.intersects(l.screen), "{ctx}: {rect:?} covers the game");
+                    if size.y > size.x {
+                        let reach = size.x * 0.6;
+                        let ok = if hand == Hand::Left { rect.right() <= reach } else { rect.left() >= size.x - reach };
+                        assert!(ok, "{ctx}: {rect:?} out of thumb reach");
+                    }
+                }
+                // Each button is hit on its own.
+                for (p, want) in [
+                    (l.a.0, Buttons::A),
+                    (l.b.0, Buttons::B),
+                    (l.menu.center(), Buttons::MENU),
+                    (l.fast.center(), Buttons::FAST),
+                    (l.l.center(), Buttons::L),
+                    (l.r.center(), Buttons::R),
+                    (l.select.center(), Buttons::SELECT),
+                    (l.start.center(), Buttons::START),
+                    (l.dpad_center + Vec2::new(0.0, -l.dpad_radius * 0.8), Buttons::UP),
+                    (l.dpad_center + Vec2::new(0.0, l.dpad_radius * 0.8), Buttons::DOWN),
+                ] {
+                    assert_eq!(l.hit(p), want, "{ctx}");
+                }
+                assert!(l.screen.width() > size.x.min(size.y) * 0.6, "{ctx}: game too small");
+                assert!((l.screen.width() / l.screen.height() - 1.5).abs() < 0.01, "{ctx}");
+            }
+        }
     }
 
     #[test]

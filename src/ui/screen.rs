@@ -1,3 +1,4 @@
+use crate::gba::accessibility::{apply_colorblind_filter_to_pixels, ColorblindMode};
 use crate::gba::frame_blend::{FrameBlendMode, FrameBlender};
 use crate::gba::shader::{apply_shader, CustomShaderParams, ShaderPreset};
 use crate::gba::{SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -237,6 +238,8 @@ impl ScreenRenderer {
         nvidia_sharpness: f32,
         color_correction: bool,
         xbrz_factor: usize,
+        colorblind_mode: ColorblindMode,
+        colorblind_intensity: f32,
     ) -> &TextureHandle {
         let should_sharpen = nvidia_sharpen || filter == DisplayFilter::NvidiaSharpen;
 
@@ -249,7 +252,18 @@ impl ScreenRenderer {
                     self.image_buffer = ColorImage::new([target_w, target_h], Color32::BLACK);
                 }
 
-                for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(hd.pixels.iter()) {
+                // Colorblind filter first (ROADMAP M10), on the game's own
+                // colors, so shaders and sharpening work on corrected colors.
+                let filtered;
+                let src: &[u32] = if colorblind_mode != ColorblindMode::None {
+                    let mut v = hd.pixels.to_vec();
+                    apply_colorblind_filter_to_pixels(&mut v, colorblind_mode, colorblind_intensity);
+                    filtered = v;
+                    &filtered
+                } else {
+                    &hd.pixels
+                };
+                for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(src.iter()) {
                     let mut r = (pixel & 0xFF) as u8;
                     let mut g = ((pixel >> 8) & 0xFF) as u8;
                     let mut b = ((pixel >> 16) & 0xFF) as u8;
@@ -277,7 +291,8 @@ impl ScreenRenderer {
                 tex.set(self.image_buffer.clone(), tex_options);
                 return tex;
             } else if is_wide && ssaa_mode {
-                let wide_words = hd.downsample_ssaa_wide();
+                let mut wide_words = hd.downsample_ssaa_wide();
+                apply_colorblind_filter_to_pixels(&mut wide_words[..], colorblind_mode, colorblind_intensity);
                 let target_w = hd.width / hd.scale;
                 let target_h = hd.height / hd.scale;
                 if self.image_buffer.size != [target_w, target_h] {
@@ -314,7 +329,7 @@ impl ScreenRenderer {
             }
         }
 
-        let base_fb = if let Some(hd) = hd_frame {
+        let mut base_fb = if let Some(hd) = hd_frame {
             if hd.scale > 1 && ssaa_mode {
                 hd.downsample_ssaa()
             } else {
@@ -324,6 +339,7 @@ impl ScreenRenderer {
             Box::new(*raw_fb)
         };
 
+        apply_colorblind_filter_to_pixels(&mut base_fb[..], colorblind_mode, colorblind_intensity);
         let blended_fb = self.frame_blender.blend(&base_fb, blend_mode);
 
         if filter == DisplayFilter::Xbrz {

@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
 use gba_simulator::dmg::mmu::GbKey;
 use gba_simulator::dmg::GameBoy;
+use gba_simulator::gba::accessibility::{
+    AccessibilityManager, AccessibilityStore, ColorblindMode, Handedness, SlowMotionAudio, ALL_KEYS,
+};
 use gba_simulator::gba::frame_blend::{FrameBlendMode, FrameBlender};
 use gba_simulator::gba::keypad::Key;
 use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
@@ -85,6 +88,19 @@ impl Core {
         }
     }
 
+    /// Game code and header title, for per-game settings.
+    fn game_id(&self) -> (String, String) {
+        match self {
+            Core::Gba(g) => g
+                .mmu
+                .cartridge
+                .as_ref()
+                .map(|c| (c.game_code.clone(), c.title.clone()))
+                .unwrap_or_default(),
+            Core::GameBoy(g) => (String::new(), g.mmu.cart.title.clone()),
+        }
+    }
+
     fn set_buttons(&mut self, b: Buttons) {
         const MAP: [(u16, Key, Option<GbKey>); 10] = [
             (Buttons::A, Key::A, Some(GbKey::A)),
@@ -153,13 +169,14 @@ impl Core {
         }
     }
 
-    fn set_audio(&mut self, muted: bool, fast_forward: bool) {
+    fn set_audio(&mut self, muted: bool, fast_forward: bool, slow: f32, slow_audio: SlowMotionAudio) {
         let out = match self {
             Core::Gba(g) => &mut g.mmu.apu.audio_output,
             Core::GameBoy(g) => &mut g.mmu.apu.audio_output,
         };
         out.muted = muted;
         out.set_fast_forwarding(fast_forward);
+        out.set_slow_motion(if fast_forward { 1.0 } else { slow }, slow_audio);
     }
 }
 
@@ -200,6 +217,13 @@ struct CrabBoyApp {
     blend_mode: FrameBlendMode,
     shader_preset: ShaderPreset,
     hd_mode7: HdMode7Config,
+    /// Per-game accessibility settings (ROADMAP M10), saved to
+    /// `accessibility.json` in the app's files directory.
+    accessibility: AccessibilityManager,
+    accessibility_path: PathBuf,
+    accessibility_menu: bool,
+    /// Zoom factor the UI was last set to.
+    applied_zoom: f32,
 }
 
 impl CrabBoyApp {
@@ -221,6 +245,11 @@ impl CrabBoyApp {
                 log::error!("Cannot create {}: {e}", dir.display());
             }
         }
+        let accessibility_path = files_dir.join("accessibility.json");
+        let store = std::fs::read_to_string(&accessibility_path)
+            .map(|s| AccessibilityStore::from_json(&s))
+            .unwrap_or_default();
+        let accessibility = AccessibilityManager::with_store(store);
         let mut app = Self {
             roms_dir,
             states_dir,
@@ -245,6 +274,10 @@ impl CrabBoyApp {
             blend_mode: FrameBlendMode::Off,
             shader_preset: ShaderPreset::Crisp,
             hd_mode7: HdMode7Config::default(),
+            accessibility,
+            accessibility_path,
+            accessibility_menu: false,
+            applied_zoom: 0.0,
         };
         app.refresh_library();
         app
@@ -268,6 +301,18 @@ impl CrabBoyApp {
         self.toast = Some((msg, Instant::now()));
     }
 
+    /// Save accessibility edits for the current game and write them out.
+    fn commit_accessibility(&mut self) {
+        // Always write: "use for all games" / "reset" change the store
+        // without `commit` reporting it.
+        self.accessibility.commit();
+        {
+            if let Err(e) = std::fs::write(&self.accessibility_path, self.accessibility.store.to_json()) {
+                log::warn!("Could not save accessibility settings: {e}");
+            }
+        }
+    }
+
     fn start_game(&mut self, path: PathBuf) {
         // Persist the outgoing game's battery save before its core is dropped.
         if let Some(g) = self.game.as_mut() {
@@ -278,7 +323,10 @@ impl CrabBoyApp {
                 if let Core::Gba(ref mut gba) = core {
                     gba.set_hd_mode7_config(self.hd_mode7);
                 }
-                core.set_audio(self.muted, false);
+                let (code, header_title) = core.game_id();
+                self.accessibility.load_for_game(&code, &header_title);
+                let sm = self.accessibility.active.slow_motion;
+                core.set_audio(self.muted, false, sm.effective_multiplier(), sm.audio);
                 let title = display_name(&path);
                 self.toast(format!("Loaded {title}"));
                 self.game = Some(Game { core, rom_path: path, title });
@@ -296,6 +344,7 @@ impl CrabBoyApp {
         if let Some(mut g) = self.game.take() {
             g.core.flush_save();
         }
+        self.accessibility.unload_game();
         self.screen = Screen::Library;
         self.menu_open = false;
         self.texture = None;
@@ -342,15 +391,22 @@ impl CrabBoyApp {
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
         let Some(game) = self.game.as_mut() else { return };
-        if self.menu_open {
+        if self.menu_open || self.accessibility_menu {
             self.frame_accum = 0.0;
             return;
         }
 
-        game.core.set_buttons(buttons);
-        let speed = if self.fast_forward { FAST_FORWARD_SPEED } else { 1 };
-        self.frame_accum = (self.frame_accum + dt * GBA_FPS * speed as f64)
-            .min((MAX_CATCHUP_FRAMES * speed) as f64);
+        // Toggle-instead-of-hold (ROADMAP M10). The GBA button bits in
+        // `Buttons` match `Key` numbering, so the mask passes straight through.
+        let game_bits = buttons.0 & 0x3FF;
+        let latched = self.accessibility.process_mask(game_bits);
+        game.core.set_buttons(Buttons((buttons.0 & !0x3FF) | latched));
+        let speed = if self.fast_forward {
+            FAST_FORWARD_SPEED as f64
+        } else {
+            self.accessibility.active.slow_motion.effective_multiplier() as f64
+        };
+        self.frame_accum = (self.frame_accum + dt * GBA_FPS * speed).min(MAX_CATCHUP_FRAMES as f64 * speed.max(1.0));
         let started = Instant::now();
         while self.frame_accum >= 1.0 {
             game.core.run_frame();
@@ -380,8 +436,10 @@ impl CrabBoyApp {
                 if let Some(hd) = gba.render_hd_frame() {
                     if !self.hd_mode7.ssaa {
                         let hd_size = [hd.width, hd.height];
+                        let mut hd_px = hd.pixels.clone();
+                        self.accessibility.filter_framebuffer(&mut hd_px);
                         let mut hd_bytes = Vec::with_capacity(hd.width * hd.height * 4);
-                        for &pixel in &hd.pixels {
+                        for &pixel in &hd_px {
                             hd_bytes.extend_from_slice(&pixel.to_le_bytes());
                         }
                         let image = ColorImage::from_rgba_unmultiplied(hd_size, &hd_bytes);
@@ -391,7 +449,8 @@ impl CrabBoyApp {
                         }
                         return;
                     } else {
-                        let ssaa_words = hd.downsample_ssaa();
+                        let mut ssaa_words = hd.downsample_ssaa();
+                        self.accessibility.filter_framebuffer(&mut ssaa_words[..]);
                         let blended = self.frame_blender.blend(&ssaa_words, self.blend_mode);
                         let mut post_shader = [0u32; 240 * 160];
                         apply_shader(blended, &mut post_shader, self.shader_preset, None);
@@ -411,6 +470,14 @@ impl CrabBoyApp {
         }
 
         let size = game.core.frame_rgba(&mut self.rgba);
+        if size != [240, 160] && self.accessibility.active.colorblind_mode != ColorblindMode::None {
+            // Game Boy frames skip the GBA shader path below; filter here.
+            let mut words: Vec<u32> = self.rgba.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            self.accessibility.filter_framebuffer(&mut words);
+            for (dst, w) in self.rgba.chunks_exact_mut(4).zip(words) {
+                dst.copy_from_slice(&w.to_le_bytes());
+            }
+        }
 
         // Apply frame blending and shader pipeline on 240x160 GBA framebuffers (ROADMAP M5)
         if size == [240, 160] {
@@ -419,6 +486,7 @@ impl CrabBoyApp {
                 words[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
 
+            self.accessibility.filter_framebuffer(&mut words);
             let blended = self.frame_blender.blend(&words, self.blend_mode);
             let mut post_shader = [0u32; 240 * 160];
             apply_shader(blended, &mut post_shader, self.shader_preset, None);
@@ -598,6 +666,9 @@ impl CrabBoyApp {
                             }
                         }
                     }
+                    if ui.button("Accessibility...").clicked() {
+                        self.accessibility_menu = true;
+                    }
                     if ui.button("Reset").clicked() {
                         if let Some(p) = self.game.as_ref().map(|g| g.rom_path.clone()) {
                             self.start_game(p);
@@ -619,6 +690,107 @@ impl CrabBoyApp {
     }
 }
 
+impl CrabBoyApp {
+    /// Accessibility settings sheet (ROADMAP M10). Every change is saved for
+    /// the running game right away.
+    fn accessibility_ui(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut changed = false;
+        let title = self.accessibility.current_game_id.clone().unwrap_or_else(|| "All games".into());
+        // Keep the sheet on screen at every interface size.
+        let max_w = (ctx.screen_rect().width() - 24.0).max(200.0);
+        egui::Window::new("Accessibility")
+            .collapsible(false)
+            .resizable(false)
+            .max_width(max_w)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let max_h = ctx.screen_rect().height() * 0.8;
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                    ui.set_min_width(280.0f32.min(max_w));
+                    ui.set_max_width(max_w);
+                    let p = &mut self.accessibility.active;
+                    ui.label(RichText::new(format!("Saved for: {title}")).weak());
+                    ui.separator();
+                    ui.vertical_centered_justified(|ui| {
+                        if ui.button(format!("Colors: {}", p.colorblind_mode.display_name())).clicked() {
+                            p.colorblind_mode = p.colorblind_mode.next();
+                            changed = true;
+                        }
+                        if p.colorblind_mode != ColorblindMode::None {
+                            changed |= ui
+                                .add(egui::Slider::new(&mut p.colorblind_intensity, 0.1..=1.0).text("strength"))
+                                .changed();
+                        }
+                        let sm = &mut p.slow_motion;
+                        let sm_label = if sm.enabled {
+                            format!("Slow motion: {:.0}%", sm.speed_factor * 100.0)
+                        } else {
+                            "Slow motion: off".to_string()
+                        };
+                        if ui.button(sm_label).clicked() {
+                            sm.cycle();
+                            changed = true;
+                        }
+                        if sm.enabled && ui.button(format!("Slow-motion sound: {}", sm.audio.display_name())).clicked() {
+                            sm.audio = match sm.audio {
+                                SlowMotionAudio::PitchPreserved => SlowMotionAudio::Tape,
+                                SlowMotionAudio::Tape => SlowMotionAudio::Mute,
+                                SlowMotionAudio::Mute => SlowMotionAudio::PitchPreserved,
+                            };
+                            changed = true;
+                        }
+                        if ui.button(format!("Touch layout: {}", p.one_handed_touch.display_name())).clicked() {
+                            p.one_handed_touch = p.one_handed_touch.next();
+                            changed = true;
+                        }
+                        if ui.button(format!("Interface size: {:.0}%", p.ui_scale_clamped() * 100.0)).clicked() {
+                            let steps = [1.0, 1.25, 1.5, 1.75, 2.0, 0.75];
+                            let i = steps.iter().position(|&v| (v - p.ui_scale).abs() < 0.01).map_or(0, |i| i + 1);
+                            p.ui_scale = steps[i % steps.len()];
+                            changed = true;
+                        }
+                    });
+                    ui.separator();
+                    ui.label("Toggle instead of hold:");
+                    ui.horizontal_wrapped(|ui| {
+                        for key in ALL_KEYS {
+                            let st = &mut p.sticky_buttons;
+                            let mut on = st.is_key_toggle_enabled(key);
+                            if ui.checkbox(&mut on, gba_simulator::gba::accessibility::key_name(key)).changed() {
+                                st.set_key_toggle_enabled(key, on);
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.vertical_centered_justified(|ui| {
+                        if self.accessibility.current_game_id.is_some() {
+                            if ui.button("Use for all games").clicked() {
+                                self.accessibility.set_as_global_default();
+                                changed = true;
+                            }
+                            if ui.button("Reset this game to default").clicked() {
+                                self.accessibility.reset_game_to_default();
+                                changed = true;
+                            }
+                        }
+                        if ui.button("Done").clicked() {
+                            self.accessibility_menu = false;
+                        }
+                    });
+                });
+            });
+        if !open {
+            self.accessibility_menu = false;
+        }
+        if changed {
+            self.commit_accessibility();
+        }
+    }
+}
+
 impl eframe::App for CrabBoyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.last_inset_poll.elapsed() > Duration::from_secs(1) {
@@ -626,6 +798,13 @@ impl eframe::App for CrabBoyApp {
             self.last_inset_poll = Instant::now();
         }
         self.poll_imports();
+
+        // Interface scale (ROADMAP M10).
+        let zoom = self.accessibility.active.ui_scale_clamped();
+        if (zoom - self.applied_zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(zoom);
+            self.applied_zoom = zoom;
+        }
 
         // Leaving the app (home button, incoming call, file picker): flush
         // saves right away, since Android may kill a backgrounded process
@@ -654,8 +833,13 @@ impl eframe::App for CrabBoyApp {
             Screen::Library => self.library_ui(ctx),
             Screen::Playing if self.game.is_some() => {
                 let safe = self.insets.to_points(ctx).shrink(ctx.screen_rect());
-                let layout = touch::Layout::compute(safe, self.texture.as_ref().map(|t| t.size()));
-                let touch = if self.menu_open {
+                let hand = match self.accessibility.active.one_handed_touch {
+                    Handedness::Standard => touch::Hand::Both,
+                    Handedness::LeftHand => touch::Hand::Left,
+                    Handedness::RightHand => touch::Hand::Right,
+                };
+                let layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
+                let touch = if self.menu_open || self.accessibility_menu {
                     self.touch.clear();
                     Buttons::default()
                 } else {
@@ -670,14 +854,19 @@ impl eframe::App for CrabBoyApp {
                 let buttons = Buttons(touch.0 | gamepad::buttons().0);
 
                 let (muted, ff) = (self.muted, self.fast_forward);
+                let sm = self.accessibility.active.slow_motion;
                 if let Some(g) = self.game.as_mut() {
-                    g.core.set_audio(muted, ff);
+                    g.core.set_audio(muted, ff, sm.effective_multiplier(), sm.audio);
                 }
                 self.step_emulation(buttons);
                 self.upload_frame(ctx);
                 // The texture size is known now; recompute for the first frame.
-                let layout = touch::Layout::compute(safe, self.texture.as_ref().map(|t| t.size()));
+                let layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
                 self.game_ui(ctx, &layout);
+                if self.accessibility_menu {
+                    self.menu_open = false;
+                    self.accessibility_ui(ctx);
+                }
             }
             Screen::Playing => self.screen = Screen::Library,
         }

@@ -44,6 +44,8 @@ USAGE:
     crabboy-advance <ROM> --widescreen                          Launch GUI with 16:9 widescreen expansion
     crabboy-advance --diagnose <ROM> [--frames N] [--output P]  Run headless diagnostics and export report
     crabboy-advance --dump-frame <ROM> [--frame N] [--output P] Run headless to frame N and save PNG screenshot
+                    [--colorblind MODE]                         ...through a colorblind filter (protanopia, deuteranopia,
+                                                                tritanopia, achromatopsia, high_contrast)
     crabboy-advance --dump-tiles <ROM> [--frame N] [--output D] Run headless to frame N and dump tiles/sprites pack
     crabboy-advance --export-midi <ROM> [--song N] [--output P] Export an M4A song as Standard MIDI File (.mid)
     crabboy-advance --export-stems <ROM> [--song N] [--output D] [--seconds S] Export an M4A song as 48 kHz WAV stems
@@ -219,7 +221,22 @@ fn handle_headless_cli(args: &[String]) {
             gba.run_frame();
         }
 
-        if let Err(e) = gba.dump_frame_png(&output_path) {
+        let colorblind = get_arg_val(args, "--colorblind")
+            .map(|m| gba::accessibility::ColorblindMode::parse(&m))
+            .unwrap_or_default();
+        let saved = if colorblind != gba::accessibility::ColorblindMode::None {
+            let mut px = *gba.get_framebuffer();
+            gba::accessibility::apply_colorblind_filter_to_pixels(&mut px, colorblind, 1.0);
+            let bytes: Vec<u8> = px.iter().flat_map(|p| {
+                let [r, g, b, _] = p.to_le_bytes();
+                [r, g, b, 0xFF]
+            }).collect();
+            image::save_buffer(&output_path, &bytes, 240, 160, image::ExtendedColorType::Rgba8)
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        } else {
+            gba.dump_frame_png(&output_path)
+        };
+        if let Err(e) = saved {
             eprintln!(
                 "Failed to save frame PNG to '{}': {}",
                 output_path.display(),

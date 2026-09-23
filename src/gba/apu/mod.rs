@@ -6,6 +6,7 @@ pub mod dmg;
 pub mod ff_stretch;
 pub mod resample;
 pub mod ring;
+pub mod slowmo_stretch;
 pub mod spatial;
 
 pub use audio_output::{AudioOutput, SurroundMode};

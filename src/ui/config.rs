@@ -161,6 +161,8 @@ pub struct AppConfig {
     pub render: RenderConfig,
     /// Audio engine and HD re-synthesis configuration (ROADMAP M9).
     pub audio: AudioConfig,
+    /// Accessibility configuration and per-game profiles (ROADMAP M10).
+    pub accessibility: crate::gba::accessibility::AccessibilityStore,
 }
 
 impl Default for AppConfig {
@@ -173,6 +175,7 @@ impl Default for AppConfig {
             save_sync: SaveSyncConfig::default(),
             render: RenderConfig::default(),
             audio: AudioConfig::default(),
+            accessibility: Default::default(),
         }
     }
 }

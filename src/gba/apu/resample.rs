@@ -36,6 +36,15 @@ impl Resampler {
     /// current level and `low`/`high` the band to hold it in: below `low`
     /// produce 0.5% more output, above `high` 0.5% less.
     pub fn process(&mut self, input: &[f32], fill: usize, low: usize, high: usize) -> Vec<f32> {
+        self.process_at_speed(input, fill, low, high, 1.0)
+    }
+
+    /// Like `process`, but plays the input at `speed` (0 < speed <= 1):
+    /// fewer input frames per output frame, so the audio lasts `1 / speed`
+    /// times longer at proportionally lower pitch ("tape" slow motion,
+    /// ROADMAP M10).
+    pub fn process_at_speed(&mut self, input: &[f32], fill: usize, low: usize, high: usize, speed: f32) -> Vec<f32> {
+        let speed = (speed as f64).clamp(0.05, 1.0);
         let adjust = if fill > high {
             1.005
         } else if fill < low {
@@ -44,7 +53,7 @@ impl Resampler {
             1.0
         };
         // Input frames consumed per output frame.
-        let step = self.base_step * adjust;
+        let step = self.base_step * adjust * speed;
         let mut out = Vec::with_capacity((input.len() as f64 / step) as usize + 4);
         for frame in input.chunks_exact(2) {
             let cur = [frame[0], frame[1]];
@@ -93,6 +102,14 @@ mod tests {
         let n_lo = lo.process(&tone(48_000), 0, 1000, 3000).len() / 2;
         let n_hi = hi.process(&tone(48_000), 9999, 1000, 3000).len() / 2;
         assert!(n_lo > 48_000 && n_hi < 48_000, "{n_lo} {n_hi}");
+    }
+
+    #[test]
+    fn tape_speed_lengthens_output() {
+        let mut r = Resampler::new(CORE_SAMPLE_RATE);
+        let out = r.process_at_speed(&tone(4800), 2000, 1000, 3000, 0.5);
+        let frames = out.len() / 2;
+        assert!((9590..=9610).contains(&frames), "{frames}");
     }
 
     #[test]

@@ -84,6 +84,93 @@ impl Default for KeyBindings {
     }
 }
 
+impl KeyBindings {
+    /// One-handed keyboard layout for the left hand (ROADMAP M10): the hand
+    /// rests on WASD and everything is within reach around it. Avoids the
+    /// number row (save-slot keys) and every Ctrl-free hotkey.
+    pub fn left_handed_one_hand() -> Self {
+        Self {
+            up: EKey::W,
+            left: EKey::A,
+            down: EKey::S,
+            right: EKey::D,
+            a: EKey::E,
+            b: EKey::Q,
+            l: EKey::Tab,
+            r: EKey::R,
+            select: EKey::Z,
+            start: EKey::X,
+            turbo: EKey::Space,
+            rewind: EKey::C,
+            pause: EKey::Escape,
+            frame_step: EKey::V,
+            quick_save: EKey::F5,
+            quick_load: EKey::F8,
+            // Ctrl+T resets.
+            reset: EKey::T,
+            fullscreen: EKey::F11,
+            screenshot: EKey::F12,
+        }
+    }
+
+    /// One-handed keyboard layout for the right hand: IJKL D-pad with the
+    /// buttons around it.
+    pub fn right_handed_one_hand() -> Self {
+        Self {
+            up: EKey::I,
+            left: EKey::J,
+            down: EKey::K,
+            right: EKey::L,
+            a: EKey::O,
+            b: EKey::U,
+            l: EKey::Y,
+            r: EKey::P,
+            select: EKey::M,
+            start: EKey::Enter,
+            turbo: EKey::H,
+            rewind: EKey::Backspace,
+            pause: EKey::Escape,
+            frame_step: EKey::Semicolon,
+            quick_save: EKey::F5,
+            quick_load: EKey::F8,
+            // Ctrl+Delete resets.
+            reset: EKey::Delete,
+            fullscreen: EKey::F11,
+            screenshot: EKey::F12,
+        }
+    }
+
+    /// The bindings in effect for a one-handed layout choice. `Standard`
+    /// is the user's own (possibly remapped) bindings, which the presets
+    /// never overwrite.
+    pub fn for_layout(&self, layout: crate::gba::accessibility::Handedness) -> Self {
+        use crate::gba::accessibility::Handedness;
+        match layout {
+            Handedness::Standard => self.clone(),
+            Handedness::LeftHand => Self::left_handed_one_hand(),
+            Handedness::RightHand => Self::right_handed_one_hand(),
+        }
+    }
+
+    /// (GBA button name, key name) pairs, for showing a layout to the user.
+    pub fn game_button_summary(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("Up", self.up.name()),
+            ("Down", self.down.name()),
+            ("Left", self.left.name()),
+            ("Right", self.right.name()),
+            ("A", self.a.name()),
+            ("B", self.b.name()),
+            ("L", self.l.name()),
+            ("R", self.r.name()),
+            ("Select", self.select.name()),
+            ("Start", self.start.name()),
+            ("Turbo", self.turbo.name()),
+            ("Rewind", self.rewind.name()),
+        ]
+    }
+}
+
 /// `serde` adapter for `egui::Key` <-> its name string.
 mod ekey {
     use super::EKey;
@@ -1494,6 +1581,29 @@ mod tests {
             !held[PadAction::Start.index()],
             "Start leaked into the game while the chord was held"
         );
+    }
+
+    #[test]
+    fn one_handed_layouts_have_no_duplicate_or_hotkey_clashes() {
+        // Keys the app handles without Ctrl regardless of bindings.
+        let reserved = [
+            EKey::Num0, EKey::Num1, EKey::Num2, EKey::Num3, EKey::Num4,
+            EKey::Num5, EKey::Num6, EKey::Num7, EKey::Num8, EKey::Num9,
+            EKey::F1, EKey::F3, EKey::F6, EKey::F7, EKey::N, EKey::Period,
+        ];
+        for kb in [KeyBindings::left_handed_one_hand(), KeyBindings::right_handed_one_hand()] {
+            let game = [kb.a, kb.b, kb.select, kb.start, kb.right, kb.left, kb.up, kb.down, kb.r, kb.l, kb.turbo, kb.rewind];
+            let all: Vec<EKey> = game.iter().copied().chain([kb.pause, kb.frame_step, kb.reset]).collect();
+            for (i, k) in all.iter().enumerate() {
+                assert!(!all[i + 1..].contains(k), "{k:?} bound twice");
+                assert!(!reserved.contains(k), "{k:?} clashes with a hotkey");
+            }
+        }
+        // The left-hand layout only uses the left half of the keyboard.
+        let left = KeyBindings::left_handed_one_hand();
+        for (_, name) in left.game_button_summary() {
+            assert!(["W", "A", "S", "D", "E", "Q", "Tab", "R", "Z", "X", "Space", "C"].contains(&name), "{name}");
+        }
     }
 
     #[test]

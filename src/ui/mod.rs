@@ -1,5 +1,6 @@
 //! Modern Windows 11 UI/UX Application Implementation
 
+pub mod accessibility_dialog;
 pub mod ai_agent;
 pub mod ai_agent_dialog;
 pub mod audio_mixer_dialog;
@@ -28,6 +29,7 @@ pub mod updater;
 pub mod updater_dialog;
 pub mod web_guide;
 
+use accessibility_dialog::AccessibilityDialog;
 use ai_agent::AiAgent;
 use ai_agent_dialog::AiAgentDialog;
 use audio_mixer_dialog::AudioMixerDialog;
@@ -100,6 +102,10 @@ pub struct GbaApp {
     pub updater: UpdateManager,
     pub updater_dialog: UpdaterDialog,
     pub save_sync_dialog: SaveSyncDialog,
+    pub accessibility_dialog: AccessibilityDialog,
+    /// Colorblind filter, slow motion, sticky buttons, one-handed layout and
+    /// UI scale, per game (ROADMAP M10).
+    pub accessibility: crate::gba::accessibility::AccessibilityManager,
 
     // Settings
     pub run_ahead: crate::gba::run_ahead::RunAhead,
@@ -238,6 +244,9 @@ impl GbaApp {
             gba.m4a.sampler.reverb_level = config.audio.reverb_level;
             gba.m4a.config.master_volume = config.audio.master_volume;
 
+            let accessibility = crate::gba::accessibility::AccessibilityManager::with_store(config.accessibility.clone());
+            cc.egui_ctx.set_zoom_factor(accessibility.active.ui_scale_clamped());
+
             let mut app = Self {
             gba,
             gb: None,
@@ -266,6 +275,8 @@ impl GbaApp {
             updater,
             updater_dialog: UpdaterDialog::new(),
             save_sync_dialog: SaveSyncDialog::new(),
+            accessibility_dialog: AccessibilityDialog::new(),
+            accessibility,
             run_ahead,
             run_ahead_config,
             save_sync_config: config.save_sync.clone(),
@@ -349,6 +360,7 @@ impl GbaApp {
                 Ok(gb) => {
                     let model = if gb.is_cgb() { "Game Boy Color" } else { "Game Boy" };
                     let title = gb.mmu.cart.title.clone();
+                    self.accessibility.load_for_game("", &title);
                     self.gb = Some(gb);
                     self.console = ConsoleKind::GameBoy;
                     self.loaded_rom_name = name;
@@ -376,6 +388,10 @@ impl GbaApp {
                         self.rewind_manager.clear();
                         self.widescreen_config = self.gba.widescreen_config().clone();
                         self.update_run_ahead_for_rom();
+                        if let Some(cart) = self.gba.mmu.cartridge.as_ref() {
+                            let (code, title) = (cart.game_code.clone(), cart.title.clone());
+                            self.accessibility.load_for_game(&code, &title);
+                        }
                         self.sync_saves();
                         self.set_toast(format!("Loaded: {}", self.loaded_rom_name));
                     }
@@ -537,6 +553,7 @@ impl GbaApp {
                 reverb_level: self.gba.m4a.config.reverb_level,
                 master_volume: self.gba.m4a.config.master_volume,
             },
+            accessibility: self.accessibility.store.clone(),
         };
         if let Err(e) = cfg.save() {
             log::warn!("Could not save config: {}", e);
@@ -754,7 +771,9 @@ impl eframe::App for GbaApp {
         // BEFORE polling: the poll decides on that basis whether game buttons
         // are emitted at all.
         self.gamepad_manager.guide_open = self.guide_dialog.is_open;
-        let pad = handle_input(ctx, &self.key_bindings, &mut self.gamepad_manager, &mut |key: Key, pressed: bool| {
+        // One-handed layouts swap the whole keyboard map (ROADMAP M10).
+        let kb = self.key_bindings.for_layout(self.accessibility.active.one_handed_desktop);
+        let pad = handle_input(ctx, &kb, &mut self.gamepad_manager, &mut |key: Key, pressed: bool| {
             key_events.push((key, pressed));
         });
         if typing {
@@ -764,6 +783,8 @@ impl eframe::App for GbaApp {
             key_events.retain(|(_, pressed)| !*pressed);
         }
         for (k, p) in key_events {
+            // Toggle-instead-of-hold (ROADMAP M10).
+            let p = self.accessibility.process_key(k, p);
             match self.gb {
                 Some(ref mut gb) => {
                     if let Some(gk) = Self::gb_key_for(k) {
@@ -817,7 +838,7 @@ impl eframe::App for GbaApp {
 
         // Fullscreen Toggle (F11 / Alt+Enter / a bound controller combo)
         let wants_fullscreen = ctx.input(|i| {
-            i.key_pressed(self.key_bindings.fullscreen)
+            i.key_pressed(kb.fullscreen)
                 || (i.modifiers.alt && i.key_pressed(egui::Key::Enter))
         }) || pad.pressed(PadAction::Fullscreen);
 
@@ -832,7 +853,7 @@ impl eframe::App for GbaApp {
         }
 
         // Screenshot Hotkey (F12)
-        if ctx.input(|i| i.key_pressed(self.key_bindings.screenshot)) {
+        if ctx.input(|i| i.key_pressed(kb.screenshot)) {
             self.take_screenshot();
         }
 
@@ -889,26 +910,26 @@ impl eframe::App for GbaApp {
 
         // Keyboard Hotkeys
         ctx.input(|i| {
-            if i.key_pressed(self.key_bindings.pause) {
+            if i.key_pressed(kb.pause) {
                 self.is_paused = !self.is_paused;
                 self.set_toast(if self.is_paused { "Paused" } else { "Resumed" });
             }
-            if i.key_pressed(self.key_bindings.reset) && i.modifiers.ctrl {
+            if i.key_pressed(kb.reset) && i.modifiers.ctrl {
                 self.reset_active();
                 self.rewind_manager.clear();
                 self.set_toast("Reset Emulation");
             }
-            if i.key_pressed(self.key_bindings.frame_step) && self.is_paused {
+            if i.key_pressed(kb.frame_step) && self.is_paused {
                 self.run_active_frame();
             }
-            if i.key_pressed(self.key_bindings.quick_save) {
+            if i.key_pressed(kb.quick_save) {
                 let slot = self.save_manager.active_slot;
                 match self.save_active_slot(slot) {
                     Ok(()) => self.set_toast(format!("Saved to Slot {} (F5)", slot)),
                     Err(e) => self.set_toast(e),
                 }
             }
-            if i.key_pressed(self.key_bindings.quick_load) {
+            if i.key_pressed(kb.quick_load) {
                 let slot = self.save_manager.active_slot;
                 match self.load_active_slot(slot) {
                     Ok(()) => self.set_toast(format!("Loaded Slot {} (F8)", slot)),
@@ -924,6 +945,9 @@ impl eframe::App for GbaApp {
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::P) {
                 self.pokemon_companion.is_open = !self.pokemon_companion.is_open;
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::U) {
+                self.accessibility_dialog.is_open = !self.accessibility_dialog.is_open;
             }
             if i.modifiers.ctrl && i.key_pressed(egui::Key::M) {
                 self.audio_mixer_dialog.is_open = !self.audio_mixer_dialog.is_open;
@@ -1015,18 +1039,25 @@ impl eframe::App for GbaApp {
         }
 
         // Turbo and Rewind States
-        let wants_rewind = ctx.input(|i| i.key_down(self.key_bindings.rewind)) || pad.held(PadAction::Rewind);
+        let wants_rewind = ctx.input(|i| i.key_down(kb.rewind)) || pad.held(PadAction::Rewind);
         self.is_rewinding = wants_rewind && !self.is_paused;
 
-        let is_turbo = ctx.input(|i| i.key_down(self.key_bindings.turbo)) || pad.held(PadAction::Turbo);
-        let effective_speed = if is_turbo { 4 } else { self.speed_multiplier };
+        let is_turbo = ctx.input(|i| i.key_down(kb.turbo)) || pad.held(PadAction::Turbo);
+        // Slow motion (ROADMAP M10) applies at normal speed; fast forward
+        // and turbo override it.
+        let slow = if is_turbo || self.speed_multiplier > 1 {
+            1.0
+        } else {
+            self.accessibility.active.slow_motion.effective_multiplier() as f64
+        };
+        let effective_speed = if is_turbo { 4.0 } else { self.speed_multiplier as f64 * slow };
 
         // Fixed-Time Accumulator for hardware-accurate 59.7275 Hz / 60 FPS frame pacing
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_instant).min(Duration::from_millis(100));
         self.last_frame_instant = now;
 
-        let target_frame_duration = Duration::from_secs_f64(1.0 / (59.7275 * effective_speed as f64));
+        let target_frame_duration = Duration::from_secs_f64(1.0 / (59.7275 * effective_speed));
         let mut frames_run = 0;
 
         // The agent may request that emulation freeze while it waits on the
@@ -1081,11 +1112,14 @@ impl eframe::App for GbaApp {
             self.ai_agent.tick(frames_run as u32);
         }
 
-        let ff = is_turbo || effective_speed > 1;
-        match self.gb {
-            Some(ref mut gb) => gb.mmu.apu.audio_output.set_fast_forwarding(ff),
-            None => self.gba.mmu.apu.audio_output.set_fast_forwarding(ff),
-        }
+        let ff = is_turbo || effective_speed > 1.0;
+        let slow_audio = self.accessibility.active.slow_motion.audio;
+        let out = match self.gb {
+            Some(ref mut gb) => &mut gb.mmu.apu.audio_output,
+            None => &mut self.gba.mmu.apu.audio_output,
+        };
+        out.set_fast_forwarding(ff);
+        out.set_slow_motion(slow as f32, slow_audio);
 
         // Poll Pokémon party periodically if companion is active
         // The companion reads GBA-specific party structures out of EWRAM, so
@@ -1258,6 +1292,31 @@ impl eframe::App for GbaApp {
                     if ui.radio_value(&mut self.speed_multiplier, 1, "1x (Normal 60 FPS)").clicked() { ui.close_menu(); }
                     if ui.radio_value(&mut self.speed_multiplier, 2, "2x Fast Forward").clicked() { ui.close_menu(); }
                     if ui.radio_value(&mut self.speed_multiplier, 4, "4x Turbo").clicked() { ui.close_menu(); }
+                    ui.separator();
+                    ui.label("Slow motion (saved per game):");
+                    {
+                        let sm = &mut self.accessibility.active.slow_motion;
+                        let mut pick = if sm.enabled { (sm.speed_factor * 100.0).round() as u32 } else { 100 };
+                        let before = pick;
+                        for (v, label) in [(100, "Off"), (75, "75%"), (50, "50%"), (25, "25%"), (10, "10%")] {
+                            ui.radio_value(&mut pick, v, label);
+                        }
+                        if pick != before {
+                            sm.enabled = pick < 100;
+                            if pick < 100 {
+                                sm.speed_factor = pick as f32 / 100.0;
+                            }
+                            if self.accessibility.commit() {
+                                self.config_dirty = true;
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Accessibility... (Ctrl+U)").clicked() {
+                        self.accessibility_dialog.is_open = true;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Video", |ui| {
@@ -1845,6 +1904,8 @@ impl eframe::App for GbaApp {
                     self.nvidia_sharpness,
                     self.color_correction,
                     self.xbrz_factor,
+                    self.accessibility.active.colorblind_mode,
+                    self.accessibility.active.colorblind_intensity,
                 );
 
                 let x_offset = (available_size.x - target_size.x).max(0.0) / 2.0;
@@ -2231,6 +2292,19 @@ impl eframe::App for GbaApp {
         }
         self.guide_dialog.show(ctx, &mut dialog_toast);
         self.updater_dialog.show(ctx, &self.updater, &mut dialog_toast);
+
+        if self.accessibility_dialog.show(ctx, &mut self.accessibility, &self.key_bindings, &mut dialog_toast) {
+            // Always flush: reset / "use for all games" change the store
+            // without `commit` reporting it.
+            self.accessibility.commit();
+            self.config_dirty = true;
+        }
+        // Interface scale: applied once no mouse button is held, so dragging
+        // the size slider doesn't rescale the UI under the pointer.
+        let zoom = self.accessibility.active.ui_scale_clamped();
+        if (ctx.zoom_factor() - zoom).abs() > 0.001 && !ctx.input(|i| i.pointer.any_down()) {
+            ctx.set_zoom_factor(zoom);
+        }
 
         let local_dirs = self.local_save_directories();
         self.save_sync_dialog.show(

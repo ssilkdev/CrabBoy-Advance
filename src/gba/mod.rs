@@ -1,5 +1,6 @@
 //! Main GBA System Coordinator
 
+pub mod accessibility;
 pub mod apu;
 pub mod cheats;
 pub mod cpu;

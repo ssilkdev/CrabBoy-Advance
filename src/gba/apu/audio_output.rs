@@ -39,8 +39,27 @@ pub fn set_headless(on: bool) -> bool {
 /// samples): below LOW it speeds up output by 0.5%, above HIGH it slows it.
 const RATE_LOW: usize = 1000;
 const RATE_HIGH: usize = 3000;
-/// Output queue capacity in interleaved samples.
-const QUEUE_CAPACITY: usize = 8192;
+/// Interleaved samples the device plays between two emulated frames at
+/// slow-motion `speed`.
+fn slowmo_gap(speed: f32) -> usize {
+    (super::resample::CORE_SAMPLE_RATE as f32 * 2.0 / 60.0 / speed.max(0.05)) as usize
+}
+
+/// Queue band for slow motion (ROADMAP M10). The core delivers a frame's
+/// audio in one burst per emulated frame, and at speed `s` those bursts are
+/// 1/(60 s) seconds apart, so the queue must hold at least one gap's worth
+/// (plus a stretcher hop) or the device runs dry between frames. At 10%
+/// speed that's ~200 ms of latency, which is fine while slowed down.
+fn slowmo_band(speed: f32) -> (usize, usize) {
+    let per_gap = slowmo_gap(speed);
+    let low = (per_gap + 2 * super::slowmo_stretch::HOP * 2 + 600).min(QUEUE_CAPACITY / 2);
+    (low, (low + 2000).min(QUEUE_CAPACITY - 4096))
+}
+/// Output queue capacity in interleaved samples (~680 ms at 48 kHz). Only
+/// slow motion fills it this far (see `slowmo_band`); at normal speed the
+/// rate control keeps it within RATE_LOW..RATE_HIGH, so latency is the same
+/// as with a small queue.
+const QUEUE_CAPACITY: usize = 65536;
 /// Length of the fade applied when a batch has to be cut short.
 const FADE_SAMPLES: usize = 256;
 
@@ -65,6 +84,16 @@ pub struct AudioOutput {
     ff_decimator: Mutex<super::ff_stretch::GrainDecimator>,
     /// Core rate -> device rate, with rate control (see `resample`).
     resampler: Mutex<super::resample::Resampler>,
+    /// Slow-motion speed as f32 bits (1.0 = normal; ROADMAP M10).
+    slow_motion_speed: AtomicU32,
+    /// Slow-motion audio: 0 pitch-preserved, 1 tape, 2 mute.
+    slow_motion_audio: AtomicU8,
+    /// Pitch-preserving stretcher for slow motion.
+    stretcher: Mutex<super::slowmo_stretch::TimeStretcher>,
+    /// Slow-motion speed seen by the previous batch (f32 bits).
+    last_slow_speed: AtomicU32,
+    /// Dropping grains to shed leftover slow-motion buffering.
+    catching_up: AtomicBool,
 }
 
 impl Default for AudioOutput {
@@ -114,6 +143,11 @@ impl AudioOutput {
             is_fast_forwarding,
             ff_decimator: Mutex::new(super::ff_stretch::GrainDecimator::new()),
             resampler: Mutex::new(super::resample::Resampler::new(sample_rate)),
+            slow_motion_speed: AtomicU32::new(1.0f32.to_bits()),
+            slow_motion_audio: AtomicU8::new(0),
+            stretcher: Mutex::new(super::slowmo_stretch::TimeStretcher::new()),
+            last_slow_speed: AtomicU32::new(1.0f32.to_bits()),
+            catching_up: AtomicBool::new(false),
         }
     }
 
@@ -266,6 +300,38 @@ impl AudioOutput {
         self.is_fast_forwarding.store(active, Ordering::Relaxed);
     }
 
+    /// Tell the output how fast emulation runs relative to real time
+    /// (ROADMAP M10 slow motion). Values >= 1.0 mean normal speed; fast
+    /// forward is handled separately by `set_fast_forwarding`.
+    pub fn set_slow_motion(&self, speed: f32, audio: crate::gba::accessibility::SlowMotionAudio) {
+        use crate::gba::accessibility::SlowMotionAudio;
+        let speed = if speed.is_finite() { speed.clamp(0.05, 1.0) } else { 1.0 };
+        self.slow_motion_speed.store(speed.to_bits(), Ordering::Relaxed);
+        let mode = match audio {
+            SlowMotionAudio::PitchPreserved => 0,
+            SlowMotionAudio::Tape => 1,
+            SlowMotionAudio::Mute => 2,
+        };
+        self.slow_motion_audio.store(mode, Ordering::Relaxed);
+    }
+
+    pub fn slow_motion_speed(&self) -> f32 {
+        f32::from_bits(self.slow_motion_speed.load(Ordering::Relaxed))
+    }
+
+    /// Take up to `n` queued samples, as the device callback would. For
+    /// headless use (tests, tools) where no device drains the queue.
+    pub fn drain_queued(&self, n: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            match self.buffer.pop() {
+                Some(v) => out.push(v),
+                None => break,
+            }
+        }
+        out
+    }
+
     pub fn buffer_len(&self) -> usize {
         self.buffer.len()
     }
@@ -298,16 +364,61 @@ impl AudioOutput {
         if self.muted || samples.is_empty() {
             return;
         }
+        // Slow motion (ROADMAP M10): the core makes `speed` seconds of
+        // audio per real second, so stretch it back to real time.
+        let slow = if self.is_fast_forwarding() { 1.0 } else { self.slow_motion_speed() };
+        let slow_mode = self.slow_motion_audio.load(Ordering::Relaxed);
+        let slowed = slow < 0.999;
+        // Entering slow motion (or going slower): the queue must jump to the
+        // deeper band at once, so top it up with silence (a few tens of ms,
+        // once) instead of letting the device run dry while rate control
+        // creeps up to it.
+        let prev_slow = f32::from_bits(self.last_slow_speed.swap(slow.to_bits(), Ordering::Relaxed));
+        let fresh_stretch = slow_mode == 0 && self.stretcher.lock().map(|st| !st.is_active()).unwrap_or(false);
+        if slowed && (slow < prev_slow - 0.001 || fresh_stretch) {
+            let (lo, hi) = slowmo_band(slow);
+            // A fresh time stretcher holds back its first grain, which at
+            // low speeds is more than one frame's input: cover one more gap.
+            let want = (lo + hi) / 2 + if fresh_stretch { slowmo_gap(slow) } else { 0 };
+            let have = self.buffer_len();
+            if have < want {
+                self.buffer.push_slice(&vec![0.0; (want - have) & !1]);
+            }
+        }
+        let stretched;
         let silent;
-        let samples = if self.is_fast_forwarding() && self.fast_forward_mode() == 1 {
-            // Smart mute: keep the stream flowing, silently.
-            silent = vec![0.0; samples.len()];
+        let samples = if (self.is_fast_forwarding() && self.fast_forward_mode() == 1) || (slowed && slow_mode == 2) {
+            // Smart mute: keep the stream flowing, silently. In slow motion
+            // the silence must also last 1/speed times longer.
+            let len = if slowed { ((samples.len() as f32 / slow) as usize) & !1 } else { samples.len() };
+            silent = vec![0.0; len];
             &silent[..]
+        } else if slowed && slow_mode == 0 {
+            stretched = match self.stretcher.lock() {
+                Ok(mut st) => st.process(samples, slow),
+                Err(_) => samples.to_vec(),
+            };
+            &stretched[..]
         } else {
+            // Leaving pitch-preserved slow motion: play out its tail.
+            if let Ok(mut st) = self.stretcher.lock() {
+                if st.is_active() {
+                    stretched = { let mut t = st.flush(); t.extend_from_slice(samples); t };
+                    self.enqueue_resampled(&stretched, 1.0, (RATE_LOW, RATE_HIGH));
+                    return;
+                }
+            }
             samples
         };
+        let tape_speed = if slowed && slow_mode == 1 { slow } else { 1.0 };
+        let band = if slowed { slowmo_band(slow) } else { (RATE_LOW, RATE_HIGH) };
+        self.enqueue_resampled(samples, tape_speed, band);
+    }
+
+    /// Resample to the device rate, apply fast-forward decimation, queue.
+    fn enqueue_resampled(&self, samples: &[f32], tape_speed: f32, (low, high): (usize, usize)) {
         let resampled = match self.resampler.lock() {
-            Ok(mut r) => r.process(samples, self.buffer_len(), RATE_LOW, RATE_HIGH),
+            Ok(mut r) => r.process_at_speed(samples, self.buffer_len(), low, high, tape_speed),
             Err(_) => samples.to_vec(),
         };
         let samples = &resampled[..];
@@ -318,12 +429,22 @@ impl AudioOutput {
         // Fast-forward mode 2: keep whole grains only while the queue has
         // room (pitch unchanged, crossfaded joins). Outside fast-forward,
         // hand back anything the decimator still holds first.
-        let decimate = self.is_fast_forwarding() && self.fast_forward_mode() == 2;
+        // Also used to catch up after slow motion: the queue is then far
+        // deeper than the normal band, and rate control's 0.5% nudge would
+        // take a minute to remove that latency. Dropping whole grains (same
+        // pitch, crossfaded) gets back to normal in about half a second.
+        let q_len = self.buffer_len();
+        // Before a push the queue is at most RATE_HIGH at normal speed, plus
+        // under one frame's burst of jitter, so above that it's leftover.
+        // Once started, keep going until the queue is back in the band.
+        let normal = tape_speed >= 1.0 && high == RATE_HIGH;
+        let was = self.catching_up.load(Ordering::Relaxed);
+        let catching_up = normal && if was { q_len > RATE_HIGH } else { q_len > RATE_HIGH + 1600 };
+        self.catching_up.store(catching_up, Ordering::Relaxed);
+        let decimate = (self.is_fast_forwarding() && self.fast_forward_mode() == 2) || catching_up;
+        let target = if catching_up { (RATE_LOW + RATE_HIGH) / 2 } else { FF_TARGET_FILL };
         let staged: Option<Vec<f32>> = match self.ff_decimator.lock() {
-            Ok(mut d) if decimate => {
-                let q_len = self.buffer_len();
-                Some(d.process(samples, q_len, FF_TARGET_FILL))
-            }
+            Ok(mut d) if decimate => Some(d.process(samples, q_len, target)),
             Ok(mut d) => {
                 let mut held = d.flush();
                 if held.is_empty() {
