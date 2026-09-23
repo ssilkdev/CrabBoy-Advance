@@ -167,8 +167,20 @@ impl Mmu {
         }
     }
 
+    /// True for the SRAM/Flash save region (0x0E000000-0x0FFFFFFF), which
+    /// sits on an 8-bit bus.
+    #[inline(always)]
+    fn is_save_bus(addr: u32) -> bool {
+        (addr >> 25) == 0x07
+    }
+
     #[inline(always)]
     pub fn read16(&self, addr: u32) -> u16 {
+        // 8-bit save bus: the one byte read appears in every lane
+        // (jsmolka save tests #4).
+        if Self::is_save_bus(addr) {
+            return self.read8(addr) as u16 * 0x0101;
+        }
         let aligned = addr & !1;
         let b0 = self.read8(aligned) as u16;
         let b1 = self.read8(aligned + 1) as u16;
@@ -184,6 +196,9 @@ impl Mmu {
 
     #[inline(always)]
     pub fn read32(&self, addr: u32) -> u32 {
+        if Self::is_save_bus(addr) {
+            return self.read8(addr) as u32 * 0x0101_0101;
+        }
         let aligned = addr & !3;
         let b0 = self.read8(aligned) as u32;
         let b1 = self.read8(aligned + 1) as u32;
@@ -245,6 +260,12 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write16(&mut self, addr: u32, val: u16) {
+        // 8-bit save bus: only the byte lane selected by the unaligned
+        // address is written, at that address (jsmolka save tests #6/#7).
+        if Self::is_save_bus(addr) {
+            self.write8(addr, (val >> ((addr & 1) * 8)) as u8);
+            return;
+        }
         let aligned = addr & !1;
         match (aligned >> 24) & 0xFF {
             0x04 => self.write_io16(aligned, val),
@@ -275,6 +296,10 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write32(&mut self, addr: u32, val: u32) {
+        if Self::is_save_bus(addr) {
+            self.write8(addr, (val >> ((addr & 3) * 8)) as u8);
+            return;
+        }
         let aligned = addr & !3;
         self.write16(aligned, (val & 0xFFFF) as u16);
         self.write16(aligned + 2, (val >> 16) as u16);
