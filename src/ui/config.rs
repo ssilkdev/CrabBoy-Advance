@@ -117,6 +117,34 @@ impl Default for RenderConfig {
     }
 }
 
+/// Audio engine configuration (ROADMAP M9).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct AudioConfig {
+    /// Audio output mode: "hd" (HD re-synthesis) vs "hardware" (native APU)
+    pub mode: String,
+    /// Interpolation algorithm: "linear", "cubic", "sinc"
+    pub interpolation: String,
+    /// Reverb enabled
+    pub reverb_enabled: bool,
+    /// Reverb level (0.0 .. 1.0)
+    pub reverb_level: f32,
+    /// Master volume
+    pub master_volume: f32,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            mode: "hd".to_string(),
+            interpolation: "cubic".to_string(),
+            reverb_enabled: true,
+            reverb_level: 0.25,
+            master_volume: 1.0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct AppConfig {
@@ -131,6 +159,8 @@ pub struct AppConfig {
     pub save_sync: SaveSyncConfig,
     /// Rendering and shader pipeline configuration (ROADMAP M5).
     pub render: RenderConfig,
+    /// Audio engine and HD re-synthesis configuration (ROADMAP M9).
+    pub audio: AudioConfig,
 }
 
 impl Default for AppConfig {
@@ -142,6 +172,7 @@ impl Default for AppConfig {
             run_ahead: RunAheadSettings::default(),
             save_sync: SaveSyncConfig::default(),
             render: RenderConfig::default(),
+            audio: AudioConfig::default(),
         }
     }
 }

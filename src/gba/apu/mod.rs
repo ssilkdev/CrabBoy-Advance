@@ -103,6 +103,10 @@ pub struct Apu {
     /// Suppress sample emission to output, capture, and scope buffers
     /// (used during run-ahead speculative frames).
     pub speculative: bool,
+    /// Audio engine mode (HardwareOnly vs HdReSynthesis; ROADMAP M9)
+    pub hd_audio_mode: crate::gba::m4a::AudioEngineMode,
+    /// 48 kHz sample stream for HD audio re-synthesis
+    pub hd_sample_stream: VecDeque<(f32, f32)>,
 }
 
 impl Default for Apu {
@@ -137,6 +141,8 @@ impl Apu {
             pending_diagnostic_samples: Vec::with_capacity(2048),
             capture: None,
             speculative: false,
+            hd_audio_mode: crate::gba::m4a::AudioEngineMode::HdReSynthesis,
+            hd_sample_stream: VecDeque::with_capacity(2048),
         }
     }
 
@@ -420,9 +426,18 @@ impl Apu {
         // Calibrated DMG gain: balanced headroom that blends naturally with DirectSound without overpowering BGM
         dmg_left *= vol_left * dmg_ratio * 0.10;
         dmg_right *= vol_right * dmg_ratio * 0.10;
+        let mut raw_left = ds_left * 0.50 + dmg_left;
+        let mut raw_right = ds_right * 0.50 + dmg_right;
 
-        let raw_left = ds_left * 0.50 + dmg_left;
-        let raw_right = ds_right * 0.50 + dmg_right;
+        // If HD audio re-synthesis is enabled and has stream samples available,
+        // substitute DirectSound PCM with high-resolution re-synthesized audio,
+        // blending DMG PSG channels for sound effects (ROADMAP M9).
+        if self.hd_audio_mode == crate::gba::m4a::AudioEngineMode::HdReSynthesis {
+            if let Some((hd_l, hd_r)) = self.hd_sample_stream.pop_front() {
+                raw_left = hd_l + dmg_left;
+                raw_right = hd_r + dmg_right;
+            }
+        }
 
         // 1. DC Blocking Filter (AC coupling capacitor modeling, ~35Hz cutoff at 44.1kHz)
         // y[n] = x[n] - x[n-1] + R * y[n-1], with R = 0.995
@@ -485,6 +500,17 @@ impl Apu {
         // Rate control against the host device lives in AudioOutput's
         // resampler (ROADMAP M2).
     }
+
+    pub fn set_hd_audio_mode(&mut self, mode: crate::gba::m4a::AudioEngineMode) {
+        self.hd_audio_mode = mode;
+        if mode == crate::gba::m4a::AudioEngineMode::HardwareOnly {
+            self.hd_sample_stream.clear();
+        }
+    }
+
+    pub fn hd_audio_mode(&self) -> crate::gba::m4a::AudioEngineMode {
+        self.hd_audio_mode
+    }
 }
 
 // ---- Save states (ROADMAP M2) --------------------------------------------
@@ -524,6 +550,7 @@ impl Snapshot for Apu {
         self.lp_l = r.f32()?; self.lp_r = r.f32()?;
         // Samples produced before the load belong to the old timeline.
         self.sample_batch.clear();
+        self.hd_sample_stream.clear();
         Some(())
     }
 }

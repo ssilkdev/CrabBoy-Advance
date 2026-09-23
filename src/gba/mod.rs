@@ -12,6 +12,7 @@ pub mod mmu;
 pub mod ppu;
 pub mod replay;
 pub mod run_ahead;
+pub mod m4a;
 pub mod save_sync;
 pub mod shader;
 pub mod state;
@@ -55,6 +56,8 @@ pub struct Gba {
     /// (ROADMAP M3): no audio output or capture, no diagnostics, no save
     /// file writes.
     pub speculative: bool,
+    /// High-resolution M4A / Sappy audio re-synthesis engine (ROADMAP M9)
+    pub m4a: m4a::HdM4aEngine,
 }
 
 impl Default for Gba {
@@ -73,6 +76,7 @@ impl Gba {
             is_running: true,
             frame_counter: 0,
             speculative: false,
+            m4a: m4a::HdM4aEngine::new(),
         }
     }
 
@@ -208,6 +212,9 @@ impl Gba {
         let cart = Cartridge::from_file(path)?;
         self.mmu.load_cartridge(cart);
         self.configure_widescreen_for_loaded_cartridge();
+        if let Some(ref cart) = self.mmu.cartridge {
+            self.m4a.detect_and_init(&cart.rom, &cart.game_code, &cart.title);
+        }
         self.reset();
         Ok(())
     }
@@ -216,6 +223,9 @@ impl Gba {
         let cart = Cartridge::from_bytes(rom);
         self.mmu.load_cartridge(cart);
         self.configure_widescreen_for_loaded_cartridge();
+        if let Some(ref cart) = self.mmu.cartridge {
+            self.m4a.detect_and_init(&cart.rom, &cart.game_code, &cart.title);
+        }
         self.reset();
     }
 
@@ -237,6 +247,8 @@ impl Gba {
         self.mmu.intr_wait_mask = None;
         self.mmu.bios_latch = mmu::BIOS_LATCH_BOOT;
         self.diagnostics.reset();
+        self.m4a.sampler.stop_all();
+        self.mmu.apu.hd_sample_stream.clear();
     }
 
     /// Step a single instruction and advance peripherals
@@ -429,6 +441,21 @@ impl Gba {
     /// Run full frame (~280,896 cycles)
     pub fn run_frame(&mut self) {
         self.mmu.apu.speculative = self.speculative;
+
+        // Synchronize M4A audio re-synthesis from WRAM and refill sample stream (ROADMAP M9)
+        if !self.speculative
+            && self.mmu.apu.hd_audio_mode == m4a::AudioEngineMode::HdReSynthesis
+            && self.m4a.is_active()
+        {
+            if let Some(ref cart) = self.mmu.cartridge {
+                self.m4a.sync_from_wram(&self.mmu.ewram[..], &self.mmu.iwram[..], &cart.rom);
+                while self.mmu.apu.hd_sample_stream.len() < 1024 {
+                    let s = self.m4a.render_sample(&cart.rom);
+                    self.mmu.apu.hd_sample_stream.push_back(s);
+                }
+            }
+        }
+
         let mut frame_cycles = 0;
         while frame_cycles < CYCLES_PER_FRAME {
             let c = self.step_instruction();
@@ -797,6 +824,8 @@ impl Gba {
             }
         }
 
+        self.m4a.sampler.stop_all();
+        self.mmu.apu.hd_sample_stream.clear();
         true
     }
 
@@ -830,5 +859,50 @@ impl Gba {
             _ => return None,
         }
         Some(())
+    }
+
+    // ---- M4A Audio Re-synthesis (ROADMAP M9) -------------------------------
+
+    /// Check whether the currently loaded game uses Nintendo's M4A sound engine
+    pub fn is_m4a_game(&self) -> bool {
+        self.m4a.is_m4a_game()
+    }
+
+    /// Set audio engine mode (HardwareOnly vs HdReSynthesis)
+    pub fn set_hd_audio_mode(&mut self, mode: m4a::AudioEngineMode) {
+        self.mmu.apu.set_hd_audio_mode(mode);
+    }
+
+    /// Current audio engine mode
+    pub fn hd_audio_mode(&self) -> m4a::AudioEngineMode {
+        self.mmu.apu.hd_audio_mode()
+    }
+
+    /// Play an M4A song by ID from the game's song table via the standalone HD sequencer
+    pub fn play_m4a_song(&mut self, song_id: u16) -> bool {
+        if let Some(ref cart) = self.mmu.cartridge {
+            self.m4a.play_song(&cart.rom, song_id)
+        } else {
+            false
+        }
+    }
+
+    /// Stop standalone HD sequencer playback
+    pub fn stop_m4a_song(&mut self) {
+        self.m4a.stop();
+    }
+
+    /// Export an M4A song as Standard MIDI File Type 1 (.mid)
+    pub fn export_m4a_song_midi(&self, song_id: u16) -> Result<Vec<u8>, String> {
+        let cart = self.mmu.cartridge.as_ref()
+            .ok_or_else(|| "No cartridge loaded".to_string())?;
+        self.m4a.export_midi(&cart.rom, song_id)
+    }
+
+    /// Export an M4A song as per-instrument multi-track 48 kHz WAV stems
+    pub fn export_m4a_song_stems(&self, song_id: u16, duration_secs: f32) -> Result<Vec<m4a::StemTrack>, String> {
+        let cart = self.mmu.cartridge.as_ref()
+            .ok_or_else(|| "No cartridge loaded".to_string())?;
+        self.m4a.export_stems(&cart.rom, song_id, duration_secs)
     }
 }

@@ -219,6 +219,25 @@ impl GbaApp {
             let widescreen_config = config.render.widescreen.clone();
             gba.set_widescreen_config(widescreen_config.clone());
 
+            let audio_mode = match config.audio.mode.to_lowercase().as_str() {
+                "hardware" | "hardwareonly" | "off" => crate::gba::m4a::AudioEngineMode::HardwareOnly,
+                _ => crate::gba::m4a::AudioEngineMode::HdReSynthesis,
+            };
+            gba.set_hd_audio_mode(audio_mode);
+
+            let audio_interp = match config.audio.interpolation.to_lowercase().as_str() {
+                "linear" => crate::gba::m4a::M4aInterpolation::Linear,
+                "sinc" => crate::gba::m4a::M4aInterpolation::Sinc,
+                _ => crate::gba::m4a::M4aInterpolation::CubicHermite,
+            };
+            gba.m4a.config.interpolation = audio_interp;
+            gba.m4a.sampler.interpolation = audio_interp;
+            gba.m4a.config.reverb_enabled = config.audio.reverb_enabled;
+            gba.m4a.sampler.reverb_enabled = config.audio.reverb_enabled;
+            gba.m4a.config.reverb_level = config.audio.reverb_level;
+            gba.m4a.sampler.reverb_level = config.audio.reverb_level;
+            gba.m4a.config.master_volume = config.audio.master_volume;
+
             let mut app = Self {
             gba,
             gb: None,
@@ -503,6 +522,20 @@ impl GbaApp {
                 hd_pack_path: self.hd_pack_path.clone(),
                 hd_pack_enabled: self.hd_pack_enabled,
                 widescreen: self.widescreen_config.clone(),
+            },
+            audio: config::AudioConfig {
+                mode: match self.gba.hd_audio_mode() {
+                    crate::gba::m4a::AudioEngineMode::HdReSynthesis => "hd",
+                    crate::gba::m4a::AudioEngineMode::HardwareOnly => "hardware",
+                }.to_string(),
+                interpolation: match self.gba.m4a.config.interpolation {
+                    crate::gba::m4a::M4aInterpolation::Linear => "linear",
+                    crate::gba::m4a::M4aInterpolation::CubicHermite => "cubic",
+                    crate::gba::m4a::M4aInterpolation::Sinc => "sinc",
+                }.to_string(),
+                reverb_enabled: self.gba.m4a.config.reverb_enabled,
+                reverb_level: self.gba.m4a.config.reverb_level,
+                master_volume: self.gba.m4a.config.master_volume,
             },
         };
         if let Err(e) = cfg.save() {

@@ -38,11 +38,15 @@ fn print_help() {
 USAGE:
     crabboy-advance [ROM_PATH]                                  Launch GUI emulator (.gba, .gb, .gbc)
     crabboy-advance <ROM> --ai-play [--ai-endpoint URL]         Launch GUI with the AI Agent already playing
+    crabboy-advance <ROM> --hd-audio                            Launch GUI with HD music re-synthesis enabled
+    crabboy-advance <ROM> --hardware-audio                      Launch GUI with native hardware audio only
     crabboy-advance <ROM> --hd-pack <DIR>                       Launch GUI with HD sprite & tile pack loaded
     crabboy-advance <ROM> --widescreen                          Launch GUI with 16:9 widescreen expansion
     crabboy-advance --diagnose <ROM> [--frames N] [--output P]  Run headless diagnostics and export report
     crabboy-advance --dump-frame <ROM> [--frame N] [--output P] Run headless to frame N and save PNG screenshot
     crabboy-advance --dump-tiles <ROM> [--frame N] [--output D] Run headless to frame N and dump tiles/sprites pack
+    crabboy-advance --export-midi <ROM> [--song N] [--output P] Export an M4A song as Standard MIDI File (.mid)
+    crabboy-advance --export-stems <ROM> [--song N] [--output D] [--seconds S] Export an M4A song as 48 kHz WAV stems
     crabboy-advance --audit-audio <ROM> [--frames N]            Run headless audio health audit
     crabboy-advance --gb-serial <GB_ROM> [--frames N]           Run a Game Boy ROM headless and print its link-port output
     crabboy-advance --help                                      Show this help message
@@ -54,7 +58,9 @@ GAME BOY / GAME BOY COLOR:
 OPTIONS:
     --frames <N>   Number of frames to emulate (default: 300)
     --frame <N>    Target frame to capture (default: 60)
-    --output <P>   Output file path for JSON report or PNG frame
+    --song <N>     Target M4A song ID for export (default: 0)
+    --seconds <S>  Duration in seconds for stem export (default: 60.0)
+    --output <P>   Output file or directory path
 
 AI AGENT PLAYER (watch an AI play):
     --ai-play              Start the AI Agent immediately on launch
@@ -378,6 +384,124 @@ fn handle_headless_cli(args: &[String]) {
         }
         std::process::exit(0);
     }
+
+    // 5. Headless M4A MIDI Export Mode (ROADMAP M9)
+    if let Some(pos) = args.iter().position(|a| a == "--export-midi") {
+        if pos + 1 >= args.len() {
+            eprintln!("Error: --export-midi requires a ROM path.");
+            std::process::exit(1);
+        }
+        let rom_path = PathBuf::from(&args[pos + 1]);
+        let song_id: u16 = get_arg_val(args, "--song")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let output_path = get_arg_val(args, "--output")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let stem = rom_path.file_stem().and_then(|s| s.to_str()).unwrap_or("song");
+                PathBuf::from(format!("{}_song_{:03}.mid", stem, song_id))
+            });
+
+        let mut gba = Gba::new();
+        if let Err(e) = gba.load_rom(&rom_path) {
+            eprintln!("Failed to load ROM '{}': {}", rom_path.display(), e);
+            std::process::exit(1);
+        }
+
+        if !gba.is_m4a_game() {
+            eprintln!(
+                "Error: ROM '{}' does not use Nintendo's M4A (Sappy) sound engine.",
+                rom_path.display()
+            );
+            std::process::exit(1);
+        }
+
+        match gba.export_m4a_song_midi(song_id) {
+            Ok(midi_data) => {
+                if let Err(e) = std::fs::write(&output_path, midi_data) {
+                    eprintln!("Failed to write MIDI to '{}': {}", output_path.display(), e);
+                    std::process::exit(1);
+                }
+                println!(
+                    "Successfully exported song {} to MIDI: '{}'",
+                    song_id,
+                    output_path.display()
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Failed to export MIDI: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 6. Headless M4A Stem Export Mode (ROADMAP M9)
+    if let Some(pos) = args.iter().position(|a| a == "--export-stems") {
+        if pos + 1 >= args.len() {
+            eprintln!("Error: --export-stems requires a ROM path.");
+            std::process::exit(1);
+        }
+        let rom_path = PathBuf::from(&args[pos + 1]);
+        let song_id: u16 = get_arg_val(args, "--song")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let duration: f32 = get_arg_val(args, "--seconds")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60.0);
+        let output_dir = get_arg_val(args, "--output")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("stems_song_{:03}", song_id)));
+
+        let mut gba = Gba::new();
+        if let Err(e) = gba.load_rom(&rom_path) {
+            eprintln!("Failed to load ROM '{}': {}", rom_path.display(), e);
+            std::process::exit(1);
+        }
+
+        if !gba.is_m4a_game() {
+            eprintln!(
+                "Error: ROM '{}' does not use Nintendo's M4A (Sappy) sound engine.",
+                rom_path.display()
+            );
+            std::process::exit(1);
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+            eprintln!(
+                "Failed to create output directory '{}': {}",
+                output_dir.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+
+        match gba.export_m4a_song_stems(song_id, duration) {
+            Ok(stems) => {
+                let mut written = 0;
+                for stem in stems {
+                    let stem_filename = format!("{}.wav", stem.name.to_lowercase().replace(' ', "_"));
+                    let path = output_dir.join(stem_filename);
+                    if let Err(e) = crate::gba::m4a::write_wav_file(&path, &stem.samples, 48_000) {
+                        eprintln!("Warning: Failed to write stem '{}': {}", path.display(), e);
+                    } else {
+                        written += 1;
+                    }
+                }
+                println!(
+                    "Successfully exported {} stems ({:.1}s @ 48 kHz) to '{}'",
+                    written,
+                    duration,
+                    output_dir.display()
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Failed to export stems: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -454,6 +578,8 @@ fn main() -> eframe::Result<()> {
     let ai_opts = parse_ai_options(&args);
     let hd_pack_arg = get_arg_val(&args, "--hd-pack").map(PathBuf::from);
     let widescreen_arg = args.iter().any(|a| a == "--widescreen");
+    let hd_audio_arg = args.iter().any(|a| a == "--hd-audio");
+    let hw_audio_arg = args.iter().any(|a| a == "--hardware-audio");
 
     eframe::run_native(
         "GBA Simulator",
@@ -463,6 +589,11 @@ fn main() -> eframe::Result<()> {
             if widescreen_arg {
                 app.gba.set_widescreen_enabled(true);
                 app.widescreen_config.enabled = true;
+            }
+            if hd_audio_arg {
+                app.gba.set_hd_audio_mode(crate::gba::m4a::AudioEngineMode::HdReSynthesis);
+            } else if hw_audio_arg {
+                app.gba.set_hd_audio_mode(crate::gba::m4a::AudioEngineMode::HardwareOnly);
             }
             if let Some(ref pack_dir) = hd_pack_arg {
                 match crate::gba::hd_pack::HdPack::load_from_dir(pack_dir) {
