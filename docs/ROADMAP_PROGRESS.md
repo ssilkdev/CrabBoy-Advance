@@ -10,7 +10,7 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
 
 ## Stage 1: Foundations
 
-### M1. Accuracy baseline 🚧
+### M1. Accuracy baseline ✅
 
 - ✅ **Emerald "internal battery has run dry" (RTC register decode).**
   `src/gba/mmu/rtc.rs`. The S-3511A command byte had been switched to
@@ -52,20 +52,46 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
   non-sequential accesses, cartridge prefetch buffer, DMA CPU stall, and
   bit-exact BIOS math SWIs with their cycle costs (`mmu/timing.rs`,
   `mmu/bios_math.rs`).
-- Scoreboard (after `2584182`):
-  - jsmolka gba-tests: **10/10** (arm, thumb, memory, nes, bios, unsafe,
-    save×3, ppu)
-  - mGBA suite: **3984/6998** (baseline was 3185)
-    - Memory 1081/1552 · I/O read 124/130 · Timing 482/2020
-    - Timer count-up 345/936 · Timer IRQ 0/90 · Shifter 140/140
+- ✅ **CI** (`9866bfc`): `scripts/fetch_test_roms.sh` downloads the free
+  test ROMs; the Linux CI job runs both harnesses with
+  `CRABBOY_REQUIRE_TEST_ROMS=1` (a missing ROM fails instead of skipping)
+  and writes the per-suite scoreboard to the job summary. The mGBA
+  per-suite baselines make any regression fail the build, so the pass
+  rate can only go up.
+- ✅ **Timers and IRQs** (`46f7182`): timestamp-based timers (cycle-exact
+  mid-instruction reads, exact overflow times, correct cascade counts),
+  7-cycle IRQ latency, 2-cycle timer read latency; IntrWait sets IME and
+  only returns after the IRQ is dispatched.
+- ✅ **Design-doc items** (`docs/AI_AGENT_FIX_DESIGN.md`, status header
+  updated): NV condition, THUMB undefined, IRQ-return tracking, 5-bit
+  blending (`adfc96c`); affine BG/OBJ mosaic (`1f1f2af`); FIFO open bus
+  (`c05de83`); pitch-preserved fast-forward (`9491dbd`); lock-free audio
+  ring, ITD, BS.775 downmix, soft limiting (`699e9cd`); background GIF
+  encoding (`32a2300`). Deliberately not changed items are listed with
+  reasons at the top of that document.
+- ✅ **SIO** (`ce1c6b5`): registers moved to their real addresses (SIOCNT
+  was at 0x124, so games writing it hit SIOMULTI0), mode decoding, readback
+  and write masks, idle line levels, multiplayer SIOMLT_SEND.
+- ✅ **AGS aging cart**: proprietary, never downloaded. Drop a dump at
+  `$GBA_TEST_ROM_DIR/ags.gba` and `ags_aging_cart_runs` boots it for two
+  emulated minutes, checks the core doesn't lock up and saves
+  `target/ags-result.png`. Not scored automatically: its result screen
+  hasn't been characterised without a dump to test on.
+- **Final M1 scoreboard** (after `ce1c6b5`):
+  - jsmolka gba-tests: **10/10** (was 3/10 at the start of M1)
+  - mGBA suite: **4247/7002** (was 3185/6998)
+    - Memory 1081/1552 · I/O read 130/130 · Timing 577/2020
+    - Timer count-up 438/936 · Timer IRQ 4/90 · Shifter 140/140
     - Carry 93/93 · Multiply long 52/72 · BIOS math 609/615
-    - DMA 1032/1244 · SIO R/W 25/90 · SIO timing 0/4 · Misc 1/12
-  - `cargo test --release`: 409 passed, 0 failed.
-  - Emerald headless (scratch `emu-probe`, 1860 frames): 250 fps, boots to
-    NEW GAME. (170 fps before the timing work, because the CPU was doing
-    too much work per frame.)
-- 🚧 Next in M1: timers (count-up and IRQ latency), remaining Timing
-  cases, multiply-long flags, DMA edge cases, SIO registers.
-- ⏳ AGS aging cart: proprietary, so it can't be fetched; harness will
-  accept an optional path once the above is in.
-- ⏳ Remaining open items from `docs/AI_AGENT_FIX_DESIGN.md`.
+    - DMA 1032/1244 · SIO R/W 90/90 · SIO timing 0/8 · Misc 1/12
+  - GB: Blargg cpu_instrs + instr_timing, dmg-acid2, cgb-acid2 pass.
+  - `cargo test --release`: 441 passed, 0 failed. Android host tests 7/7;
+    arm64 APK builds.
+  - Emerald headless: 257 fps, boots to NEW GAME, no battery warning;
+    intro audio statistics unchanged through the timer/audio rework.
+- **M1 "done when" check:** pass rate tracked in CI and can only go up ✅;
+  Emerald RTC message gone ✅; design-doc open items closed or documented
+  ✅.
+- Remaining accuracy gaps (not blockers; the ratchet will record any
+  progress): cycle-level Timing cases (bus-contention details), timer IRQ
+  edge timing, multiply-long carry flag, DMA edge cases, SIO timing.

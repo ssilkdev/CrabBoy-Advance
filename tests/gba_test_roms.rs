@@ -290,3 +290,40 @@ fn mgba_suite() {
     eprintln!("mGBA suite: {passed}/{total} passing");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+/// Nintendo's AGS aging cartridge (ROADMAP M1). It is proprietary, so it is
+/// never downloaded: drop your own dump at `$GBA_TEST_ROM_DIR/ags.gba` to
+/// enable this test. Not scored automatically yet (its result screen
+/// hasn't been characterised against CrabBoy without a dump to test on):
+/// the test runs the cart's automatic sequence, checks the core keeps
+/// executing (no lock-up or crash), and saves the final screen to
+/// `target/ags-result.png` for review. `CRABBOY_REQUIRE_TEST_ROMS` does not
+/// apply, since CI can never have this ROM.
+#[test]
+fn ags_aging_cart_runs() {
+    let Some(dir) = rom_dir() else { return };
+    let rom = dir.join("ags.gba");
+    if !rom.is_file() {
+        eprintln!("skipping: ags.gba not supplied (proprietary; see test doc)");
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("crabboy-ags-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let copy = tmp.join("ags.gba");
+    std::fs::copy(&rom, &copy).unwrap();
+    let mut gba = Gba::new();
+    gba.load_rom(&copy).expect("load ags.gba");
+    let mut distinct_pcs = std::collections::HashSet::new();
+    // ~2 minutes of emulated time covers the automatic test sequence.
+    for frame in 0..7200 {
+        gba.run_frame();
+        if frame % 60 == 0 {
+            distinct_pcs.insert(gba.cpu.regs[15]);
+        }
+    }
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/ags-result.png");
+    gba.dump_frame_png(&out).expect("write result screen");
+    let _ = std::fs::remove_dir_all(&tmp);
+    eprintln!("AGS result screen: {}", out.display());
+    assert!(distinct_pcs.len() > 1, "AGS never left one PC: the core locked up");
+}

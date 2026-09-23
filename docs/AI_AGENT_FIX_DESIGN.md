@@ -1,14 +1,31 @@
-> **Implementation status (2026-09-21):** Phase 0 (security), all of Phase 1
-> (critical correctness), and most of Phase 2 (major) are implemented and
-> merged — see commits `cd6e40f`, `f4b926d`, `a01a4e5`, `8820077` and later on
-> `main`. Remaining open items: 3.1 (LDM/STM `^` user-bank transfer), 3.2
-> (SWI HLE exception entry, likely intentional per the HLE design), 3.6
-> (pitch-preserved decimate fast-forward mode), affine BG/sprite mosaic
-> (scoped out of the mosaic implementation — see commit `8820077`), and most
-> of the Phase 3 minor/cleanup table (a few items from it were folded into
-> the commits above: dead DMA code removal, dead sharpening-function
-> dedup, gamepad-name panic, live-network test opt-in, RTC regression
-> tests). Cross-check `git log` before re-doing any item below.
+> **Implementation status (2026-09-23, ROADMAP M1):** every item in this
+> document is resolved except where noted below; see `docs/ROADMAP_PROGRESS.md`
+> for commits and verification. Closed during M1: 3.1 (LDM/STM `^`,
+> `9f8894c`), 3.6 (pitch-preserved fast-forward, `9491dbd`), affine
+> BG/OBJ mosaic (`1f1f2af`), and from Phase 3: NV condition, THUMB
+> undefined encoding, `in_irq` on SWI/UND returns, 5-bit blending
+> (`adfc96c`), empty LDM/STM list and register-shift PC+12 (`9f8894c`,
+> `d3d960b`), cascade timer overflow count (`46f7182`), open bus
+> (`aaf43e2`, `c05de83`), WAITCNT timing (`2584182`), lock-free audio ring,
+> ITD, BS.775 downmix and soft limiting (`699e9cd`), background GIF
+> encoding (`32a2300`). Items already fixed before M1 and re-verified in
+> the code: NR52 register reset, DAC-off on live NRx2 writes (3.7), affine
+> reference sign extension (3.5), bitmap BG priority (3.3), gamepad-name
+> slicing (3.9), dead DMA code, sharpening duplicate, live-network test
+> `#[ignore]`, Flash chip ID by size.
+>
+> **Deliberately not changed:**
+> - 3.2 (SWI HLE exception entry): the HLE BIOS services SWIs directly by
+>   design; ROMs that hook the SWI vector need a real BIOS image (LLE
+>   path), which is out of scope for M1.
+> - DMA3 video-capture start timing: a rare feature, left for when a game
+>   needs it.
+> - `DMAxSAD`/`DMAxDAD` readback: now read as open bus (`aaf43e2`).
+> - SIO loopback session token, crate audit (`xbrz-rs`, `winres`) and the
+>   `ui/mod.rs` split are maintenance items, not correctness bugs; they are
+>   tracked for M17 (plugin API), which reorganises the UI anyway.
+> - The xBRZ/CAS per-frame allocations are a performance item for M5
+>   (shader pipeline), which replaces that code path.
 
 # CrabBoy Advance — Bug Fix & Enhancement Design Document
 
