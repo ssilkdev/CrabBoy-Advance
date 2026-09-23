@@ -4,8 +4,11 @@
 pub mod audio_output;
 pub mod dmg;
 pub mod ff_stretch;
+pub mod ring;
+pub mod spatial;
 
 pub use audio_output::{AudioOutput, SurroundMode};
+use spatial::soft_limit;
 pub use dmg::DmgAudio;
 use std::collections::VecDeque;
 
@@ -472,14 +475,3 @@ impl Apu {
     }
 }
 
-/// Smooth Padé rational approximation of tanh for analog saturation without harsh digital clipping
-#[inline]
-fn soft_limit(x: f32) -> f32 {
-    if x <= -3.0 {
-        -1.0
-    } else if x >= 3.0 {
-        1.0
-    } else {
-        x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
-    }
-}

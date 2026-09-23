@@ -1,7 +1,8 @@
 //! Host Audio Output Streaming via CPAL with 5.1 Surround & 3D Headphone Spatialization
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::collections::VecDeque;
+use super::ring::SampleRing;
+use super::spatial::SpatialDsp;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,13 +23,18 @@ impl SurroundMode {
     }
 }
 
+/// Output queue capacity in interleaved samples.
+const QUEUE_CAPACITY: usize = 8192;
+/// Length of the fade applied when a batch has to be cut short.
+const FADE_SAMPLES: usize = 256;
+
 /// Output-queue fill level (interleaved samples, ~45 ms of stereo at
 /// 44.1 kHz) the fast-forward decimator holds the queue at.
 const FF_TARGET_FILL: usize = 4000;
 
 pub struct AudioOutput {
     _stream: Option<cpal::Stream>,
-    buffer: Arc<Mutex<VecDeque<f32>>>,
+    buffer: Arc<SampleRing>,
     sample_rate: u32,
     channels: usize,
     pub volume: f32,
@@ -51,7 +57,9 @@ impl Default for AudioOutput {
 
 impl AudioOutput {
     pub fn new() -> Self {
-        let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(8192)));
+        // ~90 ms of stereo at 44.1 kHz; the rate control in Apu keeps the
+        // fill around 1000-3000 samples.
+        let buffer = Arc::new(SampleRing::new(QUEUE_CAPACITY));
         let buffer_clone = Arc::clone(&buffer);
 
         let surround_mode = Arc::new(AtomicU8::new(SurroundMode::Headphone3D as u8));
@@ -87,7 +95,7 @@ impl AudioOutput {
     }
 
     fn init_cpal_stream(
-        buffer: Arc<Mutex<VecDeque<f32>>>,
+        buffer: Arc<SampleRing>,
         surround_mode: Arc<AtomicU8>,
         bass_boost: Arc<AtomicU32>,
         surround_width: Arc<AtomicU32>,
@@ -114,20 +122,8 @@ impl AudioOutput {
 
         let err_fn = |err| log::error!("Audio stream error: {}", err);
 
-        // DSP state variables local to the audio callback
-        let mut lfe_filter_state = 0.0_f32;
-        let lfe_alpha = (2.0 * std::f32::consts::PI * 120.0 / (sample_rate as f32)).clamp(0.001, 0.1);
-
-        // Acoustic delay buffer (~12ms delay: ~530 samples at 44.1kHz)
-        let delay_len = ((sample_rate as f32 * 0.012) as usize).clamp(64, 1024);
-        let mut delay_buf_l = vec![0.0_f32; delay_len];
-        let mut delay_buf_r = vec![0.0_f32; delay_len];
-        let mut delay_idx = 0usize;
-
-        // Headphone crossfeed filter state
-        let mut cross_l = 0.0_f32;
-        let mut cross_r = 0.0_f32;
-        let cross_alpha = (2.0 * std::f32::consts::PI * 700.0 / (sample_rate as f32)).clamp(0.01, 0.3);
+        // All DSP state lives in the callback (see `spatial`).
+        let mut dsp = SpatialDsp::new(sample_rate);
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_output_stream(
@@ -136,86 +132,15 @@ impl AudioOutput {
                     let mode = SurroundMode::from_u8(surround_mode.load(Ordering::Relaxed));
                     let bass = f32::from_bits(bass_boost.load(Ordering::Relaxed)).clamp(0.0, 1.0);
                     let width = f32::from_bits(surround_width.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-
-                    if let Ok(mut q) = buffer.lock() {
-                        for frame in data.chunks_mut(channels) {
-                            let (left, right) = if q.len() >= 2 {
-                                (q.pop_front().unwrap_or(0.0), q.pop_front().unwrap_or(0.0))
-                            } else {
-                                (0.0, 0.0)
-                            };
-
-                            // 1. Subwoofer / LFE Low-Pass Filter
-                            let mono = (left + right) * 0.5;
-                            lfe_filter_state += lfe_alpha * (mono - lfe_filter_state);
-                            let sub_lfe = (lfe_filter_state * (1.0 + bass * 2.5)).clamp(-1.0, 1.0);
-
-                            // 2. Spatial Ambience Difference with Haas Acoustic Delay
-                            let diff_l = left - 0.5 * right;
-                            let diff_r = right - 0.5 * left;
-                            let delayed_l = delay_buf_l[delay_idx];
-                            let delayed_r = delay_buf_r[delay_idx];
-                            delay_buf_l[delay_idx] = diff_l;
-                            delay_buf_r[delay_idx] = diff_r;
-                            delay_idx = (delay_idx + 1) % delay_len;
-
-                            let surround_l = ((diff_l * 0.5 + delayed_l * 0.5) * width).clamp(-1.0, 1.0);
-                            let surround_r = ((diff_r * 0.5 + delayed_r * 0.5) * width).clamp(-1.0, 1.0);
-                            let center = ((left + right) * std::f32::consts::FRAC_1_SQRT_2).clamp(-1.0, 1.0);
-
-                            // 3. Headphone 3D Spatializer (Bauer Crossfeed & Sub-Bass Reinforcement)
-                            cross_l += cross_alpha * (right - cross_l);
-                            cross_r += cross_alpha * (left - cross_r);
-                            let hp_3d_l = (left * 0.70 + cross_l * 0.18 + sub_lfe * 0.15).clamp(-1.0, 1.0);
-                            let hp_3d_r = (right * 0.70 + cross_r * 0.18 + sub_lfe * 0.15).clamp(-1.0, 1.0);
-
-                            // 4. Channel Output Distribution
-                            if channels >= 6 {
-                                // Multi-channel 5.1 / 7.1 Surround
-                                match mode {
-                                    SurroundMode::Stereo => {
-                                        frame[0] = left;
-                                        frame[1] = right;
-                                        for s in &mut frame[2..] {
-                                            *s = 0.0;
-                                        }
-                                    }
-                                    SurroundMode::Surround51 | SurroundMode::Headphone3D => {
-                                        frame[0] = left;         // Front Left
-                                        frame[1] = right;        // Front Right
-                                        frame[2] = center;       // Center
-                                        frame[3] = sub_lfe;      // Subwoofer (LFE)
-                                        frame[4] = surround_l;   // Surround Left
-                                        frame[5] = surround_r;   // Surround Right
-                                        if channels >= 8 {
-                                            frame[6] = surround_l * 0.85; // Side Left (7.1)
-                                            frame[7] = surround_r * 0.85; // Side Right (7.1)
-                                        }
-                                    }
-                                }
-                            } else if channels == 2 {
-                                // 2-Channel Output (Headphones / Stereo Speakers)
-                                match mode {
-                                    SurroundMode::Stereo => {
-                                        frame[0] = left;
-                                        frame[1] = right;
-                                    }
-                                    SurroundMode::Surround51 => {
-                                        // 5.1 Matrix Virtual Downmix to Stereo Headphones
-                                        let downmix_l = (left + center * 0.6 + surround_l * 0.5 + sub_lfe * 0.25) * 0.50;
-                                        let downmix_r = (right + center * 0.6 + surround_r * 0.5 + sub_lfe * 0.25) * 0.50;
-                                        frame[0] = downmix_l.clamp(-1.0, 1.0);
-                                        frame[1] = downmix_r.clamp(-1.0, 1.0);
-                                    }
-                                    SurroundMode::Headphone3D => {
-                                        frame[0] = hp_3d_l;
-                                        frame[1] = hp_3d_r;
-                                    }
-                                }
-                            } else if channels == 1 {
-                                frame[0] = mono.clamp(-1.0, 1.0);
-                            }
-                        }
+                    // Lock-free: never blocks, and an underrun plays
+                    // silence (every frame is always written).
+                    for frame in data.chunks_mut(channels) {
+                        let (left, right) = if buffer.len() >= 2 {
+                            (buffer.pop().unwrap_or(0.0), buffer.pop().unwrap_or(0.0))
+                        } else {
+                            (0.0, 0.0)
+                        };
+                        dsp.process(left, right, mode, bass, width, frame);
                     }
                 },
                 err_fn,
@@ -319,7 +244,27 @@ impl AudioOutput {
     }
 
     pub fn buffer_len(&self) -> usize {
-        self.buffer.lock().map(|q| q.len()).unwrap_or(0)
+        self.buffer.len()
+    }
+
+    /// Push samples, scaling by volume. If the queue is nearly full (the
+    /// emulator is running ahead of the audio device), the batch is
+    /// thinned gradually: a short fade-out of what fits instead of the old
+    /// "drop 3000 queued samples at once", which clicked.
+    fn enqueue(&self, samples: &[f32]) {
+        let room = self.buffer.capacity().saturating_sub(self.buffer.len());
+        let mut scaled: Vec<f32> = samples.iter().map(|&s| (s * self.volume).clamp(-1.0, 1.0)).collect();
+        if scaled.len() > room {
+            let keep = room & !1; // whole stereo frames
+            let fade = keep.min(FADE_SAMPLES);
+            for i in 0..fade {
+                let t = 1.0 - (i / 2) as f32 / (fade / 2).max(1) as f32;
+                let idx = keep - fade + i;
+                scaled[idx] *= t;
+            }
+            scaled.truncate(keep);
+        }
+        self.buffer.push_slice(&scaled);
     }
 
     pub fn push_sample_batch(&self, samples: &[f32]) {
@@ -352,17 +297,7 @@ impl AudioOutput {
             return;
         }
 
-        if let Ok(mut q) = self.buffer.lock() {
-            if q.len() > 6000 {
-                let excess = q.len() - 3000;
-                q.drain(0..excess);
-            }
-
-            for &s in samples {
-                let sample = (s * self.volume).clamp(-1.0, 1.0);
-                q.push_back(sample);
-            }
-        }
+        self.enqueue(samples);
     }
 
     pub fn push_samples(&self, left: f32, right: f32) {
@@ -370,17 +305,7 @@ impl AudioOutput {
             return;
         }
 
-        if let Ok(mut q) = self.buffer.lock() {
-            if q.len() > 6000 {
-                let excess = q.len() - 3000;
-                q.drain(0..excess);
-            }
-
-            let l = (left * self.volume).clamp(-1.0, 1.0);
-            let r = (right * self.volume).clamp(-1.0, 1.0);
-            q.push_back(l);
-            q.push_back(r);
-        }
+        self.enqueue(&[left, right]);
     }
 }
 
