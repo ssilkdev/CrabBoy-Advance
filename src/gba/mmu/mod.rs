@@ -2,6 +2,7 @@
 
 pub mod bios;
 pub mod cartridge;
+pub mod debug_port;
 pub mod eeprom;
 pub mod flash;
 pub mod rtc;
@@ -53,6 +54,8 @@ pub struct Mmu {
     /// 0xE3A02004 after an SWI, 0xE25EF004 inside an IRQ handler and
     /// 0xE55EC002 after returning from one. ROADMAP M1.
     pub bios_latch: u32,
+    /// mGBA-compatible debug-print port at 0x04FFF600 (see `debug_port`).
+    pub debug_port: debug_port::DebugPort,
     pub current_cycles: u64,
     pub intr_wait_mask: Option<u16>,
 }
@@ -130,6 +133,7 @@ impl Mmu {
             flight_recorder: FlightRecorder::new(),
             current_pc: 0,
             bios_latch: BIOS_LATCH_BOOT,
+            debug_port: debug_port::DebugPort::new(),
             current_cycles: 0,
             intr_wait_mask: None,
         }
@@ -157,6 +161,7 @@ impl Mmu {
                 let off = (addr & 0x7FFF) as usize;
                 self.iwram[off]
             }
+            0x04 if debug_port::DebugPort::contains(addr) => self.debug_port.read8(addr),
             0x04 => self.read_io8(addr),
             0x05 => {
                 let off = (addr & 0x3FF) as usize;
@@ -242,6 +247,7 @@ impl Mmu {
                 let off = (addr & 0x7FFF) as usize;
                 self.iwram[off] = val;
             }
+            0x04 if debug_port::DebugPort::contains(addr) => self.debug_port.write8(addr, val),
             0x04 => self.write_io8(addr, val),
             0x05 => {
                 // Byte writes to palette RAM write to both bytes of the halfword
@@ -285,6 +291,7 @@ impl Mmu {
         }
         let aligned = addr & !1;
         match (aligned >> 24) & 0xFF {
+            0x04 if debug_port::DebugPort::contains(aligned) => self.debug_port.write16(aligned, val),
             0x04 => self.write_io16(aligned, val),
             0x05 => {
                 let off = (aligned & 0x3FE) as usize;
