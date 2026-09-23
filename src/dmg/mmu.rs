@@ -439,6 +439,31 @@ mod tests {
     }
 
     #[test]
+    fn core_structs_stay_small_enough_for_a_1mb_stack() {
+        // These types are moved by value (constructed, returned from helpers,
+        // swapped between cores). Windows gives the main thread a 1 MiB stack
+        // against Linux's 8 MiB, and debug builds do not elide the copies, so
+        // a large inline buffer here aborts the whole test binary on Windows
+        // with STATUS_ACCESS_VIOLATION rather than failing one test.
+        //
+        // Keep big buffers boxed. The bound is deliberately generous; it
+        // exists to catch a multi-kilobyte array being added inline, not to
+        // police a few bytes.
+        let mmu = std::mem::size_of::<GbMmu>();
+        let gb = std::mem::size_of::<crate::dmg::GameBoy>();
+        assert!(
+            mmu < 8 * 1024,
+            "GbMmu grew to {} bytes; box the new buffer instead of inlining it",
+            mmu
+        );
+        assert!(
+            gb < 8 * 1024,
+            "GameBoy grew to {} bytes; box the new buffer instead of inlining it",
+            gb
+        );
+    }
+
+    #[test]
     fn echo_ram_mirrors_work_ram() {
         let mut m = mmu();
         m.write(0xC000, 0x5A);

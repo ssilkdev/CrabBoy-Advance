@@ -1819,7 +1819,13 @@ mod tests {
 
     #[test]
     fn png_encoder_emits_a_valid_signature_and_scales() {
-        let fb = [0x00FF_8040u32; SCREEN_WIDTH * SCREEN_HEIGHT];
+        // Boxed: a GBA framebuffer is 240*160*4 = 150 KiB, which overflows the
+        // smaller default thread stack on Windows when built as a test.
+        let fb = vec![0x00FF_8040u32; SCREEN_WIDTH * SCREEN_HEIGHT]
+            .into_boxed_slice()
+            .try_into()
+            .expect("framebuffer is exactly one screen");
+        let fb: Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]> = fb;
         let png = encode_png(&fb, 3).expect("encode");
         assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         // IHDR width/height are big-endian at offsets 16 and 20.

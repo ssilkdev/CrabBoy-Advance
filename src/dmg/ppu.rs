@@ -36,7 +36,13 @@ pub struct GbPpu {
     pub cgb: bool,
 
     /// Two VRAM banks; bank 1 is CGB-only.
-    pub vram: [[u8; 0x2000]; 2],
+    /// Boxed rather than inline: two 8 KiB banks make `GbPpu` (and therefore
+    /// `GbMmu` and `GameBoy`) ~17 KiB, and every by-value move of those types
+    /// copies the lot through the stack. Debug builds do not elide those
+    /// copies, which overflowed the smaller default stack on Windows and
+    /// aborted the test binary with STATUS_ACCESS_VIOLATION. Keeping the banks
+    /// behind one allocation makes a move a pointer copy.
+    pub vram: Box<[[u8; 0x2000]; 2]>,
     pub vram_bank: usize,
     pub oam: [u8; 0xA0],
 
@@ -79,7 +85,14 @@ impl GbPpu {
     pub fn new(cgb: bool) -> Self {
         Self {
             cgb,
-            vram: [[0; 0x2000]; 2],
+            // vec![]->boxed-slice->Box<array> so the zeroed banks are built on
+            // the heap. `Box::new([[0; 0x2000]; 2])` would materialise the
+            // 16 KiB array on the stack first, which is the very thing this
+            // field is boxed to avoid.
+            vram: vec![[0u8; 0x2000]; 2]
+                .into_boxed_slice()
+                .try_into()
+                .expect("vram is exactly two banks"),
             vram_bank: 0,
             oam: [0; 0xA0],
             lcdc: 0x91,
