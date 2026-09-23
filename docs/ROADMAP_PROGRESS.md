@@ -131,3 +131,41 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
   ✅; save + restore ≈ 20 µs, about 0.1% of a 16.7 ms frame ✅.
 - Note: the Windows result comes from CI, which runs on push; nothing has
   been pushed yet, so that job hasn't run on this code.
+
+### M3. Run-ahead ✅
+
+- ✅ **Core speculative execution & rollback** (`src/gba/run_ahead.rs`,
+  `src/gba/mod.rs`): runs the true frame; snapshots the machine; emulates
+  1..=4 frames speculatively with the currently held input to render the
+  low-latency picture; then rolls back to the true timeline.
+- ✅ **Glitchless audio & clean timeline side-effects**:
+  - `src/gba/apu/mod.rs`: `Apu::speculative` suppresses sample batching,
+    oscilloscope ring buffer updates, audio device pushing, and replay
+    capture buffer emission. Speculative frames are silent by design and
+    leave zero audio footprint.
+  - Save chip writes during speculative frames are preserved in RAM and
+    restored by save-state rollback; `cart.save.set_dirty()` maintains the
+    real dirty state without triggering false periodic disk flushes.
+  - Optional **second instance** (shadow headless core): runs speculative
+    frames in a separate headless core cloned and synced via save-state,
+    guaranteeing the real core never rolls back. Includes automatic fallback
+    to single-instance mode if needed.
+- ✅ **Per-game configuration & UI** (`src/ui/config.rs`, `src/ui/mod.rs`):
+  - `RunAheadSettings` and `RunAheadGameConfig` persisted in `config.json` with
+    backward compatibility for legacy configs without run-ahead keys.
+  - Per-game settings keyed by ROM name with global fallback.
+  - Emulation menu controls: toggle latency reduction frames (Off, 1 frame,
+    2 frames), toggle second instance mode, and report shadow core fallback status.
+- ✅ **Tests** (`tests/run_ahead.rs`):
+  - `run_ahead_keeps_audio_and_timeline_bit_identical`: verifies on TAS movie
+    replay that audio output capture and end-of-run state snapshots remain
+    100% bit-identical across 1-frame single instance, 2-frame single instance,
+    and 2-frame second instance compared to run-ahead disabled.
+  - `run_ahead_reduces_latency_by_configured_frames_homebrew`: verifies that
+    measured input-to-screen reaction latency drops by exactly the configured
+    number of frames.
+  - `run_ahead_reduces_latency_by_configured_frames_emerald`: verifies that
+    Pokémon Emerald title screen latency drops frame-for-frame under run-ahead.
+- **"Done when" check:** measured input-to-screen latency drops by configured
+  frames with no audio artifacts or timeline divergence ✅.
+
