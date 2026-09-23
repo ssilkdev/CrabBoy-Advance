@@ -280,6 +280,52 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
     - SSAA preservation of native pixel boundaries for non-affine text and UI.
 - **"Done when" check:** affine backgrounds and sprites render smoothly at 2x, 4x, 8x resolution without stairstepping or seams against native UI layers ✅.
 
+### M7. HD sprite and tile replacement packs [New for GBA] ✅
+
+- ✅ **Hash-Keyed Extraction & Identification Engine** (`src/gba/hd_pack.rs`, `1bc78d8`):
+  - FNV-1a 64-bit deterministic hash implementation in pure Rust (`fnv1a_64`, `hash_to_hex`, `hex_to_hash`) with zero external hashing dependencies.
+  - VRAM tile pixel extraction and hashing for both 4bpp and 8bpp tiles (`extract_tile_pixels`, `hash_tile`).
+  - Palette extraction and hashing for both BG palettes and OBJ palettes (`extract_palette`, `hash_palette`).
+  - Canonical un-flipped composite sprite extraction across 1D and 2D tile-to-OBJ mapping modes (`extract_sprite`, `sprite_to_rgba`), guaranteeing the same canonical hash regardless of in-game horizontal or vertical orientation.
+- ✅ **Pack Format, Manifest & In-Memory Asset Storage** (`src/gba/hd_pack.rs`, `1bc78d8`):
+  - `manifest.json` schema (`HdPackManifest`, `HdReplacementEntry`) supporting:
+    - High-res PNG assets at integer scales (e.g. 2x, 4x, 8x).
+    - `palette_hash` optional matching: allows artists to supply alternate high-res art for distinct character variants (e.g., Shiny Pokémon, Fire Mario, player vs enemy colors).
+    - `recolor: true`: dynamic palette recoloring that maps base palette entries to current runtime palette entries, dynamically preserving anti-aliased shading and alpha across in-game damage flashes and screen transitions.
+    - Animation frame swapping: distinct high-resolution art mapped to each unique sprite state/frame automatically keyed by tile hash.
+    - `hflip` / `vflip` manifest overrides.
+  - `HdPack::load_from_dir`: loads directory of PNG assets and manifest into in-memory `HdImage` and `HdReplacement` buffers with $O(1)$ fast lookup tables (`find_sprite_replacement`, `find_tile_replacement`).
+- ✅ **Runtime Replacement & Subpixel Compositing** (`src/gba/ppu/hd_mode7.rs`, `src/gba/ppu/mod.rs`, `src/gba/mod.rs`, `1bc78d8`):
+  - Subpixel replacement injection during high-resolution rendering: replaces native tiles and sprites with high-resolution textures.
+  - Full support for sprite bounding box wrapping, affine/non-affine rendering, horizontal and vertical flipping, and semi-transparency.
+  - High-resolution text BGs (BG0..3) tile replacement.
+  - Box-filtered SSAA downsampling: high-res assets downsampled to native 240x160 with subpixel fidelity when SSAA is enabled or running on native displays.
+  - Zero overhead and bit-identical output when HD packs are disabled.
+- ✅ **Asset Dumping Tool & CLI Commands** (`src/gba/hd_pack.rs`, `src/main.rs`, `1bc78d8`):
+  - `dump_tiles_and_sprites`: extracts active on-screen sprites and VRAM background tiles, writes numbered PNG assets, and generates a ready-to-edit `manifest.json` template.
+  - Headless CLI command `--dump-tiles <ROM> [--output <DIR>] [--frame <N>]`.
+  - Headless/CLI loading flag `--hd-pack <DIR>`.
+- ✅ **Desktop & Android UI Integration** (`src/ui/mod.rs`, `src/ui/config.rs`, `android/src/app.rs`, `1bc78d8`):
+  - Video menu UI on desktop: toggle HD pack checkbox, active pack info banner (pack name, scale, sprite/tile replacement count), "Load HD Pack Folder..." directory picker (`rfd`), and "Dump Tiles & Sprites to Folder..." button.
+  - Persistence in `config.json` under `render.hd_pack_path` and `render.hd_pack_enabled`.
+  - Android port (`CrabBoyApp`) automatically uploads or downsamples HD frames when HD pack is enabled.
+- ✅ **Sample HD Pack** (`assets/sample_hd_pack/`, `1bc78d8`):
+  - Includes sample hero sprites (idle, walk frames, fire palette variant), `manifest.json`, and documentation explaining pack authoring and dynamic recoloring.
+- ✅ **Tests** (`tests/hd_pack.rs`, `1bc78d8`):
+  - 11 unit and integration tests covering:
+    - FNV-1a 64-bit deterministic hashing and hex parsing.
+    - Tile pixel extraction and palette hashing.
+    - Sprite extraction and horizontal/vertical flip canonical invariance.
+    - Manifest JSON serialization and deserialization roundtrip.
+    - Pack loading from directory and PNG decoding.
+    - Sample HD pack verification and animation frame matching.
+    - Tile and sprite dumping tool verification.
+    - High-resolution sprite replacement rendering.
+    - Dynamic palette recoloring and palette variant selection.
+    - Sprite animation frame swapping across action states.
+    - Box-filtered SSAA downsampling preserving subpixel fidelity.
+- **"Done when" check:** a sample pack replaces a game's sprites with animation and palette changes still working ✅.
+
 
 
 

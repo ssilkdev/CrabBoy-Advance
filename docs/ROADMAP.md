@@ -81,7 +81,7 @@ deterministic, so this comes first.
 - **Done when:** these games render correctly at every scale, with no seams
   where HD layers meet native-resolution layers.
 
-### M7. HD sprite and tile replacement packs [New for GBA]
+### M7. HD sprite and tile replacement packs [New for GBA] ✅
 - Swap tiles and sprites for high-resolution art, keyed by a hash of the
   tile's pixels and palette. This is the approach Mesen uses for the NES.
 - Includes a tile dump tool and a pack format with a manifest, so artists
