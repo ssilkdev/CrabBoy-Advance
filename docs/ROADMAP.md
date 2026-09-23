@@ -71,7 +71,7 @@ deterministic, so this comes first.
 - **Done when:** the presets work on desktop and Android, and the PPU exposes
   per-layer output without changing the native-resolution image.
 
-### M6. HD Mode 7 [New]
+### M6. HD Mode 7 [New] ✅
 - Render affine backgrounds and affine sprites at 4–8× internal resolution,
   the way bsnes-HD does for the SNES. Rotation and scaling become smooth
   instead of blocky and aliased.

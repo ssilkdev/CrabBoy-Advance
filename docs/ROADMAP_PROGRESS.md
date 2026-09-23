@@ -249,5 +249,37 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
     - Custom shader JSON and key=value parsing and execution (warm vs cool color temperature, brightness boost).
 - **"Done when" check:** presets work on desktop and Android ✅; PPU exposes per-layer output without changing the native-resolution image ✅.
 
+### M6. HD Mode 7 ✅
+
+- ✅ **HD Mode 7 Affine Rendering Engine** (`src/gba/ppu/hd_mode7.rs`, `9b44c59`):
+  - `HdScale`: `Off`, `X2` (480x320), `X4` (960x640), `X8` (1920x1280).
+  - `HdMode7Config`: scale factor, perspective scanline interpolation toggle, and SSAA downsampling toggle.
+  - Continuous subpixel coordinate evaluation $(u, v)$ for affine backgrounds (Mode 1 BG2, Mode 2 BG2/3) and affine bitmaps (Mode 3 15-bit color, Mode 4 8-bit palette with page flipping, Mode 5 15-bit color with page flipping).
+  - Scanline perspective interpolation: interpolates affine parameters ($PA, PB, PC, PD, X, Y$) across sub-scanlines between scanline $y$ and $y+1$, eliminating stairstepping on 3D perspective tracks (Mario Kart: Super Circuit, F-Zero: Maximum Velocity).
+  - Subpixel affine sprite evaluation: renders rotscale OBJs at high resolution with subpixel transformation coordinate mapping.
+  - Seamless layer compositing: composites HD affine surfaces with native resolution layers (Backdrop, non-affine text BGs BG0/1, non-affine sprites) using hardware priority sorting `(priority ASC, is_bg ASC, layer_idx ASC)` and GBA color special effects (alpha blending, brightness increase/decrease via `apply_color_effects`).
+  - Supersample Anti-Aliasing (SSAA): box-filtered downsampling from HD internal resolution back to native 240x160 for high-fidelity anti-aliasing without requiring a high-resolution display window.
+  - Zero overhead and bit-identical output when HD Mode 7 is disabled.
+- ✅ **PPU Architecture & Draw Command Integration** (`src/gba/ppu/layers.rs`, `src/gba/ppu/mod.rs`, `9b44c59`):
+  - `LayerDrawCommand` updated with `bgcnt`, `bldcnt`, `bldalpha`, and `bldy`.
+  - Affine origin snapshotting (`scanline_affine_origin`) captures internal affine registers $(X, Y)$ *before* per-scanline increments to guarantee exact subpixel geometric alignment.
+  - `hd_config`, `set_hd_mode7_config`, and `render_hd_frame` exposed on `Ppu` and `Gba`.
+- ✅ **Desktop & Android UI Integration** (`src/ui/mod.rs`, `src/ui/screen.rs`, `src/ui/config.rs`, `android/src/app.rs`, `9b44c59`):
+  - Video menu UI on desktop with radio buttons for HD scale (Off, 2x, 4x, 8x), checkboxes for perspective interpolation and SSAA.
+  - Dynamic texture resizing in `ScreenRenderer` matching the HD resolution `[240 * scale, 160 * scale]`.
+  - Android port (`CrabBoyApp`) configures `HdMode7Config`, uploads HD frames, and exposes configuration in UI.
+- ✅ **Tests** (`tests/hd_mode7.rs`, `9b44c59`):
+  - 8 integration tests covering:
+    - Scale factors and HD frame dimension computation.
+    - Subpixel affine rendering in Mode 1 with rotated/scaled tilemaps.
+    - Perspective scanline interpolation removing stairstepping between adjacent scanlines.
+    - Seamless compositing between high-resolution affine tracks and native UI text layers.
+    - Box-filtered SSAA downsampling from 4x HD to native 240x160.
+    - High-resolution Mode 3 bitmap affine rendering.
+    - High-resolution affine sprite transformation and transparency.
+    - SSAA preservation of native pixel boundaries for non-affine text and UI.
+- **"Done when" check:** affine backgrounds and sprites render smoothly at 2x, 4x, 8x resolution without stairstepping or seams against native UI layers ✅.
+
+
 
 
