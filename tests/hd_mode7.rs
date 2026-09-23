@@ -286,3 +286,68 @@ fn hd_mode7_affine_sprite_evaluation() {
     assert_eq!((p_sprite >> 8) & 0xFF, 0xFF, "Green channel active for yellow sprite");
 }
 
+
+/// Regression: a pixel inside a window whose effects bit (bit 5) is clear
+/// used to get no backdrop candidate, and when no layer covered it either
+/// the HD compositor indexed an empty list and panicked. Pokémon Emerald's
+/// overworld hits this as soon as HD Mode 7 is switched on.
+#[test]
+fn hd_backdrop_shows_inside_effect_free_windows() {
+    use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
+    let mut gba = Gba::new_headless();
+    gba.load_rom_bytes(vec![0; 0x400]);
+    // Mode 0, only WIN0 enabled, no BGs/OBJ; WIN0 covers the screen and
+    // enables nothing (not even effects). Backdrop is pure green.
+    gba.mmu.write16(0x0400_0000, 0x2000);
+    gba.mmu.write16(0x0400_0040, 0x00F0); // WIN0H 0..240
+    gba.mmu.write16(0x0400_0044, 0x00A0); // WIN0V 0..160
+    gba.mmu.write16(0x0400_0048, 0x0000); // WININ: nothing
+    gba.mmu.write16(0x0500_0000, 0x03E0); // backdrop = green
+    gba.set_hd_mode7_config(HdMode7Config { scale: HdScale::X2, ..HdMode7Config::default() });
+    gba.run_frame();
+    let hd = gba.render_hd_frame().expect("HD frame");
+    let native = *gba.get_framebuffer();
+    assert_eq!(hd.pixels[0] & 0x00FF_FFFF, native[0] & 0x00FF_FFFF, "HD shows the same backdrop as native");
+    let (r, g, b) = (hd.pixels[0] & 0xFF, (hd.pixels[0] >> 8) & 0xFF, (hd.pixels[0] >> 16) & 0xFF);
+    assert!(g > 200 && r < 40 && b < 40, "expected green backdrop, got {:08X}", hd.pixels[0]);
+}
+
+/// Regression: `run_frame` runs a fixed number of cycles, so it can stop
+/// mid-frame (after a save-state load, or as its phase drifts). The HD
+/// renderer used the live, partly drawn layer buffers and the lower part of
+/// the HD picture came out black. It must use the last complete frame.
+#[test]
+fn hd_frame_is_complete_when_run_frame_stops_mid_frame() {
+    use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
+    let mut gba = Gba::new_headless();
+    gba.load_rom_bytes(vec![0; 0x400]);
+    // Mode 0 with BG0 on: every tile is tile 1, solid color 1 (red);
+    // backdrop black. Any row the HD renderer can't see BG0 on stays black.
+    gba.mmu.write16(0x0400_0000, 0x0100);
+    gba.mmu.write16(0x0400_0008, 0x1F00); // BG0CNT: char base 0, screen base 31, 4bpp
+    gba.mmu.write16(0x0500_0000, 0x0000);
+    gba.mmu.write16(0x0500_0002, 0x001F);
+    for i in (0..32u32).step_by(2) {
+        gba.mmu.write16(0x0600_0020 + i, 0x1111); // tile 1: all color 1
+    }
+    for i in (0..0x800u32).step_by(2) {
+        gba.mmu.write16(0x0600_F800 + i, 0x0001);
+    }
+    gba.set_hd_mode7_config(HdMode7Config { scale: HdScale::X2, ..HdMode7Config::default() });
+    gba.run_frame();
+    gba.run_frame();
+    // Stop early in the next frame's visible area, like a loaded state or
+    // a drifted run_frame can: the live layer buffers were cleared at line
+    // 0 and hold only a few lines.
+    while gba.mmu.ppu.vcount >= 160 || gba.mmu.ppu.vcount == 0 {
+        gba.step_instruction();
+    }
+    while gba.mmu.ppu.vcount < 10 {
+        gba.step_instruction();
+    }
+    let hd = gba.render_hd_frame().expect("HD frame");
+    let blank_rows = (0..hd.height)
+        .filter(|y| hd.pixels[y * hd.width..(y + 1) * hd.width].iter().all(|p| p & 0x00FF_FFFF == 0))
+        .count();
+    assert_eq!(blank_rows, 0, "HD frame has {blank_rows} black rows");
+}

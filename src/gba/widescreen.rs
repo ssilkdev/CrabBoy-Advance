@@ -565,7 +565,7 @@ pub fn render_widescreen(
 
     // Index draw commands by [scanline][layer_index]
     let mut cmd_map = [None; 160 * 6];
-    for cmd in &ppu.draw_commands {
+    for cmd in ppu.frame_commands() {
         let sc = cmd.scanline as usize;
         let l_idx = cmd.layer.index();
         if sc < 160 && l_idx < 6 {

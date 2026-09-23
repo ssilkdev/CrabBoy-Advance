@@ -73,6 +73,13 @@ pub struct Ppu {
     pub layer_capture: bool,
     pub layer_buffers: Option<PpuLayerBuffers>,
     pub draw_commands: Vec<LayerDrawCommand>,
+    /// Layers and commands of the last *completed* frame, latched at VBlank.
+    /// `run_frame` runs a fixed cycle count, so it doesn't end at VBlank:
+    /// its phase drifts and a loaded save state can start mid-frame. The live
+    /// buffers above are then only partly drawn when the HD renderers run,
+    /// which showed up as a black lower part of the HD picture.
+    pub completed_layers: Option<PpuLayerBuffers>,
+    pub completed_commands: Vec<LayerDrawCommand>,
 
     // HD Mode 7 Rendering (ROADMAP M6)
     pub hd_config: HdMode7Config,
@@ -127,6 +134,8 @@ impl Ppu {
             framebuffer: Box::new([0xFF00_0000; SCREEN_WIDTH * SCREEN_HEIGHT]),
             layer_capture: false,
             layer_buffers: None,
+            completed_layers: None,
+            completed_commands: Vec::new(),
             draw_commands: Vec::new(),
             hd_config: HdMode7Config::default(),
             hd_pack: None,
@@ -143,6 +152,8 @@ impl Ppu {
         } else if !enable {
             self.layer_buffers = None;
             self.draw_commands.clear();
+            self.completed_layers = None;
+            self.completed_commands.clear();
         }
     }
 
@@ -230,17 +241,45 @@ impl Ppu {
 
     /// Access isolated RGBA framebuffer surface for a specific layer.
     pub fn get_layer_framebuffer(&self, layer: PpuLayer) -> Option<&[u32; SCREEN_WIDTH * SCREEN_HEIGHT]> {
-        self.layer_buffers.as_ref().map(|lb| lb.get_layer(layer))
+        self.frame_layers().map(|lb| lb.get_layer(layer))
     }
 
     /// Access all isolated layer framebuffers.
     pub fn get_layer_framebuffers(&self) -> Option<&PpuLayerBuffers> {
-        self.layer_buffers.as_ref()
+        self.frame_layers()
+    }
+
+    /// All 160 lines are drawn: keep this frame's layers and commands for
+    /// the HD renderers. Swaps buffers (no copying); the live ones are
+    /// cleared when line 0 of the next frame is drawn.
+    fn latch_completed_frame(&mut self) {
+        if !self.layer_capture {
+            return;
+        }
+        if self.completed_layers.is_none() {
+            self.completed_layers = Some(PpuLayerBuffers::new());
+        }
+        std::mem::swap(&mut self.layer_buffers, &mut self.completed_layers);
+        std::mem::swap(&mut self.draw_commands, &mut self.completed_commands);
+    }
+
+    /// Layers of the last complete frame (live buffers until one exists).
+    pub fn frame_layers(&self) -> Option<&PpuLayerBuffers> {
+        self.completed_layers.as_ref().or(self.layer_buffers.as_ref())
+    }
+
+    /// Draw commands of the last complete frame (live until one exists).
+    pub fn frame_commands(&self) -> &[LayerDrawCommand] {
+        if self.completed_layers.is_some() {
+            &self.completed_commands
+        } else {
+            &self.draw_commands
+        }
     }
 
     /// Access recorded draw commands for the current frame.
     pub fn get_draw_commands(&self) -> &[LayerDrawCommand] {
-        &self.draw_commands
+        self.frame_commands()
     }
 
     pub fn bg_mosaic_h(&self) -> u32 {
@@ -339,6 +378,7 @@ impl Ppu {
                     // Entering VBlank
                     self.dispstat |= 1;
                     self.frame_ready = true;
+                    self.latch_completed_frame();
 
                     if (self.dispstat & (1 << 3)) != 0 {
                         irq_vblank = true;

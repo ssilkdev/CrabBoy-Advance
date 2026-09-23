@@ -221,7 +221,7 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
 
     // Extract draw commands indexed by [scanline][layer_index]
     let mut cmd_map = [None; 160 * 6];
-    for cmd in &ppu.draw_commands {
+    for cmd in ppu.frame_commands() {
         let sc = cmd.scanline as usize;
         let l_idx = cmd.layer.index();
         if sc < 160 && l_idx < 6 {
@@ -409,8 +409,13 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
             let mut candidates: [Pixel; 6] = [Pixel::default(); 6];
             let mut cand_count = 0;
 
-            // 1. Backdrop (layer 5, priority 4)
-            if (win_mask & (1 << 5)) != 0 {
+            // 1. Backdrop (layer 5, priority 4). Always present: window bit 5
+            //    is the color-special-effects enable, not a layer enable, and
+            //    real hardware shows the backdrop wherever nothing else is.
+            //    Gating it on bit 5 left pixels with no candidates at all
+            //    inside effect-free windows (Emerald's overworld), and the
+            //    compositor panicked on the empty list.
+            {
                 candidates[cand_count] = Pixel {
                     color: backdrop_color,
                     layer: 5,
@@ -672,7 +677,7 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
                             is_obj_alpha: false,
                         };
                         cand_count += 1;
-                    } else if let Some(ref lb) = ppu.layer_buffers {
+                    } else if let Some(lb) = ppu.frame_layers() {
                         let rgba = lb.get_layer(layer_enum)[ny * SCREEN_WIDTH + nx];
                         if (rgba & 0xFF00_0000) != 0 {
                             let r = (rgba & 0xFF) as u8;
@@ -860,7 +865,7 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
 
                 // If no affine sprite was hit, check native non-affine sprite buffer
                 if obj_pixel.is_none() {
-                    if let Some(ref lb) = ppu.layer_buffers {
+                    if let Some(lb) = ppu.frame_layers() {
                         let rgba = lb.get_layer(PpuLayer::Obj)[ny * SCREEN_WIDTH + nx];
                         if (rgba & 0xFF00_0000) != 0 {
                             let r = (rgba & 0xFF) as u8;
@@ -893,7 +898,9 @@ pub fn render_hd_mode7(ppu: &Ppu, config: &HdMode7Config) -> Option<HdFrame> {
                 (p.priority, is_bg, p.layer)
             });
 
-            let top = active_slice[0];
+            // The backdrop is always a candidate, so the list is never empty;
+            // fall back to it anyway rather than panic mid-frame.
+            let top = active_slice.first().copied().unwrap_or(Pixel { color: backdrop_color, layer: 5, priority: 4, ..Pixel::default() });
             let bot = if active_slice.len() > 1 {
                 active_slice[1]
             } else {
