@@ -118,7 +118,7 @@ deterministic, so this comes first.
 
 ## Stage 4: Accessibility and understanding the game
 
-### M10. Accessibility pack [Catch-up]
+### M10. Accessibility pack [Catch-up] ✅
 - Colorblind filters, a global slow-motion setting, toggle-instead-of-hold
   for any button, one-handed control layouts (desktop and Android), and
   interface scaling.

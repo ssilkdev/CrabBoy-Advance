@@ -462,3 +462,94 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
     - `test_m4a_pokemon_emerald_playback_and_export`: live test on real Pokémon Emerald ROM verifying BGM playback, 48 kHz sample generation, MIDI export, and stem export.
     - `test_m4a_save_state_synchronization`: verifies save-state save/restore roundtrip with zero phase desync or audio glitching.
 - **"Done when" check:** Emerald, Minish Cap and Fire Emblem play re-synthesized music with correct tempo, looping and sound effects, and the audio mixer can switch between HD and hardware audio ✅.
+
+---
+
+## Stage 4: Accessibility and understanding the game
+
+### M10. Accessibility pack ✅
+
+- ✅ **Shared core** (`src/gba/accessibility.rs`, `6eedb8a`). Lives beside
+  the emulator but holds no emulation state, so determinism, replays and
+  save states are untouched.
+  - Colorblind filters: Daltonization (Fidaner) on top of Viénot/Brettel LMS
+    dichromat simulation for protanopia, deuteranopia and tritanopia, plus
+    grayscale and high contrast, with a strength slider. Neutral grays pass
+    through unchanged; a unit test checks that red/green pairs a deuteranope
+    confuses end up ≥1.3× further apart after correction.
+  - Toggle instead of hold for any of the 10 buttons (latch flips on each
+    press edge; latch state is never saved).
+  - `Handedness` (two hands / left / right) for keyboard and touch; UI scale
+    0.75–2.5×.
+  - `AccessibilityStore`: global default + per-game overrides keyed by game
+    code (GB: header title). `AccessibilityManager::commit` saves edits for
+    the loaded game automatically, doesn't create an override that just
+    matches the default, and edits with no game loaded set the default.
+- ✅ **Slow motion audio** (`src/gba/apu/slowmo_stretch.rs`,
+  `apu/audio_output.rs`, `apu/resample.rs`). 10–100% speed, three sound
+  modes:
+  - *Stretch*: WSOLA time stretcher (1024-frame Hann grains, 50% overlap,
+    ±256-frame waveform-similarity search). Pitch is unchanged.
+  - *Tape*: the resampler reads the input at `speed`, so pitch drops.
+  - *Mute*: silence of the right length.
+  - At speed `s` the core delivers audio in one burst every 1/(60·s) s, so
+    the output queue band scales with speed (`slowmo_band`) and is pre-filled
+    with silence on entry. After slow motion, whole crossfaded grains are
+    dropped until the queue is back to normal latency (~0.5 s instead of the
+    minute the ±0.5% rate control would need). Queue capacity grew to 64 K
+    samples; normal-speed latency is unchanged (same 1000–3000 band).
+- ✅ **Desktop** (`src/ui/accessibility_dialog.rs`, `ui/mod.rs`,
+  `ui/controls.rs`, `ui/screen.rs`):
+  - Accessibility dialog (Ctrl+U or Emulation menu) with a live palette
+    preview; slow-motion presets also in Emulation › Speed.
+  - One-handed keyboard presets (left: WASD/Q/E/Tab/R/Z/X; right:
+    IJKL/U/O/Y/P/M/Enter) are an overlay: "Two hands" is always the user's
+    own remapped bindings. A test checks the presets have no duplicate keys
+    and don't collide with the fixed hotkeys (0–9, F1/F3/F6/F7, N, .).
+  - The filter runs on the game's colors before frame blending, shaders,
+    xBRZ and sharpening, on every render path (native, HD Mode 7 with and
+    without SSAA, widescreen).
+  - UI scale uses egui's zoom factor, applied once the mouse is released so
+    the slider doesn't jump under the pointer.
+  - Settings persist in `config.json` under `accessibility`; configs from
+    before M10 still load.
+  - CLI: `--dump-frame <ROM> --colorblind <mode>`.
+- ✅ **Android** (`android/src/app.rs`, `android/src/touch.rs`):
+  - "Accessibility..." in the in-game menu opens a touch-sized sheet (colors,
+    strength, slow motion, slow-motion sound, touch layout, interface size,
+    toggle buttons, use for all games / reset). Emulation pauses while it's
+    open. Saved per game to `files/accessibility.json`.
+  - One-handed touch layouts: every control stacked in one column on the
+    chosen side (portrait) or a side column with the game filling the rest
+    (landscape). Host test checks, at four phone sizes × both hands, that
+    every control is on screen, off the game image, within the side 60% of
+    the width in portrait, and hit-tests to exactly its own button.
+- ✅ **Tests**:
+  - `tests/accessibility.rs` (8): slow motion against a simulated real-time
+    48 kHz device at 75/50/25/10% with **zero underruns** and pitch within
+    3% (pitch-preserved), halved pitch (tape), gap-free silence (mute);
+    switching speeds mid-play with no warm-up and no underruns; returning to
+    normal latency after slow motion; a control test showing that without
+    the stretcher 50% speed starves the device; the filter on a real
+    emulator frame; sticky B driving the keypad over 30+ frames; per-game
+    persistence round-trip through `AppConfig` JSON and the Android store.
+  - Unit tests: filter neutrality and deutan separation, sticky edges,
+    per-game commit rules, latch not persisted, WSOLA length/pitch/no clicks,
+    tape resampling, keyboard preset clashes; Android host tests 8/8.
+  - Full `cargo test --release`: **562 passed, 0 failed** (19 ignored), incl.
+    jsmolka, mGBA suite ratchet, Blargg, determinism, replay golden,
+    run-ahead and M4A.
+- ✅ **Verified live**:
+  - Emerald frames dumped through each filter look clean (no banding or
+    clipping).
+  - Android emulator (x86_64 debug APK): opened the sheet on Emerald, set
+    Deuteranopia, 75%, 125% UI, left-hand layout and toggle-B. After a
+    reinstall + restart, the library stayed at the global 100% while Emerald
+    came back with its settings, filtered picture and one-handed layout.
+    Found and fixed on device: the sheet overflowed the screen at 125%.
+  - Release APK (arm64 + x86_64) builds.
+- **"Done when" check:** every option works on desktop and Android and is
+  saved per game ✅.
+- Not done: the desktop filter runs on the CPU per pixel (cheap: frames are
+  240×160 and runs of equal colors reuse the last result); the desktop GUI
+  was checked by build + tests, not by clicking through it in a live window.
