@@ -326,6 +326,63 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
     - Box-filtered SSAA downsampling preserving subpixel fidelity.
 - **"Done when" check:** a sample pack replaces a game's sprites with animation and palette changes still working ✅.
 
+### M8. Per-game widescreen [New for GBA] ✅
 
-
-
+- ✅ **Widescreen Engine & Subpixel Viewport Expansion** (`src/gba/widescreen.rs`, `6276c57`):
+  - `WidescreenMode`:
+    - `Off`: Native 3:2 (240x160).
+    - `Ratio16_9`: 284x160 (+22px left margin, +22px right margin, aspect error 0.15%).
+    - `TileAligned16_9`: 288x160 (+24px left margin, +24px right margin, exact 36x20 8x8 tiles).
+    - `Ratio16_10`: 256x160 (+8px left margin, +8px right margin, Steam Deck native aspect ratio).
+    - `Custom { width, height }`: Arbitrary custom viewport dimensions.
+  - `bg_expand: [bool; 4]`: Selective background layer expansion mask allowing scrolling gameplay backgrounds (BG1..3) to expand into widescreen margins while keeping HUD/UI layers (BG0) pinned or pillarboxed.
+  - `hud_anchor: [HudAnchor; 4]`:
+    - `Center`: Centered at native horizontal position ($X = \text{margin\_left} \dots \text{margin\_left} + 240$), preventing HUD repetition or corruption across margins.
+    - `Left`: Anchored to the left margin border ($X = 0 \dots 240$).
+    - `Right`: Anchored to the right margin border ($X = W - 240 \dots W$).
+    - `Expand`: Layer expanded across entire width (identical to `bg_expand: true`).
+    - `Pillarbox`: Layer clamped strictly to native 240px viewport with transparent/backdrop margins.
+  - `obj_expand: bool`: Extended sprite scanning and rendering for horizontal coordinates $X \in [-\text{margin\_left}, 240 + \text{margin\_right}]$, seamlessly drawing characters and enemies moving beyond the 240px boundary.
+  - `window_mode: WidescreenWindowMode`:
+    - `ExtendFull`: Stretches screen-wide fade and color effects (WIN0/WIN1/WINOUT) across the entire widescreen viewport ($0 \dots W$), eliminating black side bars during screen fades and transitions.
+    - `Clamp240`: Clamps window coordinates strictly to native 240px area.
+    - `IgnoreInMargins`: Outside window effects applied within margins.
+  - Continuous subpixel coordinate evaluation across widescreen margins:
+    - Mode 1 BG2 and Mode 2 BG2/3 affine backgrounds evaluated continuously across negative and margin coordinates.
+    - Full compatibility with HD Mode 7 (2x, 4x, 8x internal rendering) and SSAA downsampling to widescreen resolutions (`downsample_ssaa_wide`).
+    - Full compatibility with M7 HD Replacement Packs (subpixel replacement injection and dynamic recoloring in widescreen margins).
+- ✅ **Per-Game Widescreen Database & ROM/RAM Patching** (`src/gba/widescreen.rs`, `6276c57`):
+  - `WidescreenDatabase` lookup table mapping game title codes to tuned safe profiles:
+    1. **Mario Kart: Super Circuit** (`AMKE`, `AMKP`, `AMKJ`): Mode 2 affine track and sky horizon expanded to 16:9; HUD lap/timer/speedometer centered.
+    2. **F-Zero: Maximum Velocity** (`AFZE`, `AFZP`, `AFZJ`): Mode 2 affine track and starfield expanded to 16:9; speedometer, mini-map, and boost gauges centered.
+    3. **Metroid Fusion** (`AMFE`, `AMFP`, `AMFJ`): 512-wide room scenery layers expanded to 16:9; Samus HUD centered; dynamic ROM/RAM camera draw clip patch applied.
+    4. **Metroid: Zero Mission** (`BMXE`, `BMXP`, `BMXJ`): Room layer expansion; centered HUD.
+    5. **Sonic Advance** (`ASOE`, `ASOP`, `ASOJ`): High-speed parallax backgrounds expanded to 16:9; rings, timer, and score centered.
+    6. **Castlevania: Aria of Sorrow** (`AANE`, `AANP`, `AANJ`): Castle corridors and background layers expanded; HP/MP/boss bars centered.
+    7. **Pokémon Emerald** (`BPEE`, `BPEP`, `BPEJ`): Battle scenes and overworld layers expanded; battle HUD and text boxes centered.
+  - Automatic detection and profile application on ROM load via `configure_widescreen_for_loaded_cartridge()`.
+  - ROM and EWRAM memory patching support via `WidescreenMemoryPatchDef` and `apply_to_core()`.
+- ✅ **Desktop & Android UI Integration** (`src/ui/mod.rs`, `src/ui/screen.rs`, `src/ui/config.rs`, `src/main.rs`, `6276c57`):
+  - Desktop Video menu includes a dedicated "Per-Game Widescreen" section:
+    - Checkbox toggle for widescreen mode.
+    - Active profile indicator with game title and region information.
+    - Radio buttons for 16:9 Standard (284x160), 16:9 Tile-Aligned (288x160), and 16:10 Steam Deck (256x160).
+  - Main viewport render widget dynamically updates aspect ratio (`calculate_target_size_for_aspect`) to eliminate pillarbox bars when widescreen is enabled.
+  - CLI flag `--widescreen` for headless/GUI launches and `--dump-frame`.
+  - Settings persisted in `config.json` under `render.widescreen`.
+- ✅ **Tests** (`tests/widescreen.rs`, `6276c57`):
+  - 13 comprehensive integration tests covering:
+    - `test_widescreen_database_profiles`: verifies database lookup across all 7 supported games and region codes.
+    - `test_widescreen_memory_patch_application`: verifies ROM/EWRAM memory patch application.
+    - `test_widescreen_modes_and_geometry`: verifies width, margin, and aspect ratio calculations for 16:9, TileAligned, and 16:10.
+    - `test_game_verification_1_mario_kart_super_circuit`: verifies Mario Kart Mode 2 track expansion without visual glitches.
+    - `test_game_verification_2_fzero_maximum_velocity`: verifies F-Zero Mode 2 track and starfield expansion.
+    - `test_game_verification_3_metroid_fusion`: verifies Metroid Fusion room layer expansion and HUD anchoring.
+    - `test_widescreen_text_bg_layer_expansion`: verifies text BG horizontal expansion across margins.
+    - `test_widescreen_hud_anchoring_prevents_repeating`: verifies HUD anchoring prevents repeating/corrupted UI elements.
+    - `test_widescreen_sprite_offscreen_expansion`: verifies sprites render in margins beyond the 240px coordinate boundary.
+    - `test_widescreen_mode2_affine_track_evaluation`: verifies subpixel affine evaluation across margin bounds.
+    - `test_widescreen_window_full_screen_fade`: verifies full-screen window fading across entire widescreen viewport.
+    - `test_hd_mode7_widescreen_combined_rendering`: verifies HD Mode 7 (scale 2x/4x) combined with widescreen expansion.
+    - `test_hd_pack_widescreen_replacement_rendering`: verifies M7 HD replacement art injection and recoloring in widescreen margins.
+- **"Done when" check:** at least three games run in widescreen with no visual errors (Mario Kart, F-Zero, Metroid Fusion verified) ✅.

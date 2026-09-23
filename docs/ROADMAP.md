@@ -90,7 +90,7 @@ deterministic, so this comes first.
 - **Done when:** a sample pack replaces a game's sprites with animation and
   palette changes still working.
 
-### M8. Per-game widescreen [New for GBA]
+### M8. Per-game widescreen [New for GBA] ✅
 - For games whose engines already keep content outside the 240-pixel view,
   draw that extra area to fill 16:9. Controlled by a per-game database of
   safe settings and patches.
