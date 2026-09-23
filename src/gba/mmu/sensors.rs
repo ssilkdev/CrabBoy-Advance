@@ -137,3 +137,21 @@ impl CartridgeSensors {
         }
     }
 }
+
+/// Sensor protocol state (ROADMAP M2). Host-driven inputs (sunlight level,
+/// tilt) are saved too so a replay sees the same sensor values.
+impl crate::gba::state::Snapshot for CartridgeSensors {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.u8(self.sunlight_level); w.bool(self.auto_diurnal_cycle);
+        w.u8(self.solar_counter); w.bool(self.solar_clock); w.bool(self.solar_reset);
+        w.f32(self.tilt_x); w.f32(self.tilt_y); w.u16(self.gyro_angle);
+        w.bool(self.rumble_active); w.f32(self.rumble_strength);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.sunlight_level = r.u8()?; self.auto_diurnal_cycle = r.bool()?;
+        self.solar_counter = r.u8()?; self.solar_clock = r.bool()?; self.solar_reset = r.bool()?;
+        self.tilt_x = r.f32()?; self.tilt_y = r.f32()?; self.gyro_angle = r.u16()?;
+        self.rumble_active = r.bool()?; self.rumble_strength = r.f32()?;
+        Some(())
+    }
+}

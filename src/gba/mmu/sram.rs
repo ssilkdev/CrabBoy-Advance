@@ -81,3 +81,15 @@ mod tests {
         assert_eq!(sram.read(0x0E00_8000), 0xAB); // mirrors every 32KB
     }
 }
+
+/// SRAM contents (ROADMAP M2).
+impl crate::gba::state::Snapshot for Sram {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.bytes(&self.data[..]);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        r.bytes_into(&mut self.data[..])?;
+        self.dirty = true;
+        Some(())
+    }
+}

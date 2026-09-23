@@ -1016,3 +1016,106 @@ mod channel3_wave_bank_tests {
         assert_eq!(ch3.sample(), bipolar(0xF));
     }
 }
+
+// ---- Save states (ROADMAP M2) --------------------------------------------
+use crate::gba::state::{Snapshot, StateReader, StateWriter};
+
+impl Snapshot for Envelope {
+    fn save(&self, w: &mut StateWriter) {
+        w.u8(self.initial_volume); w.bool(self.direction_inc); w.u8(self.period);
+        w.u8(self.volume); w.u8(self.timer);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.initial_volume = r.u8()?; self.direction_inc = r.bool()?; self.period = r.u8()?;
+        self.volume = r.u8()?; self.timer = r.u8()?;
+        Some(())
+    }
+}
+
+impl Snapshot for Sweep {
+    fn save(&self, w: &mut StateWriter) {
+        w.u8(self.shift); w.bool(self.decrease); w.u8(self.period); w.u8(self.timer);
+        w.bool(self.enabled); w.u16(self.shadow_freq);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.shift = r.u8()?; self.decrease = r.bool()?; self.period = r.u8()?; self.timer = r.u8()?;
+        self.enabled = r.bool()?; self.shadow_freq = r.u16()?;
+        Some(())
+    }
+}
+
+impl Snapshot for Channel1 {
+    fn save(&self, w: &mut StateWriter) {
+        w.u16(self.cnt_l); w.u16(self.cnt_h); w.u16(self.cnt_x);
+        w.u32(self.duty as u32); w.u32(self.duty_step as u32); w.u16(self.frequency);
+        w.i32(self.timer); w.u16(self.length_counter); w.bool(self.length_enabled); w.bool(self.active);
+        self.envelope.save(w); self.sweep.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.cnt_l = r.u16()?; self.cnt_h = r.u16()?; self.cnt_x = r.u16()?;
+        self.duty = (r.u32()? & 3) as usize; self.duty_step = (r.u32()? & 7) as usize; self.frequency = r.u16()?;
+        self.timer = r.i32()?; self.length_counter = r.u16()?; self.length_enabled = r.bool()?; self.active = r.bool()?;
+        self.envelope.load(r)?; self.sweep.load(r)
+    }
+}
+
+impl Snapshot for Channel2 {
+    fn save(&self, w: &mut StateWriter) {
+        w.u16(self.cnt_l); w.u16(self.cnt_h);
+        w.u32(self.duty as u32); w.u32(self.duty_step as u32); w.u16(self.frequency);
+        w.i32(self.timer); w.u16(self.length_counter); w.bool(self.length_enabled); w.bool(self.active);
+        self.envelope.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.cnt_l = r.u16()?; self.cnt_h = r.u16()?;
+        self.duty = (r.u32()? & 3) as usize; self.duty_step = (r.u32()? & 7) as usize; self.frequency = r.u16()?;
+        self.timer = r.i32()?; self.length_counter = r.u16()?; self.length_enabled = r.bool()?; self.active = r.bool()?;
+        self.envelope.load(r)
+    }
+}
+
+impl Snapshot for Channel3 {
+    fn save(&self, w: &mut StateWriter) {
+        w.u16(self.cnt_l); w.u16(self.cnt_h); w.u16(self.cnt_x);
+        w.bytes(&self.wave_ram[0]); w.bytes(&self.wave_ram[1]);
+        w.u32(self.bank as u32); w.bool(self.two_banks); w.bool(self.master_enable);
+        w.u8(self.volume_code); w.bool(self.force_75); w.u16(self.frequency); w.i32(self.timer);
+        w.u32(self.sample_index as u32); w.u16(self.length_counter); w.bool(self.length_enabled); w.bool(self.active);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.cnt_l = r.u16()?; self.cnt_h = r.u16()?; self.cnt_x = r.u16()?;
+        r.bytes_into(&mut self.wave_ram[0])?; r.bytes_into(&mut self.wave_ram[1])?;
+        self.bank = (r.u32()? & 1) as usize; self.two_banks = r.bool()?; self.master_enable = r.bool()?;
+        self.volume_code = r.u8()?; self.force_75 = r.bool()?; self.frequency = r.u16()?; self.timer = r.i32()?;
+        self.sample_index = (r.u32()? & 63) as usize; self.length_counter = r.u16()?;
+        self.length_enabled = r.bool()?; self.active = r.bool()?;
+        Some(())
+    }
+}
+
+impl Snapshot for Channel4 {
+    fn save(&self, w: &mut StateWriter) {
+        w.u16(self.cnt_l); w.u16(self.cnt_h); w.u16(self.lfsr); w.bool(self.width_7bit);
+        w.u8(self.ratio); w.u8(self.shift_clock); w.i32(self.timer);
+        w.u16(self.length_counter); w.bool(self.length_enabled); w.bool(self.active);
+        self.envelope.save(w);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.cnt_l = r.u16()?; self.cnt_h = r.u16()?; self.lfsr = r.u16()?; self.width_7bit = r.bool()?;
+        self.ratio = r.u8()?; self.shift_clock = r.u8()?; self.timer = r.i32()?;
+        self.length_counter = r.u16()?; self.length_enabled = r.bool()?; self.active = r.bool()?;
+        self.envelope.load(r)
+    }
+}
+
+impl Snapshot for DmgAudio {
+    fn save(&self, w: &mut StateWriter) {
+        self.ch1.save(w); self.ch2.save(w); self.ch3.save(w); self.ch4.save(w);
+        w.u32(self.frame_sequencer_timer); w.u8(self.frame_sequencer_step);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.ch1.load(r)?; self.ch2.load(r)?; self.ch3.load(r)?; self.ch4.load(r)?;
+        self.frame_sequencer_timer = r.u32()?; self.frame_sequencer_step = r.u8()? & 7;
+        Some(())
+    }
+}

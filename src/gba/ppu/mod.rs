@@ -469,3 +469,37 @@ impl Ppu {
         }
     }
 }
+
+/// PPU registers and internal state (ROADMAP M2). VRAM, palette and OAM are
+/// part of the v1 layout; the framebuffer is not saved (the next frame
+/// redraws it).
+impl crate::gba::state::Snapshot for Ppu {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        for v in [self.dispcnt, self.dispstat, self.vcount] { w.u16(v); }
+        for i in 0..4 { w.u16(self.bgcnt[i]); w.u16(self.bghofs[i]); w.u16(self.bgvofs[i]); }
+        for i in 0..2 {
+            for v in [self.bg_pa[i], self.bg_pb[i], self.bg_pc[i], self.bg_pd[i]] { w.u16(v as u16); }
+            for v in [self.bg_x[i], self.bg_y[i], self.bg_x_internal[i], self.bg_y_internal[i]] { w.i32(v); }
+        }
+        for v in [self.win0h, self.win1h, self.win0v, self.win1v, self.winin, self.winout,
+                  self.bldcnt, self.bldalpha, self.bldy, self.mosaic] { w.u16(v); }
+        w.u32(self.cycle_in_scanline);
+        w.bool(self.frame_ready);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.dispcnt = r.u16()?; self.dispstat = r.u16()?; self.vcount = r.u16()?;
+        for i in 0..4 { self.bgcnt[i] = r.u16()?; self.bghofs[i] = r.u16()?; self.bgvofs[i] = r.u16()?; }
+        for i in 0..2 {
+            self.bg_pa[i] = r.u16()? as i16; self.bg_pb[i] = r.u16()? as i16;
+            self.bg_pc[i] = r.u16()? as i16; self.bg_pd[i] = r.u16()? as i16;
+            self.bg_x[i] = r.i32()?; self.bg_y[i] = r.i32()?;
+            self.bg_x_internal[i] = r.i32()?; self.bg_y_internal[i] = r.i32()?;
+        }
+        self.win0h = r.u16()?; self.win1h = r.u16()?; self.win0v = r.u16()?; self.win1v = r.u16()?;
+        self.winin = r.u16()?; self.winout = r.u16()?;
+        self.bldcnt = r.u16()?; self.bldalpha = r.u16()?; self.bldy = r.u16()?; self.mosaic = r.u16()?;
+        self.cycle_in_scanline = r.u32()?;
+        self.frame_ready = r.bool()?;
+        Some(())
+    }
+}

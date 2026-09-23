@@ -100,3 +100,15 @@ mod tests {
         assert!(kp.check_irq(), "both required keys pressed");
     }
 }
+
+/// Keypad registers (ROADMAP M2). KEYINPUT is saved so the restored frame
+/// sees the same buttons; the front-end overwrites it on the next input poll.
+impl crate::gba::state::Snapshot for Keypad {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.u16(self.keyinput); w.u16(self.keycnt);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.keyinput = r.u16()?; self.keycnt = r.u16()?;
+        Some(())
+    }
+}

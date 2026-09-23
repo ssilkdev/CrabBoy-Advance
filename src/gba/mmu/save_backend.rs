@@ -130,3 +130,26 @@ mod tests {
         assert_eq!(detect_save_type(b"SRAM_V113 ... EEPROM_V120"), SaveType::Eeprom);
     }
 }
+
+/// The save chip's state (ROADMAP M2). The backend kind is fixed by the ROM,
+/// so a tag mismatch means the state belongs to a different game.
+impl crate::gba::state::Snapshot for SaveBackend {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        match self {
+            SaveBackend::None => w.u8(0),
+            SaveBackend::Sram(s) => { w.u8(1); s.save(w) }
+            SaveBackend::Flash(f) => { w.u8(2); f.save(w) }
+            SaveBackend::Eeprom(e) => { w.u8(3); e.save(w) }
+        }
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        let tag = r.u8()?;
+        match (self, tag) {
+            (SaveBackend::None, 0) => Some(()),
+            (SaveBackend::Sram(s), 1) => s.load(r),
+            (SaveBackend::Flash(f), 2) => f.load(r),
+            (SaveBackend::Eeprom(e), 3) => e.load(r),
+            _ => None,
+        }
+    }
+}

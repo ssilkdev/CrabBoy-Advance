@@ -45,7 +45,8 @@ pub struct GbApu {
 impl GbApu {
     pub fn new() -> Self {
         let audio_output = AudioOutput::new();
-        let cycles_per_sample = GB_CLOCK_HZ / audio_output.sample_rate() as f64;
+        // Fixed core rate (ROADMAP M2); AudioOutput resamples to the device.
+        let cycles_per_sample = GB_CLOCK_HZ / crate::gba::apu::resample::CORE_SAMPLE_RATE as f64;
         Self {
             psg: DmgAudio::new(),
             audio_output,

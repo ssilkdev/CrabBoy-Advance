@@ -8,6 +8,7 @@ pub mod dma;
 pub mod keypad;
 pub mod mmu;
 pub mod ppu;
+pub mod state;
 pub mod timer;
 
 use cheats::CheatManager;
@@ -21,6 +22,8 @@ use std::path::Path;
 /// taking the exception; matches mGBA's GBA_IRQ_DELAY and the Timer IRQ
 /// test results.
 pub const IRQ_DELAY: u64 = 7;
+/// GBA CPU clock in Hz.
+pub const CPU_HZ: u64 = 16_777_216;
 pub const CYCLES_PER_FRAME: u32 = 280_896; // 228 scanlines * 1232 cycles (~59.73 Hz)
 
 /// Marks the start of the v2 save-state tail (hardware controller state).
@@ -30,6 +33,9 @@ pub const CYCLES_PER_FRAME: u32 = 280_896; // 228 scanlines * 1232 cycles (~59.7
 /// channel cleared. States without this marker still load; they just can't
 /// restore what was never written.
 pub const STATE_V2_MAGIC: &[u8; 4] = b"CBA2";
+/// Marks the v3 tail (ROADMAP M2): every remaining piece of machine state,
+/// so a restored state replays exactly like the original run.
+pub const STATE_V3_MAGIC: &[u8; 4] = b"CBA3";
 
 pub struct Gba {
     pub cpu: Arm7Tdmi,
@@ -264,6 +270,20 @@ impl Gba {
         cycles
     }
 
+    /// Make the cartridge RTC deterministic (ROADMAP M2): `Some(unix)` pins
+    /// the clock to `unix` at power-on and advances it with emulated time
+    /// only; `None` returns to the host wall clock. Movie replays, run-ahead
+    /// and tests use this so the same inputs always give the same frames.
+    pub fn set_deterministic_clock(&mut self, base_unix: Option<i64>) {
+        if let Some(cart) = self.mmu.cartridge.as_mut() {
+            cart.rtc.clock = match base_unix {
+                Some(base_unix) => mmu::rtc::RtcClock::Emulated { base_unix },
+                None => mmu::rtc::RtcClock::Host,
+            };
+            cart.rtc.emulated_secs = (self.cpu.cycles / CPU_HZ) as i64;
+        }
+    }
+
     /// Run full frame (~280,896 cycles)
     pub fn run_frame(&mut self) {
         let mut frame_cycles = 0;
@@ -273,6 +293,12 @@ impl Gba {
         }
         self.mmu.ppu.frame_ready = false;
         self.frame_counter += 1;
+
+        // Emulated wall time for a deterministic RTC (whole seconds are all
+        // the RTC reports, so once per frame is precise enough).
+        if let Some(cart) = self.mmu.cartridge.as_mut() {
+            cart.rtc.emulated_secs = (self.cpu.cycles / CPU_HZ) as i64;
+        }
 
         // Apply active cheats on VBlank
         self.cheats.apply(&mut self.mmu);
@@ -401,7 +427,40 @@ impl Gba {
             data.push(tm.irq_enable as u8);
         }
 
-        data
+        // --- v3 tail (ROADMAP M2) ------------------------------------------
+        // Everything v1/v2 left out: CPU pipeline and IRQ-servicing flag,
+        // PPU registers and scanline position, APU (DirectSound FIFOs, PSG
+        // channels, sample clock, filters), timer anchors, bus timing and
+        // prefetch buffer, serial port, keypad, cartridge (save chip, RTC,
+        // sensors) and the MMU's own latches. With these, save -> load gives
+        // a bit-identical continuation (tests/determinism.rs).
+        use state::Snapshot;
+        data.extend_from_slice(STATE_V3_MAGIC);
+        let mut w = state::StateWriter::new(data);
+        self.cpu.save(&mut w);
+        self.mmu.ppu.save(&mut w);
+        self.mmu.apu.save(&mut w);
+        self.mmu.timers.save(&mut w);
+        self.mmu.timing.save(&mut w);
+        self.mmu.sio.save(&mut w);
+        self.mmu.keypad.save(&mut w);
+        w.u8(self.mmu.post_flg);
+        w.u8(self.mmu.haltcnt);
+        w.u32(self.mmu.open_bus);
+        w.u32(self.mmu.bios_latch);
+        w.u32(self.mmu.dma_stall);
+        w.opt_u64(self.mmu.irq_assert_time);
+        w.bool(self.mmu.intr_wait_dispatched);
+        w.opt_u64(self.mmu.intr_wait_mask.map(|m| m as u64));
+        w.u64(self.frame_counter);
+        match &self.mmu.cartridge {
+            Some(cart) => {
+                w.bool(true);
+                cart.save(&mut w);
+            }
+            None => w.bool(false),
+        }
+        w.buf
     }
 
     pub fn load_state(&mut self, data: &[u8]) -> bool {
@@ -559,8 +618,50 @@ impl Gba {
             }
             let now = self.cpu.cycles;
             self.mmu.timers.rebase_all(now);
+
+            // --- v3 tail (optional; see save_state) ---------------------
+            if data.len() >= offset + STATE_V3_MAGIC.len()
+                && data[offset..offset + STATE_V3_MAGIC.len()] == STATE_V3_MAGIC[..]
+            {
+                offset += STATE_V3_MAGIC.len();
+                if self.load_state_v3(&data[offset..]).is_none() {
+                    return false;
+                }
+            }
         }
 
         true
+    }
+
+    /// Restore the v3 tail. `None` = malformed or from another game.
+    fn load_state_v3(&mut self, data: &[u8]) -> Option<()> {
+        use state::Snapshot;
+        let mut r = state::StateReader::new(data, 0);
+        self.cpu.load(&mut r)?;
+        self.mmu.ppu.load(&mut r)?;
+        self.mmu.apu.load(&mut r)?;
+        self.mmu.timers.load(&mut r)?;
+        self.mmu.timing.load(&mut r)?;
+        self.mmu.sio.load(&mut r)?;
+        self.mmu.keypad.load(&mut r)?;
+        self.mmu.post_flg = r.u8()?;
+        self.mmu.haltcnt = r.u8()?;
+        self.mmu.open_bus = r.u32()?;
+        self.mmu.bios_latch = r.u32()?;
+        self.mmu.dma_stall = r.u32()?;
+        self.mmu.irq_assert_time = r.opt_u64()?;
+        self.mmu.intr_wait_dispatched = r.bool()?;
+        self.mmu.intr_wait_mask = r.opt_u64()?.map(|m| m as u16);
+        self.frame_counter = r.u64()?;
+        let has_cart = r.bool()?;
+        match (&mut self.mmu.cartridge, has_cart) {
+            (Some(cart), true) => {
+                cart.load(&mut r)?;
+                cart.rtc.emulated_secs = (self.cpu.cycles / CPU_HZ) as i64;
+            }
+            (None, false) => {}
+            _ => return None,
+        }
+        Some(())
     }
 }

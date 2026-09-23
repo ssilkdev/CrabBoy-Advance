@@ -273,3 +273,17 @@ mod tests {
         assert!(!c.take_events().overflows[1]);
     }
 }
+
+/// Timer anchors (ROADMAP M2). The v2 tail stores reload/counter/control;
+/// this adds the exact cycle each counter was anchored at, so reads right
+/// after a load match the original run.
+impl crate::gba::state::Snapshot for TimerController {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        for t in &self.timers { w.u64(t.last_event); }
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        for t in &mut self.timers { t.last_event = r.u64()?; }
+        self.pending = TimerEvents::default();
+        Some(())
+    }
+}

@@ -292,3 +292,18 @@ mod tests {
         assert_eq!(b.access(0x0800_0004, Width::Half, true), 1);
     }
 }
+
+/// Bus timing state (ROADMAP M2): sequential-access tracking and the
+/// cartridge prefetch buffer. Wait tables are rebuilt from WAITCNT.
+impl crate::gba::state::Snapshot for BusTiming {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.u32(self.waits.get()); w.u64(self.clock.get()); w.u32(self.next_seq.get());
+        let pf = self.prefetch.get();
+        w.u32(pf.head); w.u32(pf.count); w.u32(pf.progress);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.waits.set(r.u32()?); self.clock.set(r.u64()?); self.next_seq.set(r.u32()?);
+        self.prefetch.set(Prefetch { head: r.u32()?, count: r.u32()?.min(PREFETCH_CAPACITY), progress: r.u32()? });
+        Some(())
+    }
+}

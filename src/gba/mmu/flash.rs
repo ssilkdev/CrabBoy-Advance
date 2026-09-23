@@ -194,3 +194,29 @@ impl Flash {
         }
     }
 }
+
+/// Flash chip state and contents (ROADMAP M2). Contents are part of the
+/// state so a replay that saves mid-way restores exactly; loading marks the
+/// chip dirty so the .sav on disk follows the restored contents.
+impl crate::gba::state::Snapshot for Flash {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.bytes(&self.data);
+        w.u32(self.current_bank as u32);
+        w.u8(match self.state { FlashState::Raw => 0, FlashState::Start => 1, FlashState::Continue => 2 });
+        w.u8(match self.command {
+            FlashCommand::None => 0, FlashCommand::Erase => 1, FlashCommand::Id => 2,
+            FlashCommand::Program => 3, FlashCommand::SwitchBank => 4,
+        });
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        r.bytes_into(&mut self.data)?;
+        self.current_bank = (r.u32()? & 1) as usize;
+        self.state = match r.u8()? { 0 => FlashState::Raw, 1 => FlashState::Start, 2 => FlashState::Continue, _ => return None };
+        self.command = match r.u8()? {
+            0 => FlashCommand::None, 1 => FlashCommand::Erase, 2 => FlashCommand::Id,
+            3 => FlashCommand::Program, 4 => FlashCommand::SwitchBank, _ => return None,
+        };
+        self.dirty = true;
+        Some(())
+    }
+}

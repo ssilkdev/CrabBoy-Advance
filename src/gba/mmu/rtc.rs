@@ -3,9 +3,24 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Where the RTC gets "now" from (ROADMAP M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtcClock {
+    /// The host's wall clock (normal play).
+    Host,
+    /// Deterministic: `base_unix` plus the emulated time elapsed, derived
+    /// from the CPU cycle counter the core hands in via `set_emulated_secs`.
+    /// Used for movie replays, run-ahead, tests and anything that needs the
+    /// same inputs to give the same frames.
+    Emulated { base_unix: i64 },
+}
+
 pub struct Rtc {
     pub enabled: bool,
     pub time_offset_secs: i64,
+    pub clock: RtcClock,
+    /// Emulated seconds since power-on (kept current by the core).
+    pub emulated_secs: i64,
     data_reg: u8,
     dir_reg: u8,
     gpio_control: u8,
@@ -42,6 +57,8 @@ impl Rtc {
         Self {
             enabled: false,
             time_offset_secs: 0,
+            clock: RtcClock::Host,
+            emulated_secs: 0,
             data_reg: 0,
             dir_reg: 0,
             gpio_control: 0,
@@ -230,8 +247,16 @@ impl Rtc {
         self.time_offset_secs = 0;
     }
 
+    /// Current Unix time as the RTC sees it (before `time_offset_secs`).
+    fn now_unix(&self) -> i64 {
+        match self.clock {
+            RtcClock::Host => SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
+            RtcClock::Emulated { base_unix } => base_unix + self.emulated_secs,
+        }
+    }
+
     pub fn get_datetime_components(&self) -> (i32, u8, u8, u8, u8, u8, &'static str) {
-        let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let now_unix = self.now_unix();
         let now = (now_unix + self.time_offset_secs).max(0) as u64;
 
         let secs = (now % 60) as u8;
@@ -275,7 +300,7 @@ impl Rtc {
 
         let (year, month, day, hrs, mins, secs, _) = self.get_datetime_components();
         let dow = {
-            let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+            let now_unix = self.now_unix();
             let now = (now_unix + self.time_offset_secs).max(0) as u64;
             let total_days = (now / 86400) as i64;
             ((total_days + 4) % 7) as u8
@@ -411,5 +436,28 @@ mod tests {
         // The time-only register returns the same hour/minute as datetime.
         let t = sii_read(&mut rtc, REG_TIME, 3);
         assert_eq!(t[0], dt[4]);
+    }
+}
+
+/// RTC serial-protocol state (ROADMAP M2). The clock source itself is a
+/// runtime setting and is not saved; `emulated_secs` is rederived from the
+/// CPU cycle counter.
+impl crate::gba::state::Snapshot for Rtc {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.bool(self.enabled); w.i64(self.time_offset_secs);
+        for v in [self.data_reg, self.dir_reg, self.gpio_control, self.rtc_control] { w.u8(v); }
+        w.u8(match self.state { RtcState::Idle => 0, RtcState::Command => 1, RtcState::TransferData => 2 });
+        w.u8(self.command); w.u8(self.cmd_bits_received);
+        w.u32(self.bytes_to_transfer as u32); w.bytes(&self.buffer); w.u32(self.buf_bit_idx as u32);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.enabled = r.bool()?; self.time_offset_secs = r.i64()?;
+        self.data_reg = r.u8()?; self.dir_reg = r.u8()?; self.gpio_control = r.u8()?; self.rtc_control = r.u8()?;
+        self.state = match r.u8()? { 0 => RtcState::Idle, 1 => RtcState::Command, 2 => RtcState::TransferData, _ => return None };
+        self.command = r.u8()?; self.cmd_bits_received = r.u8()?;
+        self.bytes_to_transfer = (r.u32()? as usize).min(7);
+        r.bytes_into(&mut self.buffer)?;
+        self.buf_bit_idx = (r.u32()? as usize).min(7 * 8);
+        Some(())
     }
 }

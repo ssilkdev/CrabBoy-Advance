@@ -145,3 +145,18 @@ impl Cartridge {
         }
     }
 }
+
+/// Cartridge-side state (ROADMAP M2): save chip, RTC and sensors. The ROM
+/// image is not saved; a state only loads on the same game.
+impl crate::gba::state::Snapshot for Cartridge {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        self.save.save(w);
+        self.rtc.save(w);
+        self.sensors.save(w);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.save.load(r)?;
+        self.rtc.load(r)?;
+        self.sensors.load(r)
+    }
+}

@@ -346,3 +346,22 @@ pub fn load_signed_halfword(mmu: &crate::gba::mmu::Mmu, addr: u32) -> u32 {
         mmu.read16(addr) as i16 as i32 as u32
     }
 }
+
+/// Save-state fields added in ROADMAP M2 (the v1 layout in
+/// `Gba::save_state` already covers registers, banks and flags).
+impl crate::gba::state::Snapshot for Arm7Tdmi {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.bool(self.in_irq);
+        w.u32(self.pipe[0]);
+        w.u32(self.pipe[1]);
+        w.u32(self.pipe_addr);
+        w.bool(self.pipe_valid);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.in_irq = r.bool()?;
+        self.pipe = [r.u32()?, r.u32()?];
+        self.pipe_addr = r.u32()?;
+        self.pipe_valid = r.bool()?;
+        Some(())
+    }
+}

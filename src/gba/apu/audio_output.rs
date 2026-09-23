@@ -23,6 +23,10 @@ impl SurroundMode {
     }
 }
 
+/// Queue fill band the resampler's rate control aims for (interleaved
+/// samples): below LOW it speeds up output by 0.5%, above HIGH it slows it.
+const RATE_LOW: usize = 1000;
+const RATE_HIGH: usize = 3000;
 /// Output queue capacity in interleaved samples.
 const QUEUE_CAPACITY: usize = 8192;
 /// Length of the fade applied when a batch has to be cut short.
@@ -47,6 +51,8 @@ pub struct AudioOutput {
     pub is_fast_forwarding: Arc<AtomicBool>,
     /// Grain decimator for fast-forward mode 2 (see `ff_stretch`).
     ff_decimator: Mutex<super::ff_stretch::GrainDecimator>,
+    /// Core rate -> device rate, with rate control (see `resample`).
+    resampler: Mutex<super::resample::Resampler>,
 }
 
 impl Default for AudioOutput {
@@ -91,6 +97,7 @@ impl AudioOutput {
             fast_forward_mode,
             is_fast_forwarding,
             ff_decimator: Mutex::new(super::ff_stretch::GrainDecimator::new()),
+            resampler: Mutex::new(super::resample::Resampler::new(sample_rate)),
         }
     }
 
@@ -267,8 +274,28 @@ impl AudioOutput {
         self.buffer.push_slice(&scaled);
     }
 
+    /// Queue a batch of core-rate (`CORE_SAMPLE_RATE`) interleaved stereo
+    /// samples for playback. Everything host-dependent happens here, after
+    /// the core: fast-forward muting/decimation, resampling to the device
+    /// rate and rate control against the queue fill.
     pub fn push_sample_batch(&self, samples: &[f32]) {
         if self.muted || samples.is_empty() {
+            return;
+        }
+        let silent;
+        let samples = if self.is_fast_forwarding() && self.fast_forward_mode() == 1 {
+            // Smart mute: keep the stream flowing, silently.
+            silent = vec![0.0; samples.len()];
+            &silent[..]
+        } else {
+            samples
+        };
+        let resampled = match self.resampler.lock() {
+            Ok(mut r) => r.process(samples, self.buffer_len(), RATE_LOW, RATE_HIGH),
+            Err(_) => samples.to_vec(),
+        };
+        let samples = &resampled[..];
+        if samples.is_empty() {
             return;
         }
 

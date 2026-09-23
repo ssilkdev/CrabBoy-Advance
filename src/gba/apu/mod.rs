@@ -4,6 +4,7 @@
 pub mod audio_output;
 pub mod dmg;
 pub mod ff_stretch;
+pub mod resample;
 pub mod ring;
 pub mod spatial;
 
@@ -61,6 +62,9 @@ impl DirectSoundChannel {
     }
 }
 
+/// GBA system clock in Hz.
+const GBA_CLOCK_HZ: u64 = 16_777_216;
+
 pub struct Apu {
     pub sound_a: DirectSoundChannel,
     pub sound_b: DirectSoundChannel,
@@ -72,9 +76,10 @@ pub struct Apu {
     pub soundbias: u16,
 
     pub audio_output: AudioOutput,
-    sample_timer: f64,
-    base_cycles_per_sample: f64,
-    cpu_cycles_per_sample: f64,
+    /// Core sample clock: accumulates `cycles * CORE_SAMPLE_RATE`; one
+    /// sample is due per `GBA_CLOCK_HZ` (exact integer arithmetic, so the
+    /// sample stream is identical on every host; ROADMAP M2).
+    sample_timer: u64,
     sample_batch: Vec<f32>,
 
     // DSP Filter States
@@ -102,9 +107,6 @@ impl Default for Apu {
 impl Apu {
     pub fn new() -> Self {
         let audio_output = AudioOutput::new();
-        let sample_rate = audio_output.sample_rate() as f64;
-        let gba_cpu_freq = 16_777_216.0; // 16.78 MHz
-        let cpu_cycles_per_sample = gba_cpu_freq / sample_rate;
 
         Self {
             sound_a: DirectSoundChannel::new(),
@@ -115,9 +117,7 @@ impl Apu {
             soundcnt_x: 0,
             soundbias: 0x0200,
             audio_output,
-            sample_timer: 0.0,
-            base_cycles_per_sample: cpu_cycles_per_sample,
-            cpu_cycles_per_sample,
+            sample_timer: 0,
             sample_batch: Vec::with_capacity(1024),
             dc_x_l: 0.0,
             dc_y_l: 0.0,
@@ -312,10 +312,11 @@ impl Apu {
                 dma_req_b = true;
             }
 
-        // Host audio resampling
-        self.sample_timer += cycles as f64;
-        while self.sample_timer >= self.cpu_cycles_per_sample {
-            self.sample_timer -= self.cpu_cycles_per_sample;
+        // Fixed-rate core sample clock (CORE_SAMPLE_RATE); the output layer
+        // resamples to the device.
+        self.sample_timer += cycles as u64 * resample::CORE_SAMPLE_RATE as u64;
+        while self.sample_timer >= GBA_CLOCK_HZ {
+            self.sample_timer -= GBA_CLOCK_HZ;
             self.mix_and_push_sample();
         }
 
@@ -333,15 +334,8 @@ impl Apu {
             return;
         }
 
-        // Fast-forward smart mute
-        if self.audio_output.is_fast_forwarding() && self.audio_output.fast_forward_mode() == 1 {
-            self.sample_batch.push(0.0);
-            self.sample_batch.push(0.0);
-            if self.sample_batch.len() >= 512 {
-                self.flush_samples();
-            }
-            return;
-        }
+        // (Fast-forward muting happens in AudioOutput, so the core's own
+        // sample stream never depends on host state.)
 
         // DirectSound samples (-128..127 normalized to -1.0..1.0)
         let ch_a_unmuted = !self.audio_output.is_channel_muted(0);
@@ -461,17 +455,48 @@ impl Apu {
         self.audio_output.push_sample_batch(&self.sample_batch);
         self.sample_batch.clear();
 
-        // Dynamic Rate Control (DRC) smoothly regulates buffer fill level without clicks
-        let q_len = self.audio_output.buffer_len();
-        if q_len > 3000 {
-            // Buffer is getting full: produce samples slightly slower (+0.5% cycles per sample)
-            self.cpu_cycles_per_sample = self.base_cycles_per_sample * 1.005;
-        } else if q_len < 1000 {
-            // Buffer is getting low: produce samples slightly faster (-0.5% cycles per sample)
-            self.cpu_cycles_per_sample = self.base_cycles_per_sample * 0.995;
-        } else {
-            self.cpu_cycles_per_sample = self.base_cycles_per_sample;
-        }
+        // Rate control against the host device lives in AudioOutput's
+        // resampler (ROADMAP M2).
     }
 }
 
+// ---- Save states (ROADMAP M2) --------------------------------------------
+use crate::gba::state::{Snapshot, StateReader, StateWriter};
+
+impl Snapshot for DirectSoundChannel {
+    fn save(&self, w: &mut StateWriter) {
+        let fifo: Vec<u8> = self.fifo.iter().map(|&s| s as u8).collect();
+        w.bytes(&fifo);
+        w.u8(self.current_sample as u8); w.f32(self.volume);
+        w.bool(self.left_enable); w.bool(self.right_enable); w.u8(self.timer_select as u8);
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        let fifo = r.bytes()?;
+        if fifo.len() > 64 { return None; }
+        self.fifo.clear();
+        self.fifo.extend(fifo.iter().map(|&b| b as i8));
+        self.current_sample = r.u8()? as i8; self.volume = r.f32()?;
+        self.left_enable = r.bool()?; self.right_enable = r.bool()?;
+        self.timer_select = (r.u8()? & 1) as usize;
+        Some(())
+    }
+}
+
+impl Snapshot for Apu {
+    fn save(&self, w: &mut StateWriter) {
+        self.sound_a.save(w); self.sound_b.save(w); self.dmg.save(w);
+        for v in [self.soundcnt_l, self.soundcnt_h, self.soundcnt_x, self.soundbias] { w.u16(v); }
+        w.u64(self.sample_timer);
+        for v in [self.dc_x_l, self.dc_y_l, self.dc_x_r, self.dc_y_r, self.lp_l, self.lp_r] { w.f32(v); }
+    }
+    fn load(&mut self, r: &mut StateReader) -> Option<()> {
+        self.sound_a.load(r)?; self.sound_b.load(r)?; self.dmg.load(r)?;
+        self.soundcnt_l = r.u16()?; self.soundcnt_h = r.u16()?; self.soundcnt_x = r.u16()?; self.soundbias = r.u16()?;
+        self.sample_timer = r.u64()?;
+        self.dc_x_l = r.f32()?; self.dc_y_l = r.f32()?; self.dc_x_r = r.f32()?; self.dc_y_r = r.f32()?;
+        self.lp_l = r.f32()?; self.lp_r = r.f32()?;
+        // Samples produced before the load belong to the old timeline.
+        self.sample_batch.clear();
+        Some(())
+    }
+}

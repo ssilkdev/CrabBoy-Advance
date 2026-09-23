@@ -253,3 +253,21 @@ mod tests {
         assert_eq!(&ee.data[100 * 8..100 * 8 + 8], &value);
     }
 }
+
+/// EEPROM contents and protocol state (ROADMAP M2).
+impl crate::gba::state::Snapshot for Eeprom {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.u8(match self.size { EepromSize::Unknown => 0, EepromSize::Bit4K => 1, EepromSize::Bit64K => 2 });
+        w.bytes(&self.data);
+        w.opt_u64(self.pending_read_block.map(|b| b as u64));
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.size = match r.u8()? { 0 => EepromSize::Unknown, 1 => EepromSize::Bit4K, 2 => EepromSize::Bit64K, _ => return None };
+        let data = r.bytes()?;
+        if data.len() != self.size.data_len() { return None; }
+        self.data = data.to_vec();
+        self.pending_read_block = r.opt_u64()?.map(|b| (b as usize).min(1023));
+        self.dirty = true;
+        Some(())
+    }
+}

@@ -317,3 +317,29 @@ impl Sio {
         false
     }
 }
+
+/// Serial port registers and in-flight transfer (ROADMAP M2). Networking
+/// (role, socket, statistics) is session state, not machine state.
+impl crate::gba::state::Snapshot for Sio {
+    fn save(&self, w: &mut crate::gba::state::StateWriter) {
+        w.u16(self.siocnt); w.u16(self.siodata8);
+        for v in self.siomulti { w.u16(v); }
+        w.u16(self.rcnt); w.u16(self.joycnt); w.u32(self.joy_recv); w.u32(self.joy_trans); w.u16(self.joystat);
+        w.u32(self.transfer_cycles_left);
+        w.u8(self.transfer_mode as u8);
+        w.bool(self.irq_requested);
+    }
+    fn load(&mut self, r: &mut crate::gba::state::StateReader) -> Option<()> {
+        self.siocnt = r.u16()?; self.siodata8 = r.u16()?;
+        for v in &mut self.siomulti { *v = r.u16()?; }
+        self.rcnt = r.u16()?; self.joycnt = r.u16()?; self.joy_recv = r.u32()?; self.joy_trans = r.u32()?;
+        self.joystat = r.u16()?;
+        self.transfer_cycles_left = r.u32()?;
+        self.transfer_mode = match r.u8()? {
+            0 => SioMode::Normal8Bit, 1 => SioMode::Normal32Bit, 2 => SioMode::MultiPlayer,
+            3 => SioMode::Uart, 4 => SioMode::GeneralPurpose, 5 => SioMode::JoyBus, _ => return None,
+        };
+        self.irq_requested = r.bool()?;
+        Some(())
+    }
+}
