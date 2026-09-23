@@ -188,7 +188,7 @@ const MGBA_SUITES: &[&str] = &[
 /// the baseline gets bumped and the progress is recorded).
 const MGBA_BASELINE: &[u32] = &[
     1081, // Memory            /1552
-    124,  // I/O read          /130
+    130,  // I/O read          /130
     577,  // Timing            /2020
     438,  // Timer count-up    /936
     4,    // Timer IRQ         /90

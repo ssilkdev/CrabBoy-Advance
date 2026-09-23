@@ -424,7 +424,9 @@ impl Mmu {
     fn read_io8(&self, addr: u32) -> u8 {
         let off = addr & 0x3FF;
         match off {
-            0x060..=0x0A7 => self.apu.read_reg8(off),
+            // Readable sound registers; the write-only ones (0x8C-0x8F and
+            // the FIFOs 0xA0-0xA7) fall through to read_io16's open bus.
+            0x060..=0x08B | 0x090..=0x09F => self.apu.read_reg8(off),
             _ => {
                 let is_high = (off & 1) != 0;
                 let val16 = self.read_io16(off & !1);
