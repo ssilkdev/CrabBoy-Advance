@@ -1,6 +1,7 @@
 //! GBA Memory Management Unit (MMU) & System Bus Dispatcher
 
 pub mod bios;
+pub mod bios_math;
 pub mod cartridge;
 pub mod debug_port;
 pub mod eeprom;
@@ -10,6 +11,7 @@ pub mod save_backend;
 pub mod sensors;
 pub mod sio;
 pub mod sram;
+pub mod timing;
 
 use super::apu::Apu;
 use super::cpu::Arm7Tdmi;
@@ -58,6 +60,11 @@ pub struct Mmu {
     /// 0xE3A02004 after an SWI, 0xE25EF004 inside an IRQ handler and
     /// 0xE55EC002 after returning from one. ROADMAP M1.
     pub bios_latch: u32,
+    /// Wait-state accounting for CPU-visible accesses (see `timing`).
+    pub timing: timing::BusTiming,
+    /// Cycles the CPU was stalled (by DMA, or by time spent inside an HLE
+    /// BIOS call) since the last `take_dma_stall`.
+    pub dma_stall: u32,
     /// mGBA-compatible debug-print port at 0x04FFF600 (see `debug_port`).
     pub debug_port: debug_port::DebugPort,
     pub current_cycles: u64,
@@ -138,6 +145,8 @@ impl Mmu {
             current_pc: 0,
             bios_latch: BIOS_LATCH_BOOT,
             debug_port: debug_port::DebugPort::new(),
+            timing: timing::BusTiming::default(),
+            dma_stall: 0,
             current_cycles: 0,
             intr_wait_mask: None,
         }
@@ -147,8 +156,63 @@ impl Mmu {
         self.cartridge = Some(cart);
     }
 
+    // ---- CPU-visible accessors: raw access plus wait-state accounting ----
+    //
+    // `*_raw` perform the access without timing (debuggers, cheats and
+    // internal helpers may use them freely); the plain names are what the
+    // CPU and DMA use. `fetch*` mark opcode fetches, which the cartridge
+    // prefetch buffer can serve. ROADMAP M1.
+
     #[inline(always)]
     pub fn read8(&self, addr: u32) -> u8 {
+        self.timing.access(addr, timing::Width::Byte, false);
+        self.read8_raw(addr)
+    }
+
+    #[inline(always)]
+    pub fn read16(&self, addr: u32) -> u16 {
+        self.timing.access(addr & !1, timing::Width::Half, false);
+        self.read16_raw(addr)
+    }
+
+    #[inline(always)]
+    pub fn read32(&self, addr: u32) -> u32 {
+        self.timing.access(addr & !3, timing::Width::Word, false);
+        self.read32_raw(addr)
+    }
+
+    #[inline(always)]
+    pub fn fetch16(&self, addr: u32) -> u16 {
+        self.timing.access(addr & !1, timing::Width::Half, true);
+        self.read16_raw(addr)
+    }
+
+    #[inline(always)]
+    pub fn fetch32(&self, addr: u32) -> u32 {
+        self.timing.access(addr & !3, timing::Width::Word, true);
+        self.read32_raw(addr)
+    }
+
+    #[inline(always)]
+    pub fn write8(&mut self, addr: u32, val: u8) {
+        self.timing.access(addr, timing::Width::Byte, false);
+        self.write8_raw(addr, val);
+    }
+
+    #[inline(always)]
+    pub fn write16(&mut self, addr: u32, val: u16) {
+        self.timing.access(addr & !1, timing::Width::Half, false);
+        self.write16_raw(addr, val);
+    }
+
+    #[inline(always)]
+    pub fn write32(&mut self, addr: u32, val: u32) {
+        self.timing.access(addr & !3, timing::Width::Word, false);
+        self.write32_raw(addr, val);
+    }
+
+    #[inline(always)]
+    pub fn read8_raw(&self, addr: u32) -> u8 {
         match (addr >> 24) & 0xFF {
             0x00 if addr < 0x4000 => {
                 if self.current_pc >= 0x4000 {
@@ -211,30 +275,30 @@ impl Mmu {
     }
 
     #[inline(always)]
-    pub fn read16(&self, addr: u32) -> u16 {
+    pub fn read16_raw(&self, addr: u32) -> u16 {
         // 8-bit save bus: the one byte read appears in every lane
         // (jsmolka save tests #4).
         if Self::is_save_bus(addr) {
-            return self.read8(addr) as u16 * 0x0101;
+            return self.read8_raw(addr) as u16 * 0x0101;
         }
         // Plain aligned bus read. The CPU-visible rotation for misaligned
         // LDRH is 32-bit, so it lives in cpu::load_halfword, not here.
         let aligned = addr & !1;
-        let b0 = self.read8(aligned) as u16;
-        let b1 = self.read8(aligned + 1) as u16;
+        let b0 = self.read8_raw(aligned) as u16;
+        let b1 = self.read8_raw(aligned + 1) as u16;
         b0 | (b1 << 8)
     }
 
     #[inline(always)]
-    pub fn read32(&self, addr: u32) -> u32 {
+    pub fn read32_raw(&self, addr: u32) -> u32 {
         if Self::is_save_bus(addr) {
-            return self.read8(addr) as u32 * 0x0101_0101;
+            return self.read8_raw(addr) as u32 * 0x0101_0101;
         }
         let aligned = addr & !3;
-        let b0 = self.read8(aligned) as u32;
-        let b1 = self.read8(aligned + 1) as u32;
-        let b2 = self.read8(aligned + 2) as u32;
-        let b3 = self.read8(aligned + 3) as u32;
+        let b0 = self.read8_raw(aligned) as u32;
+        let b1 = self.read8_raw(aligned + 1) as u32;
+        let b2 = self.read8_raw(aligned + 2) as u32;
+        let b3 = self.read8_raw(aligned + 3) as u32;
         let val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
         let unaligned_offset = (addr & 3) * 8;
@@ -246,7 +310,7 @@ impl Mmu {
     }
 
     #[inline(always)]
-    pub fn write8(&mut self, addr: u32, val: u8) {
+    pub fn write8_raw(&mut self, addr: u32, val: u8) {
         match (addr >> 24) & 0xFF {
             0x02 => {
                 let off = (addr & 0x3_FFFF) as usize;
@@ -292,11 +356,11 @@ impl Mmu {
     }
 
     #[inline(always)]
-    pub fn write16(&mut self, addr: u32, val: u16) {
+    pub fn write16_raw(&mut self, addr: u32, val: u16) {
         // 8-bit save bus: only the byte lane selected by the unaligned
         // address is written, at that address (jsmolka save tests #6/#7).
         if Self::is_save_bus(addr) {
-            self.write8(addr, (val >> ((addr & 1) * 8)) as u8);
+            self.write8_raw(addr, (val >> ((addr & 1) * 8)) as u8);
             return;
         }
         let aligned = addr & !1;
@@ -323,21 +387,21 @@ impl Mmu {
                 self.ppu.oam[off + 1] = (val >> 8) as u8;
             }
             _ => {
-                self.write8(aligned, (val & 0xFF) as u8);
-                self.write8(aligned + 1, (val >> 8) as u8);
+                self.write8_raw(aligned, (val & 0xFF) as u8);
+                self.write8_raw(aligned + 1, (val >> 8) as u8);
             }
         }
     }
 
     #[inline(always)]
-    pub fn write32(&mut self, addr: u32, val: u32) {
+    pub fn write32_raw(&mut self, addr: u32, val: u32) {
         if Self::is_save_bus(addr) {
-            self.write8(addr, (val >> ((addr & 3) * 8)) as u8);
+            self.write8_raw(addr, (val >> ((addr & 3) * 8)) as u8);
             return;
         }
         let aligned = addr & !3;
-        self.write16(aligned, (val & 0xFFFF) as u16);
-        self.write16(aligned + 2, (val >> 16) as u16);
+        self.write16_raw(aligned, (val & 0xFFFF) as u16);
+        self.write16_raw(aligned + 2, (val >> 16) as u16);
     }
 
     fn read_io8(&self, addr: u32) -> u8 {
@@ -589,7 +653,10 @@ impl Mmu {
                 // Writing 1s to IF clears the corresponding interrupt flags
                 self.if_reg &= !val;
             }
-            0x204 => self.waitcnt = val,
+            0x204 => {
+                self.waitcnt = val;
+                self.timing.set_waitcnt(val);
+            }
             0x208 => self.ime = (val & 1) != 0,
             0x300 => {
                 self.post_flg = (val & 0xFF) as u8;
@@ -709,6 +776,12 @@ impl Mmu {
         true
     }
 
+    /// Take (and reset) the DMA stall cycles accumulated since last call.
+    #[inline(always)]
+    pub fn take_dma_stall(&mut self) -> u32 {
+        std::mem::take(&mut self.dma_stall)
+    }
+
     pub fn execute_dma_channel(&mut self, idx: usize) {
         if !self.dma.channels[idx].enabled {
             return;
@@ -768,13 +841,17 @@ impl Mmu {
         let mut sad = current_sad;
         let mut dad = current_dad;
 
+        // The CPU is halted for the whole transfer (ROADMAP M1). The copy
+        // itself uses untimed accesses; its cost is charged as a stall.
+        self.dma_stall += self.timing.dma_cost(sad, dad, is_32bit, count);
+
         for _ in 0..count {
             if is_32bit {
-                let val = self.read32(sad);
-                self.write32(dad, val);
+                let val = self.read32_raw(sad);
+                self.write32_raw(dad, val);
             } else {
-                let val = self.read16(sad);
-                self.write16(dad, val);
+                let val = self.read16_raw(sad);
+                self.write16_raw(dad, val);
             }
 
             match sad_ctrl {
@@ -836,6 +913,34 @@ impl Mmu {
         } else {
             (comment & 0xFF) as u8
         };
+        // Math SWIs: bit-exact results plus the time the real BIOS takes
+        // (ROADMAP M1). The time is charged as a CPU stall; ~45 cycles of
+        // SWI entry/exit overhead apply to every BIOS call.
+        const SWI_OVERHEAD: u32 = 45;
+        let r = |i: usize| cpu.regs[i];
+        let math = match swi_num {
+            0x06 => Some(bios_math::div(r(0) as i32, r(1) as i32)),
+            0x07 => Some(bios_math::div(r(1) as i32, r(0) as i32)),
+            0x08 => {
+                let (v, c) = bios_math::sqrt(r(0));
+                Some((v, r(1), r(3), c))
+            }
+            0x09 => Some(bios_math::arctan(r(0) as i32)),
+            0x0A => {
+                let (v, r1, c) = bios_math::arctan2(r(0) as i32, r(1) as i32);
+                Some((v, r1, 0x170, c))
+            }
+            _ => None,
+        };
+        if let Some((r0, r1, r3, cycles)) = math {
+            cpu.regs[0] = r0;
+            cpu.regs[1] = r1;
+            cpu.regs[3] = r3;
+            self.dma_stall += cycles + SWI_OVERHEAD;
+            self.bios_latch = BIOS_LATCH_AFTER_SWI;
+            return;
+        }
+
         // In GBA, BIOS functions 0x00..0x2A can be handled via HLE BIOS
         if swi_num <= 0x2A {
             let mut writes_8: Vec<(u32, u8)> = Vec::new();

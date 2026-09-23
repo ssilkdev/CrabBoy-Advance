@@ -10,14 +10,15 @@ use crate::gba::mmu::Mmu;
 /// the same as fetching PC directly. After a branch the pipeline refills.
 pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     let pc = cpu.regs[15];
+    let waits_before = mmu.timing.waits.get();
     let (instr, next) = if cpu.pipe_valid && cpu.pipe_addr == pc {
         (cpu.pipe[0], cpu.pipe[1])
     } else {
-        (mmu.read32(pc), mmu.read32(pc.wrapping_add(4)))
+        (mmu.fetch32(pc), mmu.fetch32(pc.wrapping_add(4)))
     };
     // Fetch stage: PC+8 is read before this instruction executes. It is
     // also what the data bus holds, so it's the open-bus value.
-    let fetched = mmu.read32(pc.wrapping_add(8));
+    let fetched = mmu.fetch32(pc.wrapping_add(8));
     mmu.open_bus = fetched;
     let cycles = execute_arm(cpu, mmu, instr);
     // Keep the pipeline only for straight-line ARM execution.
@@ -28,7 +29,8 @@ pub fn step_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     } else {
         cpu.pipe_valid = false;
     }
-    cycles
+    // Base cycles (1 per access + internal) plus memory wait states.
+    cycles + mmu.timing.waits.get().wrapping_sub(waits_before)
 }
 
 fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {

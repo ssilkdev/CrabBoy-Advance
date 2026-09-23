@@ -25,12 +25,13 @@ fn thumb_open_bus(pc: u32, next: u32, fetched: u32) -> u32 {
 /// (see `step_arm`).
 pub fn step_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     let pc = cpu.regs[15];
+    let waits_before = mmu.timing.waits.get();
     let (instr, next) = if cpu.pipe_valid && cpu.pipe_addr == pc {
         (cpu.pipe[0] as u16, cpu.pipe[1])
     } else {
-        (mmu.read16(pc), mmu.read16(pc.wrapping_add(2)) as u32)
+        (mmu.fetch16(pc), mmu.fetch16(pc.wrapping_add(2)) as u32)
     };
-    let fetched = mmu.read16(pc.wrapping_add(4)) as u32;
+    let fetched = mmu.fetch16(pc.wrapping_add(4)) as u32;
     mmu.open_bus = thumb_open_bus(pc, next, fetched);
     let cycles = execute_thumb(cpu, mmu, instr);
     if cpu.regs[15] == pc.wrapping_add(2) && cpu.is_thumb() {
@@ -40,7 +41,8 @@ pub fn step_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu) -> u32 {
     } else {
         cpu.pipe_valid = false;
     }
-    cycles
+    // Base cycles (1 per access + internal) plus memory wait states.
+    cycles + mmu.timing.waits.get().wrapping_sub(waits_before)
 }
 
 fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {

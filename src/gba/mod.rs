@@ -115,6 +115,9 @@ impl Gba {
             step_arm(&mut self.cpu, &mut self.mmu)
         };
 
+        // DMA triggered by this instruction (or by the previous step's
+        // HBlank/VBlank/FIFO events) held the CPU off the bus.
+        let cycles = cycles + self.mmu.take_dma_stall();
         self.cpu.cycles += cycles as u64;
 
         // Step PPU
@@ -471,6 +474,7 @@ impl Gba {
             self.mmu.ie = u16_at(&mut offset);
             self.mmu.if_reg = u16_at(&mut offset);
             self.mmu.waitcnt = u16_at(&mut offset);
+            self.mmu.timing.set_waitcnt(self.mmu.waitcnt);
 
             for i in 0..4 {
                 let ch = &mut self.mmu.dma.channels[i];
