@@ -215,4 +215,39 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
 - **"Done when" check:** a game started on desktop continues on Android and back again
   with nothing lost ✅.
 
+---
+
+## Stage 2: Rendering
+
+### M5. Rendering pipeline groundwork: frame blending and shaders ✅
+
+- ✅ **LCD Ghosting and Frame Blending** (`src/gba/frame_blend.rs`, `da92d38`):
+  - `FrameBlendMode`: `Off`, `Simple50`, `SmartDeFlicker`, and `LcdGhosting { decay }`.
+  - `blend_50_50`: fast bitwise parallel 50/50 blend in 7 operations with no channel bleed.
+  - `SmartDeFlicker`: detects 30 Hz flicker (pixel $t == t-2 \ne t-1$) used by games for transparency and shadows (F-Zero, shields, reflections), blending flickering pixels while keeping moving objects and backgrounds pin-sharp.
+  - `LcdGhosting`: authentic liquid crystal response persistence modeling exponential decay across frames.
+- ✅ **Cross-Platform Shader Pipeline & Custom Profiles** (`src/gba/shader.rs`, `da92d38`):
+  - Built-in presets: `Crisp`, `Linear`, `LcdGrid` (cell borders and gap dimming), `LcdSubpixel` (AGB-001/AGS-101 vertical RGB subpixel triads), `CrtScanlines`, `CrtGeom` (scanlines + aperture grille + bloom), alongside existing `NvidiaSharpen` and `Xbrz`.
+  - `CustomShaderParams`: parser supporting both structured JSON and flexible INI key=value files with `#` / `//` comments. Configurable scanline intensity, LCD grid intensity, aperture grille, brightness boost, color temperature, and bloom.
+- ✅ **PPU Per-Layer Buffers & Draw Commands** (`src/gba/ppu/layers.rs`, `src/gba/ppu/mod.rs`, `da92d38`):
+  - `PpuLayer` (`Backdrop`, `Bg0`..`Bg3`, `Obj`), `PpuLayerBuffers`, `LayerKind`, and `LayerDrawCommand`.
+  - `set_layer_capture(true)` records isolated 240x160 RGBA surfaces per layer (transparent pixels have alpha 0) and draw command metadata (layer kind, priority, scroll offsets, affine transformation matrices, blending mode, and window enable flags).
+  - Native composited 240x160 framebuffer output remains completely bit-identical whether layer capture is enabled or disabled.
+  - Zero performance overhead when layer capture is disabled (buffers unallocated).
+- ✅ **UI & Android Integration** (`src/ui/mod.rs`, `src/ui/screen.rs`, `src/ui/config.rs`, `android/src/app.rs`):
+  - Video menu on desktop allows switching frame blend modes and shader presets with real-time preview, plus "Load Custom Shader..." file dialog.
+  - Persistence in `config.json` under `render`.
+  - Android port (`CrabBoyApp`) integrates `FrameBlender` and shader presets directly into frame upload and menu UI.
+- ✅ **Tests** (`tests/rendering_pipeline.rs`, `da92d38`):
+  - 8 integration tests covering:
+    - Layer capture isolation with bit-identical native framebuffer verification.
+    - Forced blank layer capture behavior.
+    - Simple 50/50 frame blending.
+    - Smart de-flickering (motion vs 30 Hz oscillation).
+    - Authentic LCD ghosting exponential decay.
+    - Preset shader geometry and channel biasing (LCD grid, LCD subpixel, CRT scanlines, CRT geom).
+    - Custom shader JSON and key=value parsing and execution (warm vs cool color temperature, brightness boost).
+- **"Done when" check:** presets work on desktop and Android ✅; PPU exposes per-layer output without changing the native-resolution image ✅.
+
+
 

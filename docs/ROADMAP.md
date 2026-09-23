@@ -60,7 +60,7 @@ deterministic, so this comes first.
 
 ## Stage 2: Rendering
 
-### M5. Rendering pipeline groundwork: frame blending and shaders [Catch-up]
+### M5. Rendering pipeline groundwork: frame blending and shaders [Catch-up] ✅
 - LCD ghosting / frame blending, which some games rely on for transparency
   (flickering sprites).
 - A shader pipeline alongside xBRZ and NIS: built-in CRT and LCD-grid presets,
