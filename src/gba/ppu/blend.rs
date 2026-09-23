@@ -56,9 +56,6 @@ pub fn apply_color_effects(
     evb: u16,
     evy: u16,
 ) -> u16 {
-    let (tr, tg, tb) = bgr555_to_rgb888(top.color);
-    let (br, bg, bb) = bgr555_to_rgb888(bot.color);
-
     let top_layer_mask = 1 << top.layer;
     let bot_layer_mask = 1 << bot.layer;
 
@@ -89,30 +86,57 @@ pub fn apply_color_effects(
         BlendMode::None
     };
 
+    // Hardware blends each 5-bit channel directly (GBATEK "BLDALPHA" /
+    // "BLDY"): alpha = min(31, (a*EVA + b*EVB) >> 4), brighten =
+    // a + ((31-a)*EVY >> 4), darken = a - (a*EVY >> 4), with coefficients
+    // capped at 16. Working in 8-bit space and truncating back (as this used
+    // to) drifts by one step on some colors (ROADMAP M1).
+    let channels = |c: u16| [c & 0x1F, (c >> 5) & 0x1F, (c >> 10) & 0x1F];
+    let pack = |ch: [u16; 3]| ch[0] | (ch[1] << 5) | (ch[2] << 10);
+    let t = channels(top.color);
     match mode {
         BlendMode::Alpha => {
-            let ca = eva.min(16) as u32;
-            let cb = evb.min(16) as u32;
-
-            let r = ((tr as u32 * ca + br as u32 * cb) / 16).min(255) as u8;
-            let g = ((tg as u32 * ca + bg as u32 * cb) / 16).min(255) as u8;
-            let b = ((tb as u32 * ca + bb as u32 * cb) / 16).min(255) as u8;
-            rgb888_to_bgr555(r, g, b)
+            let (ca, cb) = (eva.min(16), evb.min(16));
+            let b = channels(bot.color);
+            pack([0, 1, 2].map(|i| ((t[i] * ca + b[i] * cb) >> 4).min(31)))
         }
         BlendMode::BrightnessIncrease => {
-            let ey = evy.min(16) as u32;
-            let r = (tr as u32 + (255 - tr as u32) * ey / 16).min(255) as u8;
-            let g = (tg as u32 + (255 - tg as u32) * ey / 16).min(255) as u8;
-            let b = (tb as u32 + (255 - tb as u32) * ey / 16).min(255) as u8;
-            rgb888_to_bgr555(r, g, b)
+            let ey = evy.min(16);
+            pack(t.map(|a| a + (((31 - a) * ey) >> 4)))
         }
         BlendMode::BrightnessDecrease => {
-            let ey = evy.min(16) as u32;
-            let r = (tr as u32).saturating_sub((tr as u32 * ey) / 16) as u8;
-            let g = (tg as u32).saturating_sub((tg as u32 * ey) / 16) as u8;
-            let b = (tb as u32).saturating_sub((tb as u32 * ey) / 16) as u8;
-            rgb888_to_bgr555(r, g, b)
+            let ey = evy.min(16);
+            pack(t.map(|a| a - ((a * ey) >> 4)))
         }
         BlendMode::None => top.color,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(color: u16, layer: u8) -> Pixel {
+        Pixel { color, layer, priority: 0, is_transparent: false, is_obj_alpha: false }
+    }
+
+    #[test]
+    fn alpha_blend_is_5bit_exact() {
+        // BG0 over BG1, EVA = EVB = 8: (31*8 + 0*8) >> 4 = 15 per channel.
+        let bldcnt = 0x0001 | (1 << 6) | (0x0002 << 8);
+        assert_eq!(apply_color_effects(px(0x7FFF, 0), px(0, 1), bldcnt, 8, 8, 0), 0x3DEF);
+        // Saturates at 31.
+        assert_eq!(apply_color_effects(px(0x7FFF, 0), px(0x7FFF, 1), bldcnt, 16, 16, 0), 0x7FFF);
+    }
+
+    #[test]
+    fn brightness_is_5bit_exact() {
+        let up = 0x0001 | (2 << 6);
+        let down = 0x0001 | (3 << 6);
+        // EVY 8: R 1 -> 1 + (30*8 >> 4) = 16; G/B 0 -> 0 + (31*8 >> 4) = 15.
+        // Darken: 1 - (1*8 >> 4) = 1.
+        assert_eq!(apply_color_effects(px(1, 0), px(0, 1), up, 0, 0, 8), 16 | (15 << 5) | (15 << 10));
+        assert_eq!(apply_color_effects(px(1, 0), px(0, 1), down, 0, 0, 8), 1);
+        assert_eq!(apply_color_effects(px(0x7FFF, 0), px(0, 1), down, 0, 0, 16), 0);
     }
 }

@@ -90,6 +90,10 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             }
             return 1;
         }
+        // cond == 14 is an undefined encoding on ARMv4T (15 is SWI,
+        // handled above).
+        cpu.trigger_undefined(pc.wrapping_add(2));
+        return 3;
     }
 
     // Format 15: Multiple Load/Store (LDMIA, STMIA)

@@ -275,7 +275,9 @@ impl Arm7Tdmi {
             12 => !self.get_flag(FLAG_Z) && (self.get_flag(FLAG_N) == self.get_flag(FLAG_V)), // GT
             13 => self.get_flag(FLAG_Z) || (self.get_flag(FLAG_N) != self.get_flag(FLAG_V)),  // LE
             14 => true,                                                             // AL
-            15 => true,                                                             // NV / GBA allows NV as AL or undefined
+            // NV: ARMv4 (ARM7TDMI) defines this as "never"; the encoding
+            // is only reused for new instructions from ARMv5 on.
+            15 => false,
             _ => false,
         }
     }
@@ -295,6 +297,18 @@ impl Arm7Tdmi {
         self.set_flag(FLAG_I, true); // Disable further IRQs
         self.set_flag(FLAG_T, false); // Switch to ARM state
         self.regs[15] = 0x0000_0018; // Vector address
+    }
+
+    /// Undefined Instruction exception (vector 0x00000004). `return_pc`
+    /// is the address of the instruction after the undefined one.
+    pub fn trigger_undefined(&mut self, return_pc: u32) {
+        let old_cpsr = self.cpsr;
+        self.set_mode(CpuMode::Undefined);
+        self.spsr_und = old_cpsr;
+        self.regs[14] = return_pc;
+        self.set_flag(FLAG_I, true);
+        self.set_flag(FLAG_T, false);
+        self.regs[15] = 0x0000_0004;
     }
 
     /// Trigger software interrupt (SWI) exception (vector 0x00000008)

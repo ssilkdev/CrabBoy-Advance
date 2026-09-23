@@ -125,8 +125,12 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
                 if r == 15 {
                     if s {
                         let spsr = cpu.get_spsr();
+                        // Only an exception return from IRQ mode ends IRQ
+                        // servicing (not SWI/UND returns).
+                        if cpu.cpsr & 0x1F == 0x12 {
+                            cpu.in_irq = false;
+                        }
                         cpu.set_cpsr(spsr);
-                        cpu.in_irq = false;
                         cpu.regs[15] = if (spsr & FLAG_T) != 0 { val & !1 } else { val & !3 };
                     } else {
                         cpu.regs[15] = val & !3;
@@ -527,8 +531,12 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
             if rd == 15 {
                 if s {
                     let spsr = cpu.get_spsr();
+                    // Only an exception return from IRQ mode ends IRQ
+                    // servicing (not SWI/UND returns).
+                    if cpu.cpsr & 0x1F == 0x12 {
+                        cpu.in_irq = false;
+                    }
                     cpu.set_cpsr(spsr);
-                    cpu.in_irq = false;
                     if (spsr & FLAG_T) != 0 {
                         cpu.regs[15] = res & !1;
                     } else {
@@ -564,12 +572,6 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
     }
 
     // Undefined instruction — trigger UND exception
-    let old_cpsr = cpu.cpsr;
-    cpu.set_mode(super::CpuMode::Undefined);
-    cpu.spsr_und = old_cpsr;
-    cpu.regs[14] = pc.wrapping_add(4); // LR_und = address of instruction after the undefined one
-    cpu.set_flag(super::FLAG_I, true);
-    cpu.set_flag(super::FLAG_T, false);
-    cpu.regs[15] = 0x0000_0004; // Undefined instruction vector
+    cpu.trigger_undefined(pc.wrapping_add(4));
     4
 }
