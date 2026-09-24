@@ -24,6 +24,9 @@ use touch::{Buttons, TouchPad};
 /// Never emulate more than this many frames per UI update, so a long stall
 /// (app switch, GC pause) does not turn into a burst of fast-forward.
 const MAX_CATCHUP_FRAMES: u32 = 3;
+/// Redraw interval while nothing moves (library, menus): picks up ROM
+/// imports and expiring toasts without redrawing 60 times a second.
+const IDLE_TICK: Duration = Duration::from_millis(500);
 const FAST_FORWARD_SPEED: u32 = 3;
 
 #[no_mangle]
@@ -168,6 +171,29 @@ impl Core {
         }
     }
 
+    /// Run or stop the audio device stream (see `AudioOutput::set_stream_active`).
+    fn set_stream_active(&mut self, active: bool) {
+        match self {
+            Core::Gba(g) => g.mmu.apu.audio_output.set_stream_active(active),
+            Core::GameBoy(g) => g.mmu.apu.audio_output.set_stream_active(active),
+        }
+    }
+
+    /// Cheap fingerprint of the displayed frame, to skip re-uploading a
+    /// picture that hasn't changed (menus, text boxes, pauses in-game).
+    fn frame_fingerprint(&self) -> u64 {
+        let fb: &[u32] = match self {
+            Core::Gba(g) => &g.get_framebuffer()[..],
+            Core::GameBoy(g) => &g.get_framebuffer()[..],
+        };
+        // FNV-1a over 64-bit words: ~20 µs for a GBA frame.
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for w in fb.chunks_exact(2) {
+            h = (h ^ (w[0] as u64 | (w[1] as u64) << 32)).wrapping_mul(0x100_0000_01b3);
+        }
+        h
+    }
+
     fn set_audio(&mut self, muted: bool, fast_forward: bool, slow: f32, slow_audio: SlowMotionAudio) {
         let out = match self {
             Core::Gba(g) => &mut g.mmu.apu.audio_output,
@@ -232,6 +258,12 @@ struct CrabBoyApp {
     autosaver: gba_simulator::autosave::AutoSaver,
     autosave_path: PathBuf,
     autosave_menu: bool,
+    /// Fingerprint + settings of the picture last uploaded to the GPU.
+    uploaded: Option<(u64, u64)>,
+    /// Whether the 60 Hz display-mode request is in effect.
+    game_refresh: bool,
+    /// Time spent converting/uploading pictures since `stats_since`.
+    upload_time: Duration,
 }
 
 impl CrabBoyApp {
@@ -300,6 +332,9 @@ impl CrabBoyApp {
             autosaver,
             autosave_path,
             autosave_menu: false,
+            uploaded: None,
+            game_refresh: false,
+            upload_time: Duration::ZERO,
         };
         app.refresh_library();
         app
@@ -380,6 +415,7 @@ impl CrabBoyApp {
         self.screen = Screen::Library;
         self.menu_open = false;
         self.texture = None;
+        self.uploaded = None;
     }
 
     fn state_path(&self) -> Option<PathBuf> {
@@ -491,18 +527,38 @@ impl CrabBoyApp {
         if self.stats_since.elapsed() >= Duration::from_secs(5) {
             let secs = self.stats_since.elapsed().as_secs_f64();
             log::info!(
-                "perf: {:.1} emulated fps, {:.1} UI fps, last batch {:.2} ms",
+                "perf: {:.1} emulated fps, {:.1} UI fps, last batch {:.2} ms, picture {:.3} ms/UI frame",
                 self.stats.0 as f64 / secs,
                 self.stats.1 as f64 / secs,
-                started.elapsed().as_secs_f64() * 1000.0
+                started.elapsed().as_secs_f64() * 1000.0,
+                self.upload_time.as_secs_f64() * 1000.0 / self.stats.1.max(1) as f64
             );
             self.stats = (0, 0);
+            self.upload_time = Duration::ZERO;
             self.stats_since = Instant::now();
         }
     }
 
     fn upload_frame(&mut self, ctx: &egui::Context) {
         let Some(game) = self.game.as_ref() else { return };
+
+        // Same picture, same settings, nothing time-dependent in the
+        // pipeline: the GPU texture is already right. Skips the colour
+        // conversion, shader pass and texture upload (a big share of the
+        // per-frame CPU work) whenever the game's picture is still.
+        let static_pipeline = self.blend_mode == FrameBlendMode::Off
+            && self.hd_mode7.scale == HdScale::Off
+            && !matches!(&game.core, Core::Gba(g) if g.is_hd_pack_enabled());
+        let settings = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&format!("{:?}{:?}", self.shader_preset, self.accessibility.active), &mut h);
+            std::hash::Hasher::finish(&h)
+        };
+        let key = (game.core.frame_fingerprint(), settings);
+        if static_pipeline && self.texture.is_some() && self.uploaded == Some(key) {
+            return;
+        }
+        self.uploaded = if static_pipeline { Some(key) } else { None };
 
         // HD Mode 7 & HD Pack Rendering (ROADMAP M6, M7)
         if let Core::Gba(ref gba) = game.core {
@@ -988,6 +1044,7 @@ impl eframe::App for CrabBoyApp {
         if self.was_focused && !focused {
             if let Some(g) = self.game.as_mut() {
                 g.core.flush_save();
+                g.core.set_stream_active(false);
             }
         }
         if !self.was_focused && focused {
@@ -1039,7 +1096,9 @@ impl eframe::App for CrabBoyApp {
                     g.core.set_audio(muted, ff, sm.effective_multiplier(), sm.audio);
                 }
                 self.step_emulation(buttons);
+                let t = Instant::now();
                 self.upload_frame(ctx);
+                self.upload_time += t.elapsed();
                 // The texture size is known now; recompute for the first frame.
                 let layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
                 self.game_ui(ctx, &layout);
@@ -1073,7 +1132,31 @@ impl eframe::App for CrabBoyApp {
             }
         }
 
-        ctx.request_repaint();
+        // Battery: only redraw continuously while a game is running. The
+        // library and menus redraw on touch (egui does that by itself),
+        // plus a slow tick for ROM imports, toasts and screen insets.
+        let emulating = self.screen == Screen::Playing
+            && self.game.is_some()
+            && !(self.menu_open || self.accessibility_menu || self.autosave_menu);
+        if emulating {
+            ctx.request_repaint();
+        } else {
+            let toast_left = self
+                .toast
+                .as_ref()
+                .map(|(_, at)| Duration::from_secs(3).saturating_sub(at.elapsed()))
+                .filter(|d| !d.is_zero());
+            ctx.request_repaint_after(toast_left.unwrap_or(IDLE_TICK).min(IDLE_TICK));
+        }
+        if emulating != self.game_refresh {
+            self.game_refresh = emulating;
+            platform::set_game_refresh_rate(emulating);
+        }
+        // No sound to play: stop the audio device so it can sleep.
+        let sound = emulating && focused && !self.muted;
+        if let Some(g) = self.game.as_mut() {
+            g.core.set_stream_active(sound);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

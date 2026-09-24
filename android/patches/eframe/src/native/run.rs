@@ -170,17 +170,22 @@ impl<T: WinitApp> WinitAppWrapper<T> {
     fn check_redraw_requests(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
 
+        // CrabBoy patch: only poll when a redraw was actually requested.
+        // Upstream set `Poll` for every due repaint even with no window
+        // (Android after Home/screen off: the surface is gone), and nothing
+        // reset it, so the event loop spun at 100% of a core in the
+        // background until the app was killed.
+        let mut redraw_requested = false;
         self.windows_next_repaint_times
             .retain(|window_id, repaint_time| {
                 if now < *repaint_time {
                     return true; // not yet ready
                 };
 
-                event_loop.set_control_flow(ControlFlow::Poll);
-
                 if let Some(window) = self.winit_app.window(*window_id) {
                     log::trace!("request_redraw for {window_id:?}");
                     window.request_redraw();
+                    redraw_requested = true;
                 } else {
                     log::trace!("No window found for {window_id:?}");
                 }
@@ -190,7 +195,11 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         let next_repaint_time = self.windows_next_repaint_times.values().min().copied();
         if let Some(next_repaint_time) = next_repaint_time {
             event_loop.set_control_flow(ControlFlow::WaitUntil(next_repaint_time));
-        };
+        } else if redraw_requested {
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 }
 

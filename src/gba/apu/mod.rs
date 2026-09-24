@@ -339,6 +339,13 @@ impl Apu {
         (dma_req_a, dma_req_b)
     }
 
+    /// Cycles until the next output sample is mixed.
+    pub fn cycles_to_next_sample(&self) -> u32 {
+        let rate = resample::CORE_SAMPLE_RATE as u64;
+        let need = GBA_CLOCK_HZ.saturating_sub(self.sample_timer);
+        need.div_ceil(rate).max(1) as u32
+    }
+
     fn mix_and_push_sample(&mut self) {
         let enabled = (self.soundcnt_x & (1 << 7)) != 0;
         if !enabled {

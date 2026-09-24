@@ -314,6 +314,15 @@ impl Ppu {
     }
 
     /// Advances PPU by elapsed cycles. Returns (irq_vblank, irq_hblank, irq_vcounter, dma_vblank, dma_hblank)
+    /// Cycles until the next HBlank start or scanline end.
+    pub fn cycles_to_next_boundary(&self) -> u32 {
+        if self.cycle_in_scanline < HDRAW_CYCLES {
+            HDRAW_CYCLES - self.cycle_in_scanline
+        } else {
+            SCANLINE_CYCLES.saturating_sub(self.cycle_in_scanline).max(1)
+        }
+    }
+
     pub fn step(&mut self, cycles: u32) -> (bool, bool, bool, bool, bool) {
         let mut irq_vblank = false;
         let mut irq_hblank = false;

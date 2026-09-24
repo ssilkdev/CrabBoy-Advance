@@ -55,6 +55,11 @@ pub fn pick_rom() {
     with_activity(|env, act| env.call_method(act, "pickRom", "()V", &[]).map(|_| ()));
 }
 
+/// Prefer a ~60 Hz display mode while playing (see MainActivity).
+pub fn set_game_refresh_rate(on: bool) {
+    with_activity(|env, act| env.call_method(act, "setGameRefreshRate", "(Z)V", &[on.into()]).map(|_| ()));
+}
+
 /// Apply an `ActivityInfo.SCREEN_ORIENTATION_*` value.
 pub fn set_orientation(value: i32) {
     with_activity(|env, act| env.call_method(act, "setOrientation", "(I)V", &[value.into()]).map(|_| ()));

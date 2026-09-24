@@ -98,6 +98,35 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    /**
+     * Battery: ask for a ~60 Hz display mode while a game runs (the GBA is
+     * 59.73 Hz, so on a 90/120 Hz phone every extra refresh is a redraw of
+     * the same picture). {@code on == false} returns to the system default.
+     * Only modes with the current resolution are considered.
+     */
+    public void setGameRefreshRate(final boolean on) {
+        runOnUiThread(() -> {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            int want = 0;
+            if (on) {
+                android.view.Display d = getWindowManager().getDefaultDisplay();
+                android.view.Display.Mode cur = d.getMode();
+                float best = Float.MAX_VALUE;
+                for (android.view.Display.Mode m : d.getSupportedModes()) {
+                    if (m.getPhysicalWidth() != cur.getPhysicalWidth()
+                            || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
+                    float r = m.getRefreshRate();
+                    if (r < 59f) continue; // never below the game's rate
+                    if (r < best) { best = r; want = m.getModeId(); }
+                }
+            }
+            if (lp.preferredDisplayModeId != want) {
+                lp.preferredDisplayModeId = want;
+                getWindow().setAttributes(lp);
+            }
+        });
+    }
+
     public void pickRom() {
         runOnUiThread(() -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);

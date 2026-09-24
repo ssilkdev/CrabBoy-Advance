@@ -62,6 +62,14 @@ pub struct Gba {
     pub speculative: bool,
     /// High-resolution M4A / Sappy audio re-synthesis engine (ROADMAP M9)
     pub m4a: m4a::HdM4aEngine,
+    /// While the CPU is halted, jump straight to the next hardware event
+    /// instead of stepping one cycle at a time. Bit-identical results (see
+    /// tests/halt_skip.rs); off only for comparison.
+    pub halt_skip: bool,
+    /// Cycles left in the current `run_frame` (a halt skip never crosses
+    /// the frame end). 1 outside `run_frame`, so single-stepping is exact.
+    #[doc(hidden)]
+    pub halt_budget: u32,
 }
 
 impl Default for Gba {
@@ -81,6 +89,8 @@ impl Gba {
             frame_counter: 0,
             speculative: false,
             m4a: m4a::HdM4aEngine::new(),
+            halt_skip: true,
+            halt_budget: 1,
         }
     }
 
@@ -285,7 +295,11 @@ impl Gba {
 
         // Execute instruction
         let cycles = if self.cpu.halted {
-            1
+            if self.halt_skip {
+                self.cycles_to_next_event()
+            } else {
+                1
+            }
         } else if self.cpu.is_thumb() {
             step_thumb(&mut self.cpu, &mut self.mmu)
         } else {
@@ -428,6 +442,33 @@ impl Gba {
         cycles
     }
 
+    /// Cycles a halted CPU can sleep before anything can happen: the next
+    /// PPU boundary (HBlank/line end), timer overflow, audio sample, serial
+    /// transfer end or frame end, whichever is first. Nothing observable
+    /// changes in between, so the result matches stepping 1 cycle at a
+    /// time; games that wait in HALT (most of them, most of each frame)
+    /// then cost a few dozen steps per frame instead of ~100k.
+    fn cycles_to_next_event(&self) -> u32 {
+        let mut n = self.halt_budget.max(1);
+        // IRQ line already raised (HALT breaks this step) or an IRQ pending
+        // its dispatch delay: keep cycle resolution.
+        // A DMA stall from the last step is added on top of this step's
+        // cycles, so skipping would overshoot the next event by that much.
+        if (self.mmu.ie & self.mmu.if_reg) != 0
+            || self.mmu.irq_assert_time.is_some()
+            || self.mmu.pending_dma_stall() != 0
+        {
+            return 1;
+        }
+        n = n.min(self.mmu.ppu.cycles_to_next_boundary());
+        n = n.min(self.mmu.timers.cycles_to_next_overflow(self.cpu.cycles));
+        n = n.min(self.mmu.apu.cycles_to_next_sample());
+        if self.mmu.sio.transfer_cycles_left > 0 {
+            n = n.min(self.mmu.sio.transfer_cycles_left);
+        }
+        n.max(1)
+    }
+
     /// Make the cartridge RTC deterministic (ROADMAP M2): `Some(unix)` pins
     /// the clock to `unix` at power-on and advances it with emulated time
     /// only; `None` returns to the host wall clock. Movie replays, run-ahead
@@ -462,9 +503,11 @@ impl Gba {
 
         let mut frame_cycles = 0;
         while frame_cycles < CYCLES_PER_FRAME {
+            self.halt_budget = CYCLES_PER_FRAME - frame_cycles;
             let c = self.step_instruction();
             frame_cycles += c;
         }
+        self.halt_budget = 1;
         self.mmu.ppu.frame_ready = false;
         self.frame_counter += 1;
 

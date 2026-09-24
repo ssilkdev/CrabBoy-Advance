@@ -192,6 +192,21 @@ impl TimerController {
         }
     }
 
+    /// Cycles from `now` (the last `sync`) until the next overflow of a
+    /// free-running timer; count-up timers only overflow when the one
+    /// before them does, so they're covered. `u32::MAX` if none run.
+    pub fn cycles_to_next_overflow(&self, now: u64) -> u32 {
+        let mut best = u64::from(u32::MAX);
+        for (i, t) in self.timers.iter().enumerate() {
+            if !t.free_running(i) {
+                continue;
+            }
+            let at = t.last_event + ((0x1_0000 - t.counter as u64) << t.shift());
+            best = best.min(at.saturating_sub(now).max(1));
+        }
+        best as u32
+    }
+
     /// Take (and clear) the queued overflow events.
     pub fn take_events(&mut self) -> TimerEvents {
         std::mem::take(&mut self.pending)

@@ -69,6 +69,8 @@ const FF_TARGET_FILL: usize = 4000;
 
 pub struct AudioOutput {
     _stream: Option<cpal::Stream>,
+    /// Whether `_stream` is playing (see `set_stream_active`).
+    stream_active: bool,
     buffer: Arc<SampleRing>,
     sample_rate: u32,
     channels: usize,
@@ -103,6 +105,26 @@ impl Default for AudioOutput {
 }
 
 impl AudioOutput {
+    /// Stop or restart the device stream. A paused stream lets the audio
+    /// hardware and its callback thread sleep (Android: the AAudio stream
+    /// stops waking the CPU every few ms). Callers pause it only when no
+    /// samples are being produced (muted, in a menu, in the background).
+    pub fn set_stream_active(&mut self, active: bool) {
+        let Some(stream) = self._stream.as_ref() else { return };
+        if active == self.stream_active {
+            return;
+        }
+        let res = if active { stream.play().map_err(|e| e.to_string()) } else { stream.pause().map_err(|e| e.to_string()) };
+        match res {
+            Ok(()) => self.stream_active = active,
+            Err(e) => log::warn!("Could not {} audio stream: {e}", if active { "resume" } else { "pause" }),
+        }
+    }
+
+    pub fn is_stream_active(&self) -> bool {
+        self.stream_active
+    }
+
     pub fn new() -> Self {
         // ~90 ms of stereo at 44.1 kHz; the rate control in Apu keeps the
         // fill around 1000-3000 samples.
@@ -130,6 +152,7 @@ impl AudioOutput {
 
         Self {
             _stream: stream,
+            stream_active: true,
             buffer,
             sample_rate,
             channels,

@@ -827,6 +827,12 @@ impl Mmu {
         self.current_cycles + (self.timing.clock.get() - self.instr_clock_start)
     }
 
+    /// DMA stall cycles waiting to be added to the next step.
+    #[inline(always)]
+    pub fn pending_dma_stall(&self) -> u32 {
+        self.dma_stall
+    }
+
     /// Take (and reset) the DMA stall cycles accumulated since last call.
     #[inline(always)]
     pub fn take_dma_stall(&mut self) -> u32 {
