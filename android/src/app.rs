@@ -1,5 +1,6 @@
 //! The Android application: game library, emulation loop, in-game menu.
 
+use crate::orientation::Orientation;
 use crate::{gamepad, platform, touch};
 
 use std::path::{Path, PathBuf};
@@ -224,6 +225,9 @@ struct CrabBoyApp {
     accessibility_menu: bool,
     /// Zoom factor the UI was last set to.
     applied_zoom: f32,
+    /// Screen rotation preference, saved to `orientation.txt`.
+    orientation: Orientation,
+    orientation_path: PathBuf,
 }
 
 impl CrabBoyApp {
@@ -250,6 +254,11 @@ impl CrabBoyApp {
             .map(|s| AccessibilityStore::from_json(&s))
             .unwrap_or_default();
         let accessibility = AccessibilityManager::with_store(store);
+        let orientation_path = files_dir.join("orientation.txt");
+        let orientation = std::fs::read_to_string(&orientation_path)
+            .map(|s| Orientation::parse(&s))
+            .unwrap_or_default();
+        platform::set_orientation(orientation.activity_info());
         let mut app = Self {
             roms_dir,
             states_dir,
@@ -278,6 +287,8 @@ impl CrabBoyApp {
             accessibility_path,
             accessibility_menu: false,
             applied_zoom: 0.0,
+            orientation,
+            orientation_path,
         };
         app.refresh_library();
         app
@@ -299,6 +310,15 @@ impl CrabBoyApp {
         let msg = msg.into();
         log::info!("{msg}");
         self.toast = Some((msg, Instant::now()));
+    }
+
+    /// Step to the next rotation mode, apply it and remember it.
+    fn cycle_orientation(&mut self) {
+        self.orientation = self.orientation.next();
+        platform::set_orientation(self.orientation.activity_info());
+        if let Err(e) = std::fs::write(&self.orientation_path, self.orientation.as_str()) {
+            log::warn!("Could not save rotation setting: {e}");
+        }
     }
 
     /// Save accessibility edits for the current game and write them out.
@@ -591,100 +611,107 @@ impl CrabBoyApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_min_width(260.0);
-                ui.vertical_centered_justified(|ui| {
-                    ui.label(RichText::new(title).strong());
-                    ui.separator();
-                    if ui.button("Resume").clicked() {
-                        self.menu_open = false;
-                    }
-                    if ui.button("Save state").clicked() {
-                        self.save_state();
-                        self.menu_open = false;
-                    }
-                    if ui.button("Load state").clicked() {
-                        self.load_state();
-                        self.menu_open = false;
-                    }
-                    let ff = if self.fast_forward { "Fast forward: ON" } else { "Fast forward: off" };
-                    if ui.button(ff).clicked() {
-                        self.fast_forward = !self.fast_forward;
-                        self.menu_open = false;
-                    }
-                    let mute = if self.muted { "Sound: muted" } else { "Sound: on" };
-                    if ui.button(mute).clicked() {
-                        self.muted = !self.muted;
-                    }
-                    let blend_label = match self.blend_mode {
-                        FrameBlendMode::Off => "Blend: Off (Instant)",
-                        FrameBlendMode::Simple50 => "Blend: 50/50",
-                        FrameBlendMode::SmartDeFlicker => "Blend: De-Flicker",
-                        FrameBlendMode::LcdGhosting { .. } => "Blend: LCD Ghosting",
-                    };
-                    if ui.button(blend_label).clicked() {
-                        self.blend_mode = match self.blend_mode {
-                            FrameBlendMode::Off => FrameBlendMode::Simple50,
-                            FrameBlendMode::Simple50 => FrameBlendMode::SmartDeFlicker,
-                            FrameBlendMode::SmartDeFlicker => FrameBlendMode::LcdGhosting { decay: 0.65 },
-                            FrameBlendMode::LcdGhosting { .. } => FrameBlendMode::Off,
+                // Taller than a landscape phone: scroll rather than clip.
+                let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                    ui.vertical_centered_justified(|ui| {
+                        ui.label(RichText::new(title).strong());
+                        ui.separator();
+                        if ui.button("Resume").clicked() {
+                            self.menu_open = false;
+                        }
+                        if ui.button("Save state").clicked() {
+                            self.save_state();
+                            self.menu_open = false;
+                        }
+                        if ui.button("Load state").clicked() {
+                            self.load_state();
+                            self.menu_open = false;
+                        }
+                        let ff = if self.fast_forward { "Fast forward: ON" } else { "Fast forward: off" };
+                        if ui.button(ff).clicked() {
+                            self.fast_forward = !self.fast_forward;
+                            self.menu_open = false;
+                        }
+                        let mute = if self.muted { "Sound: muted" } else { "Sound: on" };
+                        if ui.button(mute).clicked() {
+                            self.muted = !self.muted;
+                        }
+                        let blend_label = match self.blend_mode {
+                            FrameBlendMode::Off => "Blend: Off (Instant)",
+                            FrameBlendMode::Simple50 => "Blend: 50/50",
+                            FrameBlendMode::SmartDeFlicker => "Blend: De-Flicker",
+                            FrameBlendMode::LcdGhosting { .. } => "Blend: LCD Ghosting",
                         };
-                    }
-                    let shader_label = match self.shader_preset {
-                        ShaderPreset::Crisp => "Shader: Crisp",
-                        ShaderPreset::Linear => "Shader: Bilinear",
-                        ShaderPreset::LcdGrid => "Shader: LCD Grid",
-                        ShaderPreset::LcdSubpixel => "Shader: LCD Subpixels",
-                        ShaderPreset::CrtScanlines => "Shader: CRT Scanlines",
-                        ShaderPreset::CrtGeom => "Shader: CRT Aperture",
-                        _ => "Shader: Crisp",
-                    };
-                    if ui.button(shader_label).clicked() {
-                        self.shader_preset = match self.shader_preset {
-                            ShaderPreset::Crisp => ShaderPreset::LcdGrid,
-                            ShaderPreset::LcdGrid => ShaderPreset::LcdSubpixel,
-                            ShaderPreset::LcdSubpixel => ShaderPreset::CrtScanlines,
-                            ShaderPreset::CrtScanlines => ShaderPreset::CrtGeom,
-                            ShaderPreset::CrtGeom => ShaderPreset::Linear,
-                            _ => ShaderPreset::Crisp,
+                        if ui.button(blend_label).clicked() {
+                            self.blend_mode = match self.blend_mode {
+                                FrameBlendMode::Off => FrameBlendMode::Simple50,
+                                FrameBlendMode::Simple50 => FrameBlendMode::SmartDeFlicker,
+                                FrameBlendMode::SmartDeFlicker => FrameBlendMode::LcdGhosting { decay: 0.65 },
+                                FrameBlendMode::LcdGhosting { .. } => FrameBlendMode::Off,
+                            };
+                        }
+                        let shader_label = match self.shader_preset {
+                            ShaderPreset::Crisp => "Shader: Crisp",
+                            ShaderPreset::Linear => "Shader: Bilinear",
+                            ShaderPreset::LcdGrid => "Shader: LCD Grid",
+                            ShaderPreset::LcdSubpixel => "Shader: LCD Subpixels",
+                            ShaderPreset::CrtScanlines => "Shader: CRT Scanlines",
+                            ShaderPreset::CrtGeom => "Shader: CRT Aperture",
+                            _ => "Shader: Crisp",
                         };
-                    }
-                    let hd_label = match self.hd_mode7.scale {
-                        HdScale::Off => "Mode 7: Native (Off)",
-                        HdScale::X2 => "Mode 7: 2x HD",
-                        HdScale::X4 => "Mode 7: 4x HD",
-                        HdScale::X8 => "Mode 7: 8x Ultra HD",
-                    };
-                    if ui.button(hd_label).clicked() {
-                        self.hd_mode7.scale = match self.hd_mode7.scale {
-                            HdScale::Off => HdScale::X2,
-                            HdScale::X2 => HdScale::X4,
-                            HdScale::X4 => HdScale::X8,
-                            HdScale::X8 => HdScale::Off,
+                        if ui.button(shader_label).clicked() {
+                            self.shader_preset = match self.shader_preset {
+                                ShaderPreset::Crisp => ShaderPreset::LcdGrid,
+                                ShaderPreset::LcdGrid => ShaderPreset::LcdSubpixel,
+                                ShaderPreset::LcdSubpixel => ShaderPreset::CrtScanlines,
+                                ShaderPreset::CrtScanlines => ShaderPreset::CrtGeom,
+                                ShaderPreset::CrtGeom => ShaderPreset::Linear,
+                                _ => ShaderPreset::Crisp,
+                            };
+                        }
+                        let hd_label = match self.hd_mode7.scale {
+                            HdScale::Off => "Mode 7: Native (Off)",
+                            HdScale::X2 => "Mode 7: 2x HD",
+                            HdScale::X4 => "Mode 7: 4x HD",
+                            HdScale::X8 => "Mode 7: 8x Ultra HD",
                         };
-                        if let Some(ref mut g) = self.game {
-                            if let Core::Gba(ref mut gba) = g.core {
-                                gba.set_hd_mode7_config(self.hd_mode7);
+                        if ui.button(hd_label).clicked() {
+                            self.hd_mode7.scale = match self.hd_mode7.scale {
+                                HdScale::Off => HdScale::X2,
+                                HdScale::X2 => HdScale::X4,
+                                HdScale::X4 => HdScale::X8,
+                                HdScale::X8 => HdScale::Off,
+                            };
+                            if let Some(ref mut g) = self.game {
+                                if let Core::Gba(ref mut gba) = g.core {
+                                    gba.set_hd_mode7_config(self.hd_mode7);
+                                }
                             }
                         }
-                    }
-                    if ui.button("Accessibility...").clicked() {
-                        self.accessibility_menu = true;
-                    }
-                    if ui.button("Reset").clicked() {
-                        if let Some(p) = self.game.as_ref().map(|g| g.rom_path.clone()) {
-                            self.start_game(p);
+                        if ui.button(self.orientation.label()).clicked() {
+                            self.cycle_orientation();
                         }
-                    }
-                    if ui.button("Game library").clicked() {
-                        if let Some(g) = self.game.as_mut() {
-                            g.core.flush_save();
+                        if ui.button("Accessibility...").clicked() {
+                            self.accessibility_menu = true;
                         }
-                        self.menu_open = false;
-                        self.screen = Screen::Library;
-                        self.refresh_library();
-                    }
-                    if ui.button("Close game").clicked() {
-                        self.close_game();
-                    }
+                        if ui.button("Reset").clicked() {
+                            if let Some(p) = self.game.as_ref().map(|g| g.rom_path.clone()) {
+                                self.start_game(p);
+                            }
+                        }
+                        if ui.button("Game library").clicked() {
+                            if let Some(g) = self.game.as_mut() {
+                                g.core.flush_save();
+                            }
+                            self.menu_open = false;
+                            self.screen = Screen::Library;
+                            self.refresh_library();
+                        }
+                        if ui.button("Close game").clicked() {
+                            self.close_game();
+                        }
+                    });
                 });
             });
     }

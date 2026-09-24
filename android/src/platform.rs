@@ -55,6 +55,11 @@ pub fn pick_rom() {
     with_activity(|env, act| env.call_method(act, "pickRom", "()V", &[]).map(|_| ()));
 }
 
+/// Apply an `ActivityInfo.SCREEN_ORIENTATION_*` value.
+pub fn set_orientation(value: i32) {
+    with_activity(|env, act| env.call_method(act, "setOrientation", "(I)V", &[value.into()]).map(|_| ()));
+}
+
 fn take_string(method: &str) -> Option<String> {
     with_activity(|env, act| {
         let obj = env.call_method(act, method, "()Ljava/lang/String;", &[])?.l()?;

@@ -10,6 +10,7 @@
 //! `cargo test --manifest-path android/Cargo.toml`.
 
 pub mod keymap;
+pub mod orientation;
 pub mod touch;
 
 #[cfg(target_os = "android")]

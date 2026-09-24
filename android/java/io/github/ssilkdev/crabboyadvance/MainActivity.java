@@ -23,8 +23,8 @@ import java.util.Locale;
  * that need the Android framework: the system file picker, copying the chosen
  * ROM into app storage, immersive fullscreen, and safe-area insets.
  *
- * Rust calls pickRom(), takeImportedRom(), takeImportError() and
- * getSafeInsets() over JNI.
+ * Rust calls pickRom(), takeImportedRom(), takeImportError(),
+ * getSafeInsets() and setOrientation() over JNI.
  */
 public class MainActivity extends NativeActivity {
     private static final int PICK_ROM = 1001;
@@ -89,6 +89,13 @@ public class MainActivity extends NativeActivity {
 
     public int[] getSafeInsets() {
         return safeInsets;
+    }
+
+    /** ActivityInfo.SCREEN_ORIENTATION_* value chosen in the in-game menu. */
+    public void setOrientation(final int value) {
+        runOnUiThread(() -> {
+            if (getRequestedOrientation() != value) setRequestedOrientation(value);
+        });
     }
 
     public void pickRom() {

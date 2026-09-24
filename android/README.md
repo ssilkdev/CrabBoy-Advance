@@ -12,6 +12,12 @@ directory only adds the Android shell.
 - **Touch controls**: multi-touch D-pad (with diagonals), A/B, L/R,
   Start/Select, menu and fast-forward. Separate portrait and landscape
   layouts, clear of camera cutouts.
+- **Rotation**: turn the phone sideways and the game switches to the
+  landscape layout (game in the middle, controls on each side); turn it
+  upright for portrait. This works even with the system rotation lock on.
+  The in-game menu's **Rotation** button cycles *Auto* (default, follows the
+  sensor), *Follow system* (respects the rotation lock), *Portrait* and
+  *Landscape*. The choice is saved in `orientation.txt`.
 - **Controllers**: Bluetooth or USB gamepads work without setup. The buttons
   map to where they sit on a GBA: the right face button is A and the bottom
   one is B. L1/L2 are L, R1/R2 are R. The D-pad or left stick moves.
@@ -57,10 +63,11 @@ cargo test --manifest-path android/Cargo.toml
 
 - `src/app.rs`: library, emulation loop (paced to 59.73 Hz), in-game menu, saves
 - `src/touch.rs`: on-screen control layout, hit testing and drawing (host-tested)
+- `src/orientation.rs`: rotation modes (host-tested)
 - `src/keymap.rs`: controller key/axis → GBA button mapping (host-tested)
 - `src/gamepad.rs`: receives controller events from the winit hook
 - `src/platform.rs`: JNI calls into `MainActivity`
-- `java/.../MainActivity.java`: `NativeActivity` subclass for the file picker, ROM/save import, fullscreen and cutout insets
+- `java/.../MainActivity.java`: `NativeActivity` subclass for the file picker, ROM/save import, fullscreen, rotation and cutout insets
 - `build.rs`: links the NDK C++ runtime statically (needed by Oboe)
 - `patches/winit`: winit 0.30.13 plus a small gamepad hook (see below)
 
