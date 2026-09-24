@@ -69,29 +69,59 @@ wide wins first.
      5 ROMs. Removing one catch-up makes it fail at frame 2.
 
    Result: a further +33% to +59% fps (see the table below).
-3. **Block cache.**
-   - Pre-decode straight-line runs of Thumb and ARM code into op lists,
-     keyed by address and mode.
-   - Invalidate on any write to a page that holds cached code
-     (self-modifying code, and code copied into IWRAM).
-   - Blocks end at branches, SWIs, writes to PC and mode switches.
+3. **Stage 3a: decode tables and renderer fast paths** ✅ (bit-identical)
+   - ARM decode: a 4096-entry candidate table plus each class's full test,
+     first match in the old chain's order. Tested against the chain on
+     every key with 81 fills plus 3M random words.
+   - Renderer:
+     - background layers merged in precomputed priority order
+     - BGR555 to RGBA via a compile-time table
+     - text backgrounds drawn a tile at a time (fuzz-tested against the
+       per-pixel loop)
+   - Video linter: repeated frames found by comparing with the last frame;
+     the CRC is computed only when needed.
 
-   Finding: every instruction fetch also advances the bus-timing model
-   (wait states, ROM prefetch buffer). A cache therefore can't skip the
-   fetches without changing cycle counts. The per-block timing has to be
-   precomputed per prefetch state, which is why this comes after stage 2.
-4. **Native code for hot blocks.** Emit x86-64 (desktop) and AArch64
-   (Android) for blocks that ran more than N times, falling back to the
-   cached interpreter for anything unusual. iOS forbids W^X pages, so it
-   keeps stage 3.
+   Result: +18% to +36% over stage 2 on the Pokémon games and Dragon Ball.
+
+   **Block cache (not done, low value now).** Every instruction fetch has
+   to go through the bus-timing model anyway (wait states, prefetch
+   buffer). Reading the opcode itself costs about 2 ns, so caching decoded
+   blocks would save only a few percent.
+4. **Native code for hot blocks** (not started: needs a go/no-go)
+   - Emit x86-64 (desktop) and AArch64 (Android) for hot blocks, with the
+     cached interpreter as fallback. iOS forbids W^X pages, so it would
+     stay on the interpreter.
+   - **Ceiling, measured after stage 3a (Emerald profile).** ARM and Thumb
+     execution *including* bus timing is about 43% of frame time. The
+     rest is scanline rendering, peripherals, audio and diagnostics, and
+     a JIT doesn't touch any of it. Bit-identical timing means generated
+     code still has to call the timing model for every fetch and access.
+     So even an infinitely fast JIT would give at most ~1.6x, and a
+     realistic one ~1.2-1.3x.
+   - **Cost.**
+     - A code generator per architecture (or Cranelift, which adds several
+       MB to the APK).
+     - Block invalidation for code in RAM.
+     - Exact cycle accounting per block.
+     - Months of accuracy work to stay identical.
+
+## Stage 4 alternatives with better payoff per effort
+
+- **Sprite rendering and HD-audio sync**: 3-4% each in the profile.
+- **Idle-loop detection**: Emerald never uses HALT; it busy-waits. It
+  could be made exact by skipping whole loop iterations up to the next
+  event. That's the same event-horizon machinery as the halt skip.
+- **Rendering on a second thread**: a scanline only depends on registers
+  latched at HBlank. Bit-identical if the PPU is handed a copy of the
+  line's state.
 
 ## Results so far
 
 Headless, 3000 frames after a 600-frame warm-up, i9-12900K:
 
-| Game | Before | Stage 1 | Stage 2 | Total |
-|---|---|---|---|---|
-| Pokémon Emerald | 287 fps | 371 fps | 517 fps | +80% |
-| Dragon Ball Advanced Adventure | 406 fps | 488 fps | 648 fps | +60% |
-| Pokémon Sapphire | 443 fps | 557 fps | 717 fps | +62% |
-| Harry Potter | 529 fps | 811 fps | 1211 fps | +129% |
+| Game | Before | Stage 1 | Stage 2 | Stage 3a | Total |
+|---|---|---|---|---|---|
+| Pokémon Emerald | 287 fps | 371 fps | 517 fps | 612-644 fps | +113-124% |
+| Dragon Ball Advanced Adventure | 406 fps | 488 fps | 648 fps | 868 fps | +114% |
+| Pokémon Sapphire | 443 fps | 557 fps | 717 fps | 929 fps | +110% |
+| Harry Potter | 529 fps | 811 fps | 1211 fps | 1293 fps | +144% |

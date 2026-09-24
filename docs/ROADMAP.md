@@ -210,7 +210,7 @@ earlier when there's spare capacity.
 
 - **JIT / recompiler track** (started): staged and bit-identical at each
   step. Stages 1 (hot-path fixes) and 2 (batched peripheral stepping)
-  landed: +60% to +129% emulation speed. Plan,
+  landed, plus stage 3a (decode tables, renderer fast paths): +110% to +144% emulation speed. Plan,
   measurements and next stages are in `docs/JIT.md`.
 
 ## Out of scope
