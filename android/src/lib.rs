@@ -19,3 +19,18 @@ mod app;
 mod gamepad;
 #[cfg(target_os = "android")]
 mod platform;
+
+/// The egui_glow patch (see Cargo.toml) must keep asking for highp floats:
+/// with mediump, phone GPUs draw a thin line beside letters.
+#[cfg(test)]
+mod shader_patch_tests {
+    #[test]
+    fn egui_shaders_use_high_precision_on_gles() {
+        for src in [
+            include_str!("../patches/egui_glow/src/shader/fragment.glsl"),
+            include_str!("../patches/egui_glow/src/shader/vertex.glsl"),
+        ] {
+            assert!(src.contains("precision highp float;"), "shader lost its highp patch");
+        }
+    }
+}

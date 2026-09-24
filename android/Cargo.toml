@@ -31,6 +31,13 @@ jni = "0.21"
 # Java (and egui drops them as unidentified keys). This copy returns gamepad /
 # joystick input to the Java side instead -- see patches/README.md.
 winit = { path = "patches/winit" }
+# egui_glow's shaders use mediump floats; on phone GPUs that's 16-bit and
+# too coarse for the font atlas, drawing a thin line beside letters. This
+# copy asks for highp -- see patches/README.md.
+egui_glow = { path = "patches/egui_glow" }
+# eframe's shutdown assumed the window still exists; on Android it's gone by
+# the time the activity is destroyed (e.g. a system theme change).
+eframe = { path = "patches/eframe" }
 
 [profile.release]
 opt-level = 3

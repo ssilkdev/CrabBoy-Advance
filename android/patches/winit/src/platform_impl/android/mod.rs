@@ -288,9 +288,14 @@ impl<T: 'static> EventLoop<T> {
                     warn!("TODO: forward onStop notification to application");
                 },
                 MainEvent::Destroy => {
-                    // XXX: maybe exit mainloop to drop things before being
-                    // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    // CrabBoy patch: leave the main loop. onDestroy() blocks
+                    // the Java UI thread until android_main returns, so
+                    // ignoring this froze the app ("isn't responding")
+                    // whenever Android recreated the activity. Exiting runs
+                    // the app's on_exit (flushes saves) and lets the new
+                    // activity start cleanly.
+                    debug!("App Destroyed - exiting event loop");
+                    self.window_target.p.exit();
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?

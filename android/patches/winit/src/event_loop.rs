@@ -115,7 +115,10 @@ impl<T> EventLoopBuilder<T> {
     pub fn build(&mut self) -> Result<EventLoop<T>, EventLoopError> {
         let _span = tracing::debug_span!("winit::EventLoopBuilder::build").entered();
 
-        if EVENT_LOOP_CREATED.swap(true, Ordering::Relaxed) {
+        // CrabBoy patch: on Android, a recreated activity runs android_main
+        // again in the same process, after the previous loop has exited on
+        // Destroy. Each gets its own AndroidApp, so a new loop is fine there.
+        if EVENT_LOOP_CREATED.swap(true, Ordering::Relaxed) && !cfg!(android_platform) {
             return Err(EventLoopError::RecreationAttempt);
         }
 
