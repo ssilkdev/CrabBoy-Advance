@@ -872,6 +872,12 @@ impl DmgAudio {
         Self::default()
     }
 
+    /// Cycles until the 512 Hz frame sequencer next clocks (length,
+    /// sweep, envelope), which can change what the channels output.
+    pub fn cycles_to_next_sequencer_step(&self) -> u32 {
+        FRAME_SEQUENCER_CYCLES.saturating_sub(self.frame_sequencer_timer).max(1)
+    }
+
     pub fn step(&mut self, cycles: u32) {
         // Step individual channel audio timers
         self.ch1.step_timer(cycles);

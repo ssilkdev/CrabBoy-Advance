@@ -177,10 +177,10 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
 
             if reg_list == 0 {
                 if l {
-                    cpu.regs[15] = mmu.read32(base & !3) & !1;
+                    cpu.regs[15] = mmu.cpu_read32(base & !3) & !1;
                 } else {
                     // The stored PC is the instruction address + 6.
-                    mmu.write32(base & !3, pc.wrapping_add(6));
+                    mmu.cpu_write32(base & !3, pc.wrapping_add(6));
                 }
                 cpu.regs[rb] = base.wrapping_add(0x40);
                 return 3;
@@ -193,10 +193,10 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             for r in 0..8 {
                 if (reg_list & (1 << r)) != 0 {
                     if l {
-                        cpu.regs[r] = mmu.read32(addr & !3);
+                        cpu.regs[r] = mmu.cpu_read32(addr & !3);
                     } else {
                         let val = if r == rb && r != lowest { final_addr } else { cpu.regs[r] };
-                        mmu.write32(addr & !3, val);
+                        mmu.cpu_write32(addr & !3, val);
                     }
                     addr = addr.wrapping_add(4);
                 }
@@ -221,12 +221,12 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
 
                 for r in 0..8 {
                     if (reg_list & (1 << r)) != 0 {
-                        mmu.write32(sp & !3, cpu.regs[r]);
+                        mmu.cpu_write32(sp & !3, cpu.regs[r]);
                         sp = sp.wrapping_add(4);
                     }
                 }
                 if r_bit {
-                    mmu.write32(sp & !3, cpu.regs[14]); // Store LR
+                    mmu.cpu_write32(sp & !3, cpu.regs[14]); // Store LR
                 }
                 return num + 2;
             } else {
@@ -236,12 +236,12 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
 
                 for r in 0..8 {
                     if (reg_list & (1 << r)) != 0 {
-                        cpu.regs[r] = mmu.read32(sp & !3);
+                        cpu.regs[r] = mmu.cpu_read32(sp & !3);
                         sp = sp.wrapping_add(4);
                     }
                 }
                 if r_bit {
-                    let target = mmu.read32(sp & !3);
+                    let target = mmu.cpu_read32(sp & !3);
                     sp = sp.wrapping_add(4);
                     cpu.regs[15] = target & !1;
                 }
@@ -275,9 +275,9 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             let rd = ((instr >> 8) & 7) as usize;
             let addr = cpu.regs[13].wrapping_add(((instr & 0xFF) as u32) << 2);
             if l {
-                cpu.regs[rd] = mmu.read32(addr);
+                cpu.regs[rd] = mmu.cpu_read32(addr);
             } else {
-                mmu.write32(addr, cpu.regs[rd]);
+                mmu.cpu_write32(addr, cpu.regs[rd]);
             }
             return 2;
         }
@@ -291,7 +291,7 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             if l {
                 cpu.regs[rd] = super::load_halfword(mmu, addr);
             } else {
-                mmu.write16(addr, (cpu.regs[rd] & 0xFFFF) as u16);
+                mmu.cpu_write16(addr, (cpu.regs[rd] & 0xFFFF) as u16);
             }
             return 2;
         }
@@ -309,13 +309,13 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             let addr = cpu.regs[rb].wrapping_add(offset);
 
             if l {
-                cpu.regs[rd] = if b { mmu.read8(addr) as u32 } else { mmu.read32(addr) };
+                cpu.regs[rd] = if b { mmu.cpu_read8(addr) as u32 } else { mmu.cpu_read32(addr) };
             } else {
                 let val = cpu.regs[rd];
                 if b {
-                    mmu.write8(addr, (val & 0xFF) as u8);
+                    mmu.cpu_write8(addr, (val & 0xFF) as u8);
                 } else {
-                    mmu.write32(addr, val);
+                    mmu.cpu_write32(addr, val);
                 }
             }
             return 2;
@@ -330,9 +330,9 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             let addr = cpu.regs[rb].wrapping_add(cpu.regs[ro]);
 
             match (s, h) {
-                (false, false) => mmu.write16(addr, (cpu.regs[rd] & 0xFFFF) as u16), // STRH
+                (false, false) => mmu.cpu_write16(addr, (cpu.regs[rd] & 0xFFFF) as u16), // STRH
                 (false, true) => cpu.regs[rd] = super::load_halfword(mmu, addr),     // LDRH
-                (true, false) => cpu.regs[rd] = (mmu.read8(addr) as i8) as i32 as u32, // LDSB
+                (true, false) => cpu.regs[rd] = (mmu.cpu_read8(addr) as i8) as i32 as u32, // LDSB
                 (true, true) => cpu.regs[rd] = super::load_signed_halfword(mmu, addr), // LDSH
             }
             return 2;
@@ -347,13 +347,13 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             let addr = cpu.regs[rb].wrapping_add(cpu.regs[ro]);
 
             if l {
-                cpu.regs[rd] = if b { mmu.read8(addr) as u32 } else { mmu.read32(addr) };
+                cpu.regs[rd] = if b { mmu.cpu_read8(addr) as u32 } else { mmu.cpu_read32(addr) };
             } else {
                 let val = cpu.regs[rd];
                 if b {
-                    mmu.write8(addr, (val & 0xFF) as u8);
+                    mmu.cpu_write8(addr, (val & 0xFF) as u8);
                 } else {
-                    mmu.write32(addr, val);
+                    mmu.cpu_write32(addr, val);
                 }
             }
             return 2;
@@ -363,7 +363,7 @@ fn execute_thumb(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u16) -> u32 {
             let rd = ((instr >> 8) & 7) as usize;
             let offset = ((instr & 0xFF) as u32) << 2;
             let addr = (pc.wrapping_add(4) & !2).wrapping_add(offset);
-            cpu.regs[rd] = mmu.read32(addr);
+            cpu.regs[rd] = mmu.cpu_read32(addr);
             return 2;
         }
         // Format 5: Hi Register Operations / Branch Exchange

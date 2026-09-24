@@ -70,6 +70,11 @@ pub struct Gba {
     /// the frame end). 1 outside `run_frame`, so single-stepping is exact.
     #[doc(hidden)]
     pub halt_budget: u32,
+    /// Let the peripherals run behind the CPU until the next hardware
+    /// event (JIT stage 2). Bit-identical (tests/halt_skip.rs); off only
+    /// for comparison. Takes effect inside `run_frame` only.
+    pub batch_peripherals_enabled: bool,
+    batch_peripherals: bool,
 }
 
 impl Default for Gba {
@@ -91,6 +96,8 @@ impl Gba {
             m4a: m4a::HdM4aEngine::new(),
             halt_skip: true,
             halt_budget: 1,
+            batch_peripherals_enabled: true,
+            batch_peripherals: false,
         }
     }
 
@@ -310,66 +317,17 @@ impl Gba {
         // HBlank/VBlank/FIFO events) held the CPU off the bus.
         let cycles = cycles + self.mmu.take_dma_stall();
         self.cpu.cycles += cycles as u64;
+        self.mmu.pending_cycles += cycles;
 
-        // Step PPU
-        let (irq_vblank, irq_hblank, irq_vcounter, dma_vblank, dma_hblank) = self.mmu.ppu.step(cycles);
-        if irq_vblank {
-            self.mmu.request_interrupt(0); // VBlank IRQ
+        // JIT stage 2 (docs/JIT.md): the PPU, timers, APU and serial port
+        // only need to catch up when something can happen, i.e. at the next
+        // scheduled event. Until then, keep running instructions and let
+        // the cycles pile up. Anything that could observe or change the
+        // hardware mid-run (IO register access, SWI, DMA) catches up first.
+        if self.batch_peripherals && self.can_defer() {
+            return cycles;
         }
-        if irq_hblank {
-            self.mmu.request_interrupt(1); // HBlank IRQ
-        }
-        if irq_vcounter {
-            self.mmu.request_interrupt(2); // VCounter IRQ
-        }
-
-        // Trigger PPU DMAs
-        if dma_vblank {
-            for ch in self.mmu.dma.trigger(1) {
-                self.mmu.execute_dma_channel(ch);
-            }
-        }
-        if dma_hblank {
-            for ch in self.mmu.dma.trigger(2) {
-                self.mmu.execute_dma_channel(ch);
-            }
-        }
-
-        // Timers: bring counters up to the end of this instruction; an
-        // overflow raises IF at its exact cycle.
-        self.mmu.timers.sync(self.cpu.cycles);
-        let timer_events = self.mmu.timers.take_events();
-        let overflows = timer_events.overflows;
-        let mut irq_time = None;
-        if timer_events.irq_mask != 0 {
-            for i in 0..4 {
-                if (timer_events.irq_mask & (1 << i)) != 0 {
-                    self.mmu.request_interrupt(3 + i as u16);
-                }
-            }
-            irq_time = Some(timer_events.irq_time);
-        }
-
-        // Step SIO (Serial Communication)
-        if self.mmu.sio.step(cycles) {
-            self.mmu.request_interrupt(7); // SIO interrupt
-        }
-
-        // Keypad IRQ (KEYCNT AND/OR condition against KEYINPUT)
-        if self.mmu.keypad.check_irq() {
-            self.mmu.request_interrupt(12);
-        }
-
-        // Track when the IRQ line was asserted (for IRQ_DELAY). Timer
-        // IRQs know their exact overflow cycle; other sources count from
-        // the end of this instruction.
-        if (self.mmu.ie & self.mmu.if_reg) != 0 {
-            if self.mmu.irq_assert_time.is_none() {
-                self.mmu.irq_assert_time = Some(irq_time.unwrap_or(self.cpu.cycles));
-            }
-        } else {
-            self.mmu.irq_assert_time = None;
-        }
+        let (stepped, overflows) = self.mmu.catch_up_timed(self.cpu.cycles);
 
         // On GBA, HALT is only broken when (IE & IF) != 0
         if self.cpu.halted && (self.mmu.ie & self.mmu.if_reg) != 0 {
@@ -400,46 +358,57 @@ impl Gba {
             }
         }
 
-        // Step APU
-        let (dma_req_a, dma_req_b) = self.mmu.apu.step(cycles, overflows);
-        if dma_req_a {
-            let mut handled = false;
-            for ch_idx in 1..=2 {
-                let ch = &self.mmu.dma.channels[ch_idx];
-                let timing = (ch.cnt_h >> 12) & 3;
-                if ch.enabled && timing == 3 && (ch.dad & !3) == 0x0400_00A0 {
-                    self.mmu.execute_dma_channel(ch_idx);
-                    handled = true;
-                    break;
-                }
-            }
-            if !handled {
-                let ch = &self.mmu.dma.channels[1];
-                if ch.enabled && ((ch.cnt_h >> 12) & 3) == 3 {
-                    self.mmu.execute_dma_channel(1);
-                }
-            }
-        }
-        if dma_req_b {
-            let mut handled = false;
-            for ch_idx in 1..=2 {
-                let ch = &self.mmu.dma.channels[ch_idx];
-                let timing = (ch.cnt_h >> 12) & 3;
-                if ch.enabled && timing == 3 && (ch.dad & !3) == 0x0400_00A4 {
-                    self.mmu.execute_dma_channel(ch_idx);
-                    handled = true;
-                    break;
-                }
-            }
-            if !handled {
-                let ch = &self.mmu.dma.channels[2];
-                if ch.enabled && ((ch.cnt_h >> 12) & 3) == 3 {
-                    self.mmu.execute_dma_channel(2);
-                }
-            }
-        }
+        self.mmu.catch_up_apu(stepped, overflows);
 
         cycles
+    }
+
+    /// Bring every peripheral up to the CPU (end of a frame, or before
+    /// anything outside the CPU loop looks at the hardware).
+    pub fn catch_up_peripherals(&mut self) {
+        if self.mmu.pending_cycles != 0 {
+            let (c, ov) = self.mmu.catch_up_timed(self.cpu.cycles);
+            self.mmu.catch_up_apu(c, ov);
+        }
+    }
+
+    /// Whether the peripherals may stay behind after this instruction:
+    /// nothing is due before the event horizon, and no CPU-side state
+    /// (sleeping CPU, IntrWait, a raised or pending IRQ, a queued DMA
+    /// stall, a keypad IRQ condition) needs per-instruction attention.
+    #[inline(always)]
+    fn can_defer(&mut self) -> bool {
+        if self.cpu.halted
+            || self.mmu.intr_wait_mask.is_some()
+            || (self.mmu.ie & self.mmu.if_reg) != 0
+            || self.mmu.irq_assert_time.is_some()
+            || self.mmu.pending_dma_stall() != 0
+            || self.mmu.keypad.check_irq()
+        {
+            return false;
+        }
+        if self.mmu.defer_horizon == 0 {
+            // Start of a run: the peripherals are current up to
+            // `cpu.cycles - pending_cycles`; the horizon counts from there.
+            self.mmu.defer_horizon = self.peripheral_horizon();
+        }
+        self.mmu.pending_cycles < self.mmu.defer_horizon
+    }
+
+    /// Cycles from the last catch-up to the first thing that can happen:
+    /// the same event sources as the sleep skip, plus the DMG sound frame
+    /// sequencer (it changes channel frequencies). The frame end needs no
+    /// entry: `run_frame` catches up after its loop.
+    fn peripheral_horizon(&self) -> u32 {
+        let caught_up_at = self.cpu.cycles - self.mmu.pending_cycles as u64;
+        let mut n = self.mmu.ppu.cycles_to_next_boundary();
+        n = n.min(self.mmu.timers.cycles_to_next_overflow(caught_up_at));
+        n = n.min(self.mmu.apu.cycles_to_next_sample());
+        n = n.min(self.mmu.apu.dmg.cycles_to_next_sequencer_step());
+        if self.mmu.sio.transfer_cycles_left > 0 {
+            n = n.min(self.mmu.sio.transfer_cycles_left);
+        }
+        n.max(1)
     }
 
     /// Cycles a halted CPU can sleep before anything can happen: the next
@@ -502,12 +471,15 @@ impl Gba {
         }
 
         let mut frame_cycles = 0;
+        self.batch_peripherals = self.batch_peripherals_enabled;
         while frame_cycles < CYCLES_PER_FRAME {
             self.halt_budget = CYCLES_PER_FRAME - frame_cycles;
             let c = self.step_instruction();
             frame_cycles += c;
         }
         self.halt_budget = 1;
+        self.batch_peripherals = false;
+        self.catch_up_peripherals();
         self.mmu.ppu.frame_ready = false;
         self.frame_counter += 1;
 

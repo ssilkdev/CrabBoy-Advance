@@ -209,7 +209,8 @@ earlier when there's spare capacity.
 ## Performance
 
 - **JIT / recompiler track** (started): staged and bit-identical at each
-  step. Stage 1 (hot-path fixes) landed with +20-53% emulation speed. Plan,
+  step. Stages 1 (hot-path fixes) and 2 (batched peripheral stepping)
+  landed: +60% to +129% emulation speed. Plan,
   measurements and next stages are in `docs/JIT.md`.
 
 ## Out of scope

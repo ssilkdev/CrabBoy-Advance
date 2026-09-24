@@ -55,6 +55,12 @@ pub struct Mmu {
     /// prefetched opcode, which the CPU updates before each instruction
     /// (see `set_open_bus_*` in cpu/arm.rs and cpu/thumb.rs). ROADMAP M1.
     pub open_bus: u32,
+    /// CPU cycles the peripherals haven't been stepped for yet (JIT stage
+    /// 2). Always 0 between frames and outside `Gba::run_frame`.
+    pub pending_cycles: u32,
+    /// Cycles from the last sync to the next peripheral event; 0 = not
+    /// computed for the current run.
+    pub defer_horizon: u32,
 
     pub flight_recorder: FlightRecorder,
     pub current_pc: u32,
@@ -155,6 +161,8 @@ impl Mmu {
             post_flg: 0,
             haltcnt: 0,
             open_bus: 0,
+            pending_cycles: 0,
+            defer_horizon: 0,
             flight_recorder: FlightRecorder::new(),
             current_pc: 0,
             bios_latch: BIOS_LATCH_BOOT,
@@ -862,6 +870,161 @@ impl Mmu {
         self.current_cycles + (self.timing.clock.get() - self.instr_clock_start)
     }
 
+    /// Bring the PPU, DMA triggers, timers, serial port, keypad IRQ and
+    /// IRQ-line tracking up to cycle `now`, stepping the `pending_cycles`
+    /// the CPU ran since the last sync (JIT stage 2, docs/JIT.md). Returns
+    /// the cycles stepped and the timer overflows for [`Mmu::catch_up_apu`].
+    /// Same code, same order as the old per-instruction tail.
+    pub fn catch_up_timed(&mut self, now: u64) -> (u32, [bool; 4]) {
+        let cycles = std::mem::take(&mut self.pending_cycles);
+        self.defer_horizon = 0;
+            // Step PPU
+            let (irq_vblank, irq_hblank, irq_vcounter, dma_vblank, dma_hblank) = self.ppu.step(cycles);
+            if irq_vblank {
+                self.request_interrupt(0); // VBlank IRQ
+            }
+            if irq_hblank {
+                self.request_interrupt(1); // HBlank IRQ
+            }
+            if irq_vcounter {
+                self.request_interrupt(2); // VCounter IRQ
+            }
+
+            // Trigger PPU DMAs
+            if dma_vblank {
+                for ch in self.dma.trigger(1) {
+                    self.execute_dma_channel(ch);
+                }
+            }
+            if dma_hblank {
+                for ch in self.dma.trigger(2) {
+                    self.execute_dma_channel(ch);
+                }
+            }
+
+            // Timers: bring counters up to the end of this instruction; an
+            // overflow raises IF at its exact cycle.
+            self.timers.sync(now);
+            let timer_events = self.timers.take_events();
+            let overflows = timer_events.overflows;
+            let mut irq_time = None;
+            if timer_events.irq_mask != 0 {
+                for i in 0..4 {
+                    if (timer_events.irq_mask & (1 << i)) != 0 {
+                        self.request_interrupt(3 + i as u16);
+                    }
+                }
+                irq_time = Some(timer_events.irq_time);
+            }
+
+            // Step SIO (Serial Communication)
+            if self.sio.step(cycles) {
+                self.request_interrupt(7); // SIO interrupt
+            }
+
+            // Keypad IRQ (KEYCNT AND/OR condition against KEYINPUT)
+            if self.keypad.check_irq() {
+                self.request_interrupt(12);
+            }
+
+            // Track when the IRQ line was asserted (for IRQ_DELAY). Timer
+            // IRQs know their exact overflow cycle; other sources count from
+            // the end of this instruction.
+            if (self.ie & self.if_reg) != 0 {
+                if self.irq_assert_time.is_none() {
+                    self.irq_assert_time = Some(irq_time.unwrap_or(now));
+                }
+            } else {
+                self.irq_assert_time = None;
+            }
+        (cycles, overflows)
+    }
+
+    /// Step the APU (and FIFO DMA requests) by `cycles`.
+    pub fn catch_up_apu(&mut self, cycles: u32, overflows: [bool; 4]) {
+            let (dma_req_a, dma_req_b) = self.apu.step(cycles, overflows);
+            if dma_req_a {
+                let mut handled = false;
+                for ch_idx in 1..=2 {
+                    let ch = &self.dma.channels[ch_idx];
+                    let timing = (ch.cnt_h >> 12) & 3;
+                    if ch.enabled && timing == 3 && (ch.dad & !3) == 0x0400_00A0 {
+                        self.execute_dma_channel(ch_idx);
+                        handled = true;
+                        break;
+                    }
+                }
+                if !handled {
+                    let ch = &self.dma.channels[1];
+                    if ch.enabled && ((ch.cnt_h >> 12) & 3) == 3 {
+                        self.execute_dma_channel(1);
+                    }
+                }
+            }
+            if dma_req_b {
+                let mut handled = false;
+                for ch_idx in 1..=2 {
+                    let ch = &self.dma.channels[ch_idx];
+                    let timing = (ch.cnt_h >> 12) & 3;
+                    if ch.enabled && timing == 3 && (ch.dad & !3) == 0x0400_00A4 {
+                        self.execute_dma_channel(ch_idx);
+                        handled = true;
+                        break;
+                    }
+                }
+                if !handled {
+                    let ch = &self.dma.channels[2];
+                    if ch.enabled && ((ch.cnt_h >> 12) & 3) == 3 {
+                        self.execute_dma_channel(2);
+                    }
+                }
+            }
+    }
+
+    /// Catch the peripherals up to the start of the current instruction,
+    /// before the CPU touches something they own (IO registers) or calls
+    /// the BIOS. No-op when nothing is pending.
+    #[inline(always)]
+    pub fn catch_up(&mut self) {
+        if self.pending_cycles != 0 {
+            let (c, ov) = self.catch_up_timed(self.current_cycles);
+            self.catch_up_apu(c, ov);
+        }
+    }
+
+    /// CPU data reads/writes: IO accesses first bring the hardware up to
+    /// date (it may be running behind the CPU, see `catch_up`).
+    #[inline(always)]
+    pub fn cpu_read8(&mut self, addr: u32) -> u8 {
+        if addr >> 24 == 0x04 { self.catch_up(); }
+        self.read8(addr)
+    }
+    #[inline(always)]
+    pub fn cpu_read16(&mut self, addr: u32) -> u16 {
+        if addr >> 24 == 0x04 { self.catch_up(); }
+        self.read16(addr)
+    }
+    #[inline(always)]
+    pub fn cpu_read32(&mut self, addr: u32) -> u32 {
+        if addr >> 24 == 0x04 { self.catch_up(); }
+        self.read32(addr)
+    }
+    #[inline(always)]
+    pub fn cpu_write8(&mut self, addr: u32, val: u8) {
+        if addr >> 24 == 0x04 { self.catch_up(); }
+        self.write8(addr, val)
+    }
+    #[inline(always)]
+    pub fn cpu_write16(&mut self, addr: u32, val: u16) {
+        if addr >> 24 == 0x04 { self.catch_up(); }
+        self.write16(addr, val)
+    }
+    #[inline(always)]
+    pub fn cpu_write32(&mut self, addr: u32, val: u32) {
+        if addr >> 24 == 0x04 { self.catch_up(); }
+        self.write32(addr, val)
+    }
+
     /// DMA stall cycles waiting to be added to the next step.
     #[inline(always)]
     pub fn pending_dma_stall(&self) -> u32 {
@@ -1000,6 +1163,9 @@ impl Mmu {
     }
 
     pub fn handle_swi(&mut self, cpu: &mut Arm7Tdmi, comment: u32) {
+        // BIOS calls can read and write IO (Halt, sound, IntrWait); bring
+        // the hardware up to date first (JIT stage 2).
+        self.catch_up();
         let swi_num = if comment >= 0x10000 {
             ((comment >> 16) & 0xFF) as u8
         } else {

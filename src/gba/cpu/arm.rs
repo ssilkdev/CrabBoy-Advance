@@ -121,7 +121,7 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
             }
             let aligned = cur_addr & !3;
             if l {
-                let val = mmu.read32(aligned);
+                let val = mmu.cpu_read32(aligned);
                 if r == 15 {
                     if s {
                         let spsr = cpu.get_spsr();
@@ -146,7 +146,7 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
                 } else {
                     cpu.regs[r]
                 };
-                mmu.write32(aligned, val);
+                mmu.cpu_write32(aligned, val);
             }
             cur_addr = cur_addr.wrapping_add(4);
         }
@@ -190,9 +190,9 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
 
         if l {
             let val = if b {
-                mmu.read8(target_addr) as u32
+                mmu.cpu_read8(target_addr) as u32
             } else {
-                mmu.read32(target_addr)
+                mmu.cpu_read32(target_addr)
             };
             if rd == 15 {
                 cpu.regs[15] = val & !3;
@@ -202,9 +202,9 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
         } else {
             let val = if rd == 15 { pc.wrapping_add(12) } else { cpu.regs[rd] };
             if b {
-                mmu.write8(target_addr, (val & 0xFF) as u8);
+                mmu.cpu_write8(target_addr, (val & 0xFF) as u8);
             } else {
-                mmu.write32(target_addr, val);
+                mmu.cpu_write32(target_addr, val);
             }
         }
 
@@ -225,12 +225,12 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
 
         let addr = cpu.regs[rn];
         if b {
-            let old = mmu.read8(addr);
-            mmu.write8(addr, cpu.regs[rm] as u8);
+            let old = mmu.cpu_read8(addr);
+            mmu.cpu_write8(addr, cpu.regs[rm] as u8);
             cpu.regs[rd] = old as u32;
         } else {
-            let old = mmu.read32(addr);
-            mmu.write32(addr, cpu.regs[rm]);
+            let old = mmu.cpu_read32(addr);
+            mmu.cpu_write32(addr, cpu.regs[rm]);
             cpu.regs[rd] = old;
         }
         return 4; // SWP takes 1S + 2N + 1I cycles
@@ -262,7 +262,7 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
         if l {
             let val = match op {
                 1 => super::load_halfword(mmu, target_addr),
-                2 => (mmu.read8(target_addr) as i8) as i32 as u32,
+                2 => (mmu.cpu_read8(target_addr) as i8) as i32 as u32,
                 3 => super::load_signed_halfword(mmu, target_addr),
                 _ => 0,
             };
@@ -273,7 +273,7 @@ fn execute_arm(cpu: &mut Arm7Tdmi, mmu: &mut Mmu, instr: u32) -> u32 {
             }
         } else {
             let val = if rd == 15 { pc.wrapping_add(12) } else { cpu.regs[rd] };
-            mmu.write16(target_addr, (val & 0xFFFF) as u16);
+            mmu.cpu_write16(target_addr, (val & 0xFFFF) as u16);
         }
 
         if (!p || w)
