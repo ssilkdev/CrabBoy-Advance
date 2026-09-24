@@ -46,6 +46,8 @@ pub const STATE_V2_MAGIC: &[u8; 4] = b"CBA2";
 /// Marks the v3 tail (ROADMAP M2): every remaining piece of machine state,
 /// so a restored state replays exactly like the original run.
 pub const STATE_V3_MAGIC: &[u8; 4] = b"CBA3";
+/// Marks the optional framebuffer block at the end of a v3 state.
+const STATE_FB_MAGIC: &[u8; 4] = b"CBFB";
 
 pub struct Gba {
     pub cpu: Arm7Tdmi,
@@ -526,7 +528,7 @@ impl Gba {
         }
 
         let mut raw_bytes = Vec::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT * 4);
-        for &pixel in self.mmu.ppu.framebuffer.iter() {
+        for &pixel in self.mmu.ppu.completed_frame.iter() {
             raw_bytes.push((pixel & 0xFF) as u8);         // R
             raw_bytes.push(((pixel >> 8) & 0xFF) as u8);  // G
             raw_bytes.push(((pixel >> 16) & 0xFF) as u8); // B
@@ -542,7 +544,13 @@ impl Gba {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
+    /// The last complete frame (latched at VBlank), for display.
     pub fn get_framebuffer(&self) -> &[u32; SCREEN_WIDTH * SCREEN_HEIGHT] {
+        &self.mmu.ppu.completed_frame
+    }
+
+    /// The live framebuffer, including lines drawn since the last VBlank.
+    pub fn live_framebuffer(&self) -> &[u32; SCREEN_WIDTH * SCREEN_HEIGHT] {
         &self.mmu.ppu.framebuffer
     }
 
@@ -656,6 +664,13 @@ impl Gba {
             }
             None => w.bool(false),
         }
+        // Optional tail: the live framebuffer. `run_frame` stops mid-screen,
+        // so its lower rows are still the previous frame, which the next
+        // VBlank shows; without it they'd come from whatever was on screen
+        // before loading. (The displayed frame is derived, not saved: run-
+        // ahead replaces it, and the timeline must stay byte-identical.)
+        w.bytes(STATE_FB_MAGIC);
+        w.bytes(&self.mmu.ppu.framebuffer.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<u8>>());
         w.buf
     }
 
@@ -860,6 +875,20 @@ impl Gba {
             (None, false) => {}
             _ => return None,
         }
+        // Optional framebuffer tail (see save_state).
+        if r.remaining() > 0 && r.bytes()? == STATE_FB_MAGIC {
+            let src = r.bytes()?;
+            let fb = &mut self.mmu.ppu.framebuffer;
+            if src.len() != fb.len() * 4 {
+                return None;
+            }
+            for (px, b) in fb.iter_mut().zip(src.chunks_exact(4)) {
+                *px = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            }
+        }
+        // Until the next VBlank, show the loaded picture as-is.
+        let ppu = &mut self.mmu.ppu;
+        ppu.completed_frame.copy_from_slice(&ppu.framebuffer[..]);
         Some(())
     }
 

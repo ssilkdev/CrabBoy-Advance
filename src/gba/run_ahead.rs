@@ -67,7 +67,7 @@ impl RunAhead {
                     for _ in 0..n {
                         shadow.run_frame();
                     }
-                    gba.mmu.ppu.framebuffer.copy_from_slice(&shadow.mmu.ppu.framebuffer[..]);
+                    gba.mmu.ppu.completed_frame.copy_from_slice(&shadow.mmu.ppu.completed_frame[..]);
                     return;
                 }
                 self.fallback_reason = Some("shadow core rejected the save state".into());
@@ -75,16 +75,19 @@ impl RunAhead {
             }
         }
 
-        // Single instance: speculate on the real core, then roll back. The
-        // framebuffer is not part of a save state, so after the restore it
-        // still shows the speculative picture.
+        // Single instance: speculate on the real core, then roll back,
+        // keeping the speculative picture on screen.
         let dirty = gba.mmu.cartridge.as_ref().map(|c| c.save.is_dirty());
         gba.set_speculative(true);
         for _ in 0..n {
             gba.run_frame();
         }
         gba.set_speculative(false);
+        // Show the speculative picture: the restore below would otherwise
+        // put back the real (older) one, now that states carry framebuffers.
+        let ahead = gba.mmu.ppu.completed_frame.clone();
         let restored = gba.load_state(&state);
+        gba.mmu.ppu.completed_frame = ahead;
         debug_assert!(restored, "run-ahead: restoring our own state failed");
         // Loading marks the save chip dirty; keep the real flag so run-ahead
         // doesn't rewrite the .sav every second.

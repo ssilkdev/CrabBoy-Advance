@@ -21,8 +21,6 @@ use winit::platform::android::activity::AndroidApp;
 
 use touch::{Buttons, TouchPad};
 
-/// GBA refresh rate (16.78 MHz / 280,896 cycles per frame).
-const GBA_FPS: f64 = 59.7275;
 /// Never emulate more than this many frames per UI update, so a long stall
 /// (app switch, GC pause) does not turn into a burst of fast-forward.
 const MAX_CATCHUP_FRAMES: u32 = 3;
@@ -204,6 +202,7 @@ struct CrabBoyApp {
     rgba: Vec<u8>,
     touch: TouchPad,
     last_tick: Instant,
+    pacer: gba_simulator::frame_pacing::FramePacer,
     frame_accum: f64,
     fast_forward: bool,
     muted: bool,
@@ -270,6 +269,7 @@ impl CrabBoyApp {
             rgba: Vec::with_capacity(240 * 160 * 4),
             touch: TouchPad::default(),
             last_tick: Instant::now(),
+            pacer: Default::default(),
             frame_accum: 0.0,
             fast_forward: false,
             muted: false,
@@ -426,7 +426,10 @@ impl CrabBoyApp {
         } else {
             self.accessibility.active.slow_motion.effective_multiplier() as f64
         };
-        self.frame_accum = (self.frame_accum + dt * GBA_FPS * speed).min(MAX_CATCHUP_FRAMES as f64 * speed.max(1.0));
+        // Lock to a ~60 Hz display: one frame per vsync (see FramePacer).
+        let base_rate = self.pacer.base_rate(Duration::from_secs_f64(dt));
+        let dt = if base_rate == 60.0 && (0.75 / 60.0..1.25 / 60.0).contains(&dt) { 1.0 / 60.0 } else { dt };
+        self.frame_accum = (self.frame_accum + dt * base_rate * speed).min(MAX_CATCHUP_FRAMES as f64 * speed.max(1.0));
         let started = Instant::now();
         while self.frame_accum >= 1.0 {
             game.core.run_frame();

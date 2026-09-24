@@ -72,6 +72,8 @@ pub struct GbPpu {
     window_line: u8,
 
     pub framebuffer: Box<[u32; GB_WIDTH * GB_HEIGHT]>,
+    /// Last complete frame, copied at VBlank (see the GBA PPU).
+    pub completed_frame: Box<[u32; GB_WIDTH * GB_HEIGHT]>,
     pub frame_ready: bool,
     pub frame_counter: u64,
 
@@ -117,6 +119,7 @@ impl GbPpu {
             dot: 0,
             window_line: 0,
             framebuffer: Box::new([0xFF00_0000; GB_WIDTH * GB_HEIGHT]),
+            completed_frame: Box::new([0xFF00_0000; GB_WIDTH * GB_HEIGHT]),
             frame_ready: false,
             frame_counter: 0,
             bg_indices: [0; GB_WIDTH],
@@ -241,6 +244,7 @@ impl GbPpu {
                 if self.ly == GB_HEIGHT as u8 {
                     vblank_irq = true;
                     self.frame_ready = true;
+                    self.completed_frame.copy_from_slice(&self.framebuffer[..]);
                     self.frame_counter += 1;
                     if (self.stat & 0x10) != 0 {
                         stat_irq = true;

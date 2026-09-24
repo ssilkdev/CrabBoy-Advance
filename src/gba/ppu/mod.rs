@@ -68,6 +68,10 @@ pub struct Ppu {
 
     // Front/back RGBA8888 framebuffers (240x160)
     pub framebuffer: Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]>,
+    /// Last complete frame, copied at VBlank. `run_frame` stops on a cycle
+    /// count, not at VBlank, so `framebuffer` is usually part new frame and
+    /// part old: showing it tears wherever the frame stopped.
+    pub completed_frame: Box<[u32; SCREEN_WIDTH * SCREEN_HEIGHT]>,
 
     // Per-layer capture and draw commands (ROADMAP M5)
     pub layer_capture: bool,
@@ -132,6 +136,7 @@ impl Ppu {
             frame_ready: false,
             layer_mask: 0x1F,
             framebuffer: Box::new([0xFF00_0000; SCREEN_WIDTH * SCREEN_HEIGHT]),
+            completed_frame: Box::new([0xFF00_0000; SCREEN_WIDTH * SCREEN_HEIGHT]),
             layer_capture: false,
             layer_buffers: None,
             completed_layers: None,
@@ -378,6 +383,7 @@ impl Ppu {
                     // Entering VBlank
                     self.dispstat |= 1;
                     self.frame_ready = true;
+                    self.completed_frame.copy_from_slice(&self.framebuffer[..]);
                     self.latch_completed_frame();
 
                     if (self.dispstat & (1 << 3)) != 0 {

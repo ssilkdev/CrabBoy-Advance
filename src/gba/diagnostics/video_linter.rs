@@ -64,7 +64,7 @@ impl VideoLinter {
         self.latest_layer_mask = ppu.layer_mask;
 
         // Calculate quick CRC32 of 240x160 RGBA framebuffer
-        let hash = compute_frame_hash(ppu.framebuffer.as_ref());
+        let hash = compute_frame_hash(ppu.completed_frame.as_ref());
 
         if hash == self.last_hash && hash != 0 {
             self.consecutive_identical_frames += 1;
@@ -76,7 +76,7 @@ impl VideoLinter {
         // Calculate average brightness
         let mut total_lum = 0u64;
         let mut black_pixels = 0usize;
-        for &pixel in ppu.framebuffer.iter() {
+        for &pixel in ppu.completed_frame.iter() {
             let r = (pixel & 0xFF) as u64;
             let g = ((pixel >> 8) & 0xFF) as u64;
             let b = ((pixel >> 16) & 0xFF) as u64;

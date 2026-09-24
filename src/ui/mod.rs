@@ -142,6 +142,7 @@ pub struct GbaApp {
 
     // Timing & Metrics
     fps: f64,
+    frame_pacer: crate::frame_pacing::FramePacer,
     emulated_frames: u32,
     fps_timer: Instant,
     last_frame_instant: Instant,
@@ -312,6 +313,7 @@ impl GbaApp {
             show_fps: true,
             screenshot_enhanced: true,
             fps: 60.0,
+            frame_pacer: crate::frame_pacing::FramePacer::default(),
             emulated_frames: 0,
             fps_timer: Instant::now(),
             last_frame_instant: Instant::now(),
@@ -1300,12 +1302,26 @@ impl eframe::App for GbaApp {
         };
         let effective_speed = if is_turbo { 4.0 } else { self.speed_multiplier as f64 * slow };
 
-        // Fixed-Time Accumulator for hardware-accurate 59.7275 Hz / 60 FPS frame pacing
+        // Fixed-time accumulator: frames run at the GBA's real rate, or
+        // locked to a ~60 Hz display (see FramePacer).
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_instant).min(Duration::from_millis(100));
         self.last_frame_instant = now;
 
-        let target_frame_duration = Duration::from_secs_f64(1.0 / (59.7275 * effective_speed));
+        // Lock to the display when it's ~60 Hz: one emulated frame per
+        // refresh. At the GBA's true 59.73 Hz a 60 Hz screen repeats a frame
+        // every ~4 s, which shows up as a hitch while scrolling. The 0.46%
+        // speed-up is inaudible (audio is resampled to match).
+        let base_rate = self.frame_pacer.base_rate(delta);
+        // Locked: one frame per vsync. Bank the display's actual interval
+        // as exactly one frame so timing jitter can't double or skip one.
+        let locked_gap = (0.75 / 60.0..1.25 / 60.0).contains(&delta.as_secs_f64());
+        let delta = if base_rate == 60.0 && locked_gap {
+            Duration::from_secs_f64(1.0 / 60.0)
+        } else {
+            delta
+        };
+        let target_frame_duration = Duration::from_secs_f64(1.0 / (base_rate * effective_speed));
         let mut frames_run = 0;
 
         // The agent may request that emulation freeze while it waits on the
@@ -1378,9 +1394,17 @@ impl eframe::App for GbaApp {
             }
         }
 
-        // Update FPS calculation from true emulated GBA frames
+        // FPS from true emulated frames over a 2 s window. With 0.5 s the
+        // reading jumped between ~58 and 60 purely because a window holds 29
+        // or 30 whole frames.
         let elapsed = self.fps_timer.elapsed().as_secs_f64();
-        if elapsed >= 0.5 {
+        if elapsed >= 2.0 {
+            log::debug!(
+                "pacing: {:.2} emulated fps, display {:?} Hz, base {:.4}",
+                self.emulated_frames as f64 / elapsed,
+                self.frame_pacer.repaint_hz().map(|h| (h * 100.0).round() / 100.0),
+                self.frame_pacer.base_rate_hint()
+            );
             self.fps = (self.emulated_frames as f64) / elapsed;
             self.emulated_frames = 0;
             self.fps_timer = Instant::now();

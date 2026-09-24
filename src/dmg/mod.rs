@@ -182,7 +182,13 @@ impl GameBoy {
         }
     }
 
+    /// The last complete frame (latched at VBlank), for display.
     pub fn get_framebuffer(&self) -> &[u32; GB_WIDTH * GB_HEIGHT] {
+        &self.mmu.ppu.completed_frame
+    }
+
+    /// The live framebuffer, including lines drawn since the last VBlank.
+    pub fn live_framebuffer(&self) -> &[u32; GB_WIDTH * GB_HEIGHT] {
         &self.mmu.ppu.framebuffer
     }
 
@@ -198,14 +204,14 @@ impl GameBoy {
         for y in 0..GB_HEIGHT {
             let src = y * GB_WIDTH;
             let dst = (y + y_off) * gw + x_off;
-            out[dst..dst + GB_WIDTH].copy_from_slice(&self.mmu.ppu.framebuffer[src..src + GB_WIDTH]);
+            out[dst..dst + GB_WIDTH].copy_from_slice(&self.mmu.ppu.completed_frame[src..src + GB_WIDTH]);
         }
         out
     }
 
     pub fn dump_frame_png<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let mut raw = Vec::with_capacity(GB_WIDTH * GB_HEIGHT * 4);
-        for &px in self.mmu.ppu.framebuffer.iter() {
+        for &px in self.mmu.ppu.completed_frame.iter() {
             raw.push((px & 0xFF) as u8);
             raw.push(((px >> 8) & 0xFF) as u8);
             raw.push(((px >> 16) & 0xFF) as u8);

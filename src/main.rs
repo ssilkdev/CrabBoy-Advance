@@ -2,6 +2,7 @@
 //! Supports interactive GUI and headless AI Agent diagnostic execution.
 
 pub mod dmg;
+pub mod frame_pacing;
 pub mod gba;
 pub mod ui;
 

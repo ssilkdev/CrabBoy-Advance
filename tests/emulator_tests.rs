@@ -958,7 +958,7 @@ mod tests {
         let mut ppu = Ppu::new();
 
         // Fill framebuffer with test pattern
-        for (i, p) in ppu.framebuffer.iter_mut().enumerate() {
+        for (i, p) in ppu.completed_frame.iter_mut().enumerate() {
             *p = 0xFF00_0000 | (i as u32 & 0x00FF_FFFF);
         }
 
@@ -977,7 +977,7 @@ mod tests {
         assert!(report.anomalies.iter().any(|a| a.contains("Visual Screen Freeze")));
 
         // Simulate black screen hang
-        ppu.framebuffer.fill(0xFF00_0000); // Fully black (alpha = 255, RGB = 0)
+        ppu.completed_frame.fill(0xFF00_0000); // Fully black (alpha = 255, RGB = 0)
         let mut black_linter = VideoLinter::new();
         for _ in 0..200 {
             black_linter.on_frame(&ppu);
