@@ -206,13 +206,17 @@ earlier when there's spare capacity.
 
 ---
 
+## Performance
+
+- **JIT / recompiler track** (started): staged and bit-identical at each
+  step. Stage 1 (hot-path fixes) landed with +20-53% emulation speed. Plan,
+  measurements and next stages are in `docs/JIT.md`.
+
 ## Out of scope
 
 - **Multiplayer**: rollback netplay and Wireless Adapter emulation.
 - **Nintendo DS support**: roughly a second emulator's worth of work; see
   `docs/DS_FEASIBILITY.md`.
-- **JIT recompiler**: the interpreter already runs at full speed with plenty
-  of headroom, including on Android.
 
 ## Dependency summary
 

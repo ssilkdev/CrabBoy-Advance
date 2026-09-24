@@ -141,17 +141,85 @@ impl VideoLinter {
     }
 }
 
-/// Fast CRC32 hashing for deterministic frame verification
+/// CRC-32 (IEEE) slicing-by-4 tables, built at compile time: `T[0]` is
+/// the classic byte table, `T[k]` advances a byte k more positions.
+const CRC_TABLES: [[u32; 256]; 4] = {
+    let mut t = [[0u32; 256]; 4];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            k += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 256 {
+        let mut s = 1;
+        while s < 4 {
+            let prev = t[s - 1][i];
+            t[s][i] = t[0][(prev & 0xFF) as usize] ^ (prev >> 8);
+            s += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
+/// CRC-32 of the frame's bytes, for deterministic frame verification.
+/// Slicing-by-4 (one step per 32-bit pixel instead of 32 bit steps): same
+/// values as the bitwise version. It runs every frame, so the bitwise loop
+/// was 12-16% of all emulation time.
 fn compute_frame_hash(buffer: &[u32]) -> u32 {
+    let t = &CRC_TABLES;
     let mut crc = 0xFFFF_FFFFu32;
     for &word in buffer {
-        for &b in &word.to_le_bytes() {
-            crc ^= b as u32;
-            for _ in 0..8 {
-                let mask = (crc & 1).wrapping_neg();
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-            }
-        }
+        let x = crc ^ word; // bytes are fed little-endian
+        crc = t[3][(x & 0xFF) as usize]
+            ^ t[2][((x >> 8) & 0xFF) as usize]
+            ^ t[1][((x >> 16) & 0xFF) as usize]
+            ^ t[0][(x >> 24) as usize];
     }
     !crc
+}
+
+#[cfg(test)]
+mod crc_tests {
+    use super::compute_frame_hash;
+
+    /// The old bit-at-a-time implementation, as the reference.
+    fn bitwise(buffer: &[u32]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &word in buffer {
+            for &b in &word.to_le_bytes() {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn table_crc_matches_bitwise_and_standard() {
+        // "123456789" check value for CRC-32/IEEE, as little-endian words.
+        let w = [u32::from_le_bytes(*b"1234"), u32::from_le_bytes(*b"5678")];
+        assert_eq!(compute_frame_hash(&w), bitwise(&w));
+        let mut x = 0x1234_5678u32;
+        let frame: Vec<u32> = (0..240 * 160)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x
+            })
+            .collect();
+        assert_eq!(compute_frame_hash(&frame), bitwise(&frame));
+        assert_eq!(compute_frame_hash(&[]), bitwise(&[]));
+    }
 }

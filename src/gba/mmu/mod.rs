@@ -291,7 +291,33 @@ impl Mmu {
         (addr >> 25) == 0x07
     }
 
+    /// `len` bytes at an aligned `addr` in EWRAM, IWRAM or cartridge ROM
+    /// when reading them has no side effects and no special cases (not the
+    /// RTC/sensor GPIO window, not past the ROM's end), else `None`.
     #[inline(always)]
+    fn plain_memory(&self, addr: u32, len: usize) -> Option<&[u8]> {
+        match addr >> 24 {
+            0x02 => {
+                let off = (addr & 0x3_FFFF) as usize;
+                self.ewram.get(off..off + len)
+            }
+            0x03 => {
+                let off = (addr & 0x7FFF) as usize;
+                self.iwram.get(off..off + len)
+            }
+            0x08..=0x0D => {
+                let cart = self.cartridge.as_ref()?;
+                let off = (addr & 0x01FF_FFFF) as usize;
+                // GPIO (RTC / sensors) lives at 0x080000C4..=0x080000C8.
+                if addr >> 24 == 0x08 && off < 0xCC && off + len > 0xC4 {
+                    return None;
+                }
+                cart.rom.get(off..off + len)
+            }
+            _ => None,
+        }
+    }
+
     pub fn read16_raw(&self, addr: u32) -> u16 {
         // 8-bit save bus: the one byte read appears in every lane
         // (jsmolka save tests #4).
@@ -301,6 +327,11 @@ impl Mmu {
         // Plain aligned bus read. The CPU-visible rotation for misaligned
         // LDRH is 32-bit, so it lives in cpu::load_halfword, not here.
         let aligned = addr & !1;
+        // Fast path for plain memory (instruction fetch, most data): one
+        // slice read instead of two byte-wise region decodes. Same bytes.
+        if let Some(bytes) = self.plain_memory(aligned, 2) {
+            return u16::from_le_bytes([bytes[0], bytes[1]]);
+        }
         let b0 = self.read8_raw(aligned) as u16;
         let b1 = self.read8_raw(aligned + 1) as u16;
         b0 | (b1 << 8)
@@ -312,6 +343,10 @@ impl Mmu {
             return self.read8_raw(addr) as u32 * 0x0101_0101;
         }
         let aligned = addr & !3;
+        if let Some(bytes) = self.plain_memory(aligned, 4) {
+            let val = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            return val.rotate_right((addr & 3) * 8);
+        }
         let b0 = self.read8_raw(aligned) as u32;
         let b1 = self.read8_raw(aligned + 1) as u32;
         let b2 = self.read8_raw(aligned + 2) as u32;
@@ -1034,6 +1069,60 @@ impl Mmu {
             self.bios_latch = BIOS_LATCH_AFTER_SWI;
         } else {
             cpu.trigger_swi(comment);
+        }
+    }
+}
+
+#[cfg(test)]
+mod plain_memory_tests {
+    use super::*;
+
+    /// The byte-by-byte path the fast path bypasses.
+    fn slow16(m: &Mmu, addr: u32) -> u16 {
+        let a = addr & !1;
+        m.read8_raw(a) as u16 | (m.read8_raw(a + 1) as u16) << 8
+    }
+    fn slow32(m: &Mmu, addr: u32) -> u32 {
+        let a = addr & !3;
+        let v = (0..4).fold(0u32, |v, i| v | (m.read8_raw(a + i) as u32) << (8 * i));
+        v.rotate_right((addr & 3) * 8)
+    }
+
+    #[test]
+    fn fast_reads_match_byte_reads_in_every_region() {
+        let mut m = Mmu::new();
+        let mut x = 0x9E37_79B9u32;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        for b in m.ewram.iter_mut() { *b = rnd() as u8; }
+        for b in m.iwram.iter_mut() { *b = rnd() as u8; }
+        // A 1 MiB ROM with an RTC: reads past its end and in the GPIO
+        // window must keep their special cases.
+        let rom: Vec<u8> = (0..0x10_0000).map(|_| rnd() as u8).collect();
+        let mut cart = cartridge::Cartridge::from_bytes(rom);
+        cart.has_rtc = true;
+        m.cartridge = Some(cart);
+        m.current_pc = 0x0800_0000;
+
+        let mut addrs = vec![
+            0x0800_00C0, 0x0800_00C2, 0x0800_00C4, 0x0800_00C6, 0x0800_00C8, 0x0800_00CA,
+            0x080F_FFFC, 0x080F_FFFE, 0x0810_0000, 0x0900_00C4, 0x0D00_0000,
+            0x0203_FFFC, 0x0204_0000, 0x0300_7FFC, 0x0300_8000, 0x0000_0000,
+        ];
+        for _ in 0..20_000 {
+            let region = [0x02u32, 0x03, 0x08, 0x09, 0x0A, 0x0C, 0x0D][(rnd() % 7) as usize];
+            addrs.push(region << 24 | (rnd() & 0x01FF_FFFF));
+        }
+        for a in addrs {
+            for off in 0..4 {
+                let addr = a.wrapping_add(off);
+                assert_eq!(m.read16_raw(addr), slow16(&m, addr), "read16 {addr:#010x}");
+                assert_eq!(m.read32_raw(addr), slow32(&m, addr), "read32 {addr:#010x}");
+            }
         }
     }
 }
