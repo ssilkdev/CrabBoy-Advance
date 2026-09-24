@@ -31,7 +31,12 @@ pub struct VideoHealthReport {
 #[derive(Clone, Debug)]
 pub struct VideoLinter {
     pub frames_monitored: u64,
-    last_hash: u32,
+    /// The last frame seen (empty before the first). Repeats are found by
+    /// comparing with it, which is exact and far cheaper than hashing
+    /// every frame; the CRC is only computed when something needs it.
+    last_frame: Vec<u32>,
+    /// CRC of `last_frame`, once computed.
+    last_hash: Option<u32>,
     consecutive_identical_frames: u32,
     black_screen_frames: u32,
     latest_brightness: f32,
@@ -49,7 +54,8 @@ impl VideoLinter {
     pub fn new() -> Self {
         Self {
             frames_monitored: 0,
-            last_hash: 0,
+            last_frame: Vec::new(),
+            last_hash: None,
             consecutive_identical_frames: 0,
             black_screen_frames: 0,
             latest_brightness: 0.0,
@@ -63,14 +69,21 @@ impl VideoLinter {
         self.frames_monitored += 1;
         self.latest_layer_mask = ppu.layer_mask;
 
-        // Calculate quick CRC32 of 240x160 RGBA framebuffer
-        let hash = compute_frame_hash(ppu.completed_frame.as_ref());
-
-        if hash == self.last_hash && hash != 0 {
-            self.consecutive_identical_frames += 1;
+        // Screen freeze tracking. A repeated frame counts unless its CRC is
+        // 0 (as before, when the CRC alone decided "identical").
+        let frame = ppu.completed_frame.as_ref();
+        if self.last_frame.as_slice() == frame {
+            let crc = *self.last_hash.get_or_insert_with(|| compute_frame_hash(frame));
+            if crc != 0 {
+                self.consecutive_identical_frames += 1;
+            } else {
+                self.consecutive_identical_frames = 0;
+            }
         } else {
             self.consecutive_identical_frames = 0;
-            self.last_hash = hash;
+            self.last_frame.clear();
+            self.last_frame.extend_from_slice(frame);
+            self.last_hash = None;
         }
 
         // Calculate average brightness
@@ -127,7 +140,11 @@ impl VideoLinter {
         VideoHealthReport {
             grade,
             frames_monitored: self.frames_monitored,
-            latest_frame_crc32: self.last_hash,
+            latest_frame_crc32: match self.last_hash {
+                Some(h) => h,
+                None if self.last_frame.is_empty() => 0,
+                None => compute_frame_hash(&self.last_frame),
+            },
             average_brightness: self.latest_brightness,
             frozen_frame_count: self.consecutive_identical_frames,
             active_sprites: self.latest_sprite_count,

@@ -164,7 +164,7 @@ impl BusTiming {
                 (_, false) => t.n16[region],
                 (_, true) => t.s16[region],
             };
-            if t.prefetch && !is_rom {
+            if t.prefetch && !is_rom && !self.prefetch_settled() {
                 // Off the ROM bus: the prefetcher keeps working.
                 self.prefetch_idle(cost);
             }
@@ -173,6 +173,14 @@ impl BusTiming {
         self.waits.set(self.waits.get() + cost - 1);
         self.clock.set(self.clock.get() + cost as u64);
         cost
+    }
+
+    /// Whether `prefetch_idle` would change nothing: the buffer is full or
+    /// idle (no ROM code fetched yet). Lets hot callers skip the call.
+    #[inline(always)]
+    fn prefetch_settled(&self) -> bool {
+        let pf = self.prefetch.get();
+        pf.count >= PREFETCH_CAPACITY || pf.head == 0
     }
 
     /// Cycles a DMA transfer of `count` units keeps the CPU off the bus:
@@ -191,7 +199,7 @@ impl BusTiming {
     /// Internal (I) cycles also let the prefetcher run.
     #[inline(always)]
     pub fn idle(&self, cycles: u32) {
-        if self.tables.prefetch {
+        if self.tables.prefetch && !self.prefetch_settled() {
             self.prefetch_idle(cycles);
         }
     }

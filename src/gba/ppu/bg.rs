@@ -40,6 +40,18 @@ pub fn render_text_bg(
     };
     let scrolled_y = (sample_y + vofs as u32) % map_height;
 
+    // Without horizontal mosaic, the 8 (or fewer) pixels of a line that
+    // fall in one map tile share its map entry and tile row: read those
+    // once per tile instead of once per pixel. Same pixels as the general
+    // loop below (tests: render_text_bg_fast_path_matches).
+    if !matches!(mosaic, Some((h, _)) if h > 1) {
+        render_text_bg_tiles(
+            bg_idx, priority, char_base, is_8bpp, screen_base, screen_size, map_width,
+            scrolled_y, hofs, vram, palette_ram, line_buf,
+        );
+        return;
+    }
+
     for x in 0..240 {
         let sample_x = match mosaic {
             Some((h, _)) if h > 1 => (x as u32) - ((x as u32) % h),
@@ -115,6 +127,88 @@ pub fn render_text_bg(
                 }
             }
         }
+    }
+}
+
+/// `render_text_bg` without horizontal mosaic, one map tile at a time.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn render_text_bg_tiles(
+    bg_idx: u8,
+    priority: u8,
+    char_base: usize,
+    is_8bpp: bool,
+    screen_base: usize,
+    screen_size: u16,
+    map_width: u32,
+    scrolled_y: u32,
+    hofs: u16,
+    vram: &[u8],
+    palette_ram: &[u8],
+    line_buf: &mut [Pixel; 240],
+) {
+    let block_y = scrolled_y / 256;
+    let tile_y = (scrolled_y % 256) / 8;
+    let row_in_tile = (scrolled_y % 8) as usize;
+    let mut x = 0usize;
+    while x < 240 {
+        let scrolled_x = (x as u32 + hofs as u32) % map_width;
+        let first_px = (scrolled_x % 8) as usize;
+        let run = (8 - first_px).min(240 - x);
+
+        let block_x = scrolled_x / 256;
+        let block_offset = match screen_size {
+            0 => 0,
+            1 => block_x * 2048,
+            2 => block_y * 2048,
+            3 => (block_y * 2 + block_x) * 2048,
+            _ => 0,
+        };
+        let tile_x = (scrolled_x % 256) / 8;
+        let map_entry_addr = screen_base + block_offset as usize + ((tile_y * 32 + tile_x) * 2) as usize;
+        if map_entry_addr + 1 >= vram.len() {
+            x += run;
+            continue;
+        }
+        let map_entry = (vram[map_entry_addr] as u16) | ((vram[map_entry_addr + 1] as u16) << 8);
+        let tile_num = (map_entry & 0x3FF) as usize;
+        let hflip = (map_entry & (1 << 10)) != 0;
+        let vflip = (map_entry & (1 << 11)) != 0;
+        let pal_num = ((map_entry >> 12) & 0x0F) as usize;
+        let py = if vflip { 7 - row_in_tile } else { row_in_tile };
+
+        for k in 0..run {
+            let px = if hflip { 7 - (first_px + k) } else { first_px + k };
+            let (color_idx, is_trans) = if is_8bpp {
+                let tile_addr = char_base + tile_num * 64 + py * 8 + px;
+                if tile_addr < vram.len() {
+                    let idx = vram[tile_addr];
+                    (idx as usize, idx == 0)
+                } else {
+                    (0, true)
+                }
+            } else {
+                let tile_addr = char_base + tile_num * 32 + py * 4 + (px / 2);
+                if tile_addr < vram.len() {
+                    let byte = vram[tile_addr];
+                    let idx = if px.is_multiple_of(2) { byte & 0x0F } else { (byte >> 4) & 0x0F };
+                    (pal_num * 16 + (idx as usize), idx == 0)
+                } else {
+                    (0, true)
+                }
+            };
+            if !is_trans {
+                let pal_addr = color_idx * 2;
+                if pal_addr + 1 < palette_ram.len() {
+                    let color = (palette_ram[pal_addr] as u16) | ((palette_ram[pal_addr + 1] as u16) << 8);
+                    let slot = &mut line_buf[x + k];
+                    if priority < slot.priority || slot.is_transparent {
+                        *slot = Pixel { color, layer: bg_idx, priority, is_transparent: false, is_obj_alpha: false };
+                    }
+                }
+            }
+        }
+        x += run;
     }
 }
 
@@ -377,5 +471,46 @@ mod mosaic_tests {
         render_bitmap_bg(3, false, 0, &vram, &palette, 0, None, &mut line_buf);
         assert_eq!(line_buf[5].color, 5);
         assert_eq!(line_buf[9].color, 9);
+    }
+}
+
+#[cfg(test)]
+mod text_bg_fast_path_tests {
+    use super::*;
+
+    /// `render_text_bg` with a 1-pixel mosaic takes the general per-pixel
+    /// loop (the fast path is skipped only for h > 1), so compare the fast
+    /// path against a copy of that loop driven through mosaic Some((1, 1)).
+    #[test]
+    fn render_text_bg_fast_path_matches() {
+        let mut x = 0x1234_5678u32;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let mut vram = vec![0u8; 0x18000];
+        let mut pal = vec![0u8; 0x400];
+        for _ in 0..200 {
+            for b in vram.iter_mut() { *b = rnd() as u8; }
+            for b in pal.iter_mut() { *b = rnd() as u8; }
+            let bgcnt = rnd() as u16;
+            let (hofs, vofs) = ((rnd() & 0x1FF) as u16, (rnd() & 0x1FF) as u16);
+            for y in [0u32, 1, 7, 8, 100, 159] {
+                let mut fast = [Pixel::default(); 240];
+                let mut slow = [Pixel::default(); 240];
+                render_text_bg(0, y, 0, bgcnt, hofs, vofs, &vram, &pal, None, &mut fast);
+                render_text_bg(0, y, 0, bgcnt, hofs, vofs, &vram, &pal, Some((1, 1)), &mut slow);
+                for i in 0..240 {
+                    let (f, s) = (fast[i], slow[i]);
+                    assert_eq!(
+                        (f.color, f.layer, f.priority, f.is_transparent),
+                        (s.color, s.layer, s.priority, s.is_transparent),
+                        "bgcnt {bgcnt:#06x} hofs {hofs} vofs {vofs} y {y} x {i}"
+                    );
+                }
+            }
+        }
     }
 }

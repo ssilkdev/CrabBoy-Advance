@@ -102,6 +102,22 @@ impl Default for Ppu {
     }
 }
 
+/// BGR555 -> framebuffer RGBA (0xFF_BB_GG_RR), the same expansion as
+/// `bgr555_to_rgb888`, precomputed for all 32768 colours.
+static BGR555_TO_RGBA: [u32; 32768] = {
+    let mut t = [0u32; 32768];
+    let mut c = 0;
+    while c < 32768 {
+        let r5 = (c & 0x1F) as u32;
+        let g5 = ((c >> 5) & 0x1F) as u32;
+        let b5 = ((c >> 10) & 0x1F) as u32;
+        let (r, g, b) = ((r5 << 3) | (r5 >> 2), (g5 << 3) | (g5 >> 2), (b5 << 3) | (b5 >> 2));
+        t[c] = 0xFF00_0000 | (b << 16) | (g << 8) | r;
+        c += 1;
+    }
+    t
+};
+
 impl Ppu {
     pub fn new() -> Self {
         Self {
@@ -630,6 +646,21 @@ impl Ppu {
 
         let row_offset = (y as usize) * SCREEN_WIDTH;
 
+        // BG layers lowest priority first (priority 3..0; lower index first
+        // within a priority). Layers not drawn this line are all
+        // transparent, so including them changes nothing.
+        let mut bg_order = [0usize; 4];
+        let mut bg_count = 0;
+        for prio in (0..=3u8).rev() {
+            for i in 0..4 {
+                if (self.bgcnt[i] & 3) as u8 == prio {
+                    debug_assert!(bg_layer_bufs[i].iter().all(|p| p.is_transparent || p.priority == prio));
+                    bg_order[bg_count] = i;
+                    bg_count += 1;
+                }
+            }
+        }
+
         // Merge layers per pixel
         for x in 0..SCREEN_WIDTH {
             // Determine window mask
@@ -650,16 +681,18 @@ impl Ppu {
                 top = obj_buf[x];
             }
 
-            // Check BG layers (in ascending priority, 3 down to 0)
-            for prio in (0..=3).rev() {
-                for bg_idx in 0..4 {
-                    if (win_mask & (1 << bg_idx)) != 0 && !bg_layer_bufs[bg_idx][x].is_transparent && bg_layer_bufs[bg_idx][x].priority == prio {
-                        if bg_layer_bufs[bg_idx][x].priority < top.priority {
-                            bot = top;
-                            top = bg_layer_bufs[bg_idx][x];
-                        } else if bg_layer_bufs[bg_idx][x].priority < bot.priority {
-                            bot = bg_layer_bufs[bg_idx][x];
-                        }
+            // Check BG layers (in ascending priority, 3 down to 0). Every
+            // pixel of a BG line has that BG's priority, so walking the
+            // drawn layers in `bg_order` visits them exactly as the old
+            // "for prio 3..0, for bg 0..4, if pixel.priority == prio" did.
+            for &bg_idx in &bg_order[..bg_count] {
+                let pix = &bg_layer_bufs[bg_idx][x];
+                if (win_mask & (1 << bg_idx)) != 0 && !pix.is_transparent {
+                    if pix.priority < top.priority {
+                        bot = top;
+                        top = *pix;
+                    } else if pix.priority < bot.priority {
+                        bot = *pix;
                     }
                 }
             }
@@ -671,9 +704,8 @@ impl Ppu {
                 top.color
             };
 
-            let (r, g, b) = bgr555_to_rgb888(final_bgr555);
             // Format: 0xFF_AA_BB_GG_RR in little-endian (or RGBA 0xFF_BB_GG_RR)
-            self.framebuffer[row_offset + x] = 0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+            self.framebuffer[row_offset + x] = BGR555_TO_RGBA[(final_bgr555 & 0x7FFF) as usize];
         }
 
         if self.layer_capture {
