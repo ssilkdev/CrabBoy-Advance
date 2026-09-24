@@ -163,6 +163,22 @@ pub struct AppConfig {
     pub audio: AudioConfig,
     /// Accessibility configuration and per-game profiles (ROADMAP M10).
     pub accessibility: crate::gba::accessibility::AccessibilityStore,
+    /// Periodic auto-save into a 3-file rotation, separate from the slots.
+    pub autosave: AutoSaveConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutoSaveConfig {
+    pub enabled: bool,
+    /// Minutes of play between auto-saves (1-60).
+    pub interval_minutes: u32,
+}
+
+impl Default for AutoSaveConfig {
+    fn default() -> Self {
+        Self { enabled: true, interval_minutes: crate::autosave::DEFAULT_INTERVAL_MINUTES }
+    }
 }
 
 impl Default for AppConfig {
@@ -176,6 +192,7 @@ impl Default for AppConfig {
             render: RenderConfig::default(),
             audio: AudioConfig::default(),
             accessibility: Default::default(),
+            autosave: AutoSaveConfig::default(),
         }
     }
 }

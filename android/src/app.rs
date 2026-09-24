@@ -227,6 +227,11 @@ struct CrabBoyApp {
     /// Screen rotation preference, saved to `orientation.txt`.
     orientation: Orientation,
     orientation_path: PathBuf,
+    /// Periodic auto-saves (3-file rotation in `states/`), separate from
+    /// the manual state. Settings saved to `autosave.txt`.
+    autosaver: gba_simulator::autosave::AutoSaver,
+    autosave_path: PathBuf,
+    autosave_menu: bool,
 }
 
 impl CrabBoyApp {
@@ -258,6 +263,9 @@ impl CrabBoyApp {
             .map(|s| Orientation::parse(&s))
             .unwrap_or_default();
         platform::set_orientation(orientation.activity_info());
+        let autosave_path = files_dir.join("autosave.txt");
+        let (as_on, as_min) = crate::autosave_settings::parse(&std::fs::read_to_string(&autosave_path).unwrap_or_default());
+        let autosaver = gba_simulator::autosave::AutoSaver::new(states_dir.clone(), as_on, as_min);
         let mut app = Self {
             roms_dir,
             states_dir,
@@ -289,6 +297,9 @@ impl CrabBoyApp {
             applied_zoom: 0.0,
             orientation,
             orientation_path,
+            autosaver,
+            autosave_path,
+            autosave_menu: false,
         };
         app.refresh_library();
         app
@@ -355,6 +366,7 @@ impl CrabBoyApp {
                 self.fast_forward = false;
                 self.frame_accum = 0.0;
                 self.last_tick = Instant::now();
+                self.autosaver.restart_timer();
             }
             Err(e) => self.toast(format!("Could not load {}: {e}", display_name(&path))),
         }
@@ -394,6 +406,38 @@ impl CrabBoyApp {
         self.toast(if ok { "State loaded" } else { "Saved state is incompatible" });
     }
 
+    /// Name the auto-saves are filed under: the ROM file's stem.
+    fn autosave_key(&self) -> Option<String> {
+        let g = self.game.as_ref()?;
+        Some(g.rom_path.file_stem()?.to_string_lossy().to_string())
+    }
+
+    fn write_autosave(&mut self) -> Result<usize, String> {
+        let key = self.autosave_key().ok_or("No game running")?;
+        let data = self.game.as_ref().map(|g| g.core.save_state()).unwrap_or_default();
+        self.autosaver.write(&key, &data).map_err(|e| format!("Auto-save failed: {e}"))
+    }
+
+    fn load_autosave(&mut self, number: usize) {
+        let Some(key) = self.autosave_key() else { return };
+        let Ok(data) = self.autosaver.read(&key, number) else {
+            self.toast("That auto-save is gone");
+            return;
+        };
+        let ok = self.game.as_mut().is_some_and(|g| g.core.load_state(&data));
+        if ok {
+            self.autosaver.restart_timer();
+        }
+        self.toast(if ok { format!("Loaded auto-save {number}") } else { "Auto-save is incompatible".into() });
+    }
+
+    fn store_autosave_settings(&self) {
+        let body = crate::autosave_settings::format(self.autosaver.enabled, self.autosaver.interval_minutes());
+        if let Err(e) = std::fs::write(&self.autosave_path, body) {
+            log::warn!("Could not save auto-save settings: {e}");
+        }
+    }
+
     /// Poll the Java side for a freshly imported ROM or import error.
     fn poll_imports(&mut self) {
         if let Some(err) = platform::take_import_error() {
@@ -410,8 +454,15 @@ impl CrabBoyApp {
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
+        let playing = self.game.is_some() && !(self.menu_open || self.accessibility_menu || self.autosave_menu);
+        if self.autosaver.tick(Duration::from_secs_f64(dt), playing) {
+            match self.write_autosave() {
+                Ok(_) => self.toast("Auto-saved"),
+                Err(e) => self.toast(e),
+            }
+        }
         let Some(game) = self.game.as_mut() else { return };
-        if self.menu_open || self.accessibility_menu {
+        if self.menu_open || self.accessibility_menu || self.autosave_menu {
             self.frame_accum = 0.0;
             return;
         }
@@ -631,6 +682,9 @@ impl CrabBoyApp {
                             self.load_state();
                             self.menu_open = false;
                         }
+                        if ui.button("Auto-saves...").clicked() {
+                            self.autosave_menu = true;
+                        }
                         let ff = if self.fast_forward { "Fast forward: ON" } else { "Fast forward: off" };
                         if ui.button(ff).clicked() {
                             self.fast_forward = !self.fast_forward;
@@ -723,6 +777,96 @@ impl CrabBoyApp {
 impl CrabBoyApp {
     /// Accessibility settings sheet (ROADMAP M10). Every change is saved for
     /// the running game right away.
+    fn autosave_ui(&mut self, ctx: &egui::Context) {
+        use gba_simulator::autosave::{MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, ROTATION};
+        let list = self.autosave_key().map(|k| self.autosaver.list(&k)).unwrap_or_default();
+        let mut load = None;
+        let mut save_now = false;
+        let mut changed = false;
+        let mut close = false;
+        egui::Window::new("Auto-saves")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(280.0);
+                let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                    ui.vertical_centered_justified(|ui| {
+                        ui.label(RichText::new("Auto-saves").strong());
+                        ui.separator();
+                        for n in 1..=ROTATION {
+                            match list.iter().find(|e| e.number == n) {
+                                Some(e) => {
+                                    let newest = list.first().map(|f| f.number) == Some(n);
+                                    let label = format!(
+                                        "Load auto-save {n} · {}{}",
+                                        e.age_label(),
+                                        if newest { " (newest)" } else { "" }
+                                    );
+                                    if ui.button(label).clicked() {
+                                        load = Some(n);
+                                    }
+                                }
+                                None => {
+                                    ui.add_enabled(false, egui::Button::new(format!("Auto-save {n}: empty")));
+                                }
+                            }
+                        }
+                        if ui.button("Auto-save now").clicked() {
+                            save_now = true;
+                        }
+                        ui.separator();
+                        let on = if self.autosaver.enabled { "Auto-save: ON" } else { "Auto-save: off" };
+                        if ui.button(on).clicked() {
+                            self.autosaver.enabled = !self.autosaver.enabled;
+                            changed = true;
+                        }
+                        let m = self.autosaver.interval_minutes();
+                        ui.add_enabled_ui(self.autosaver.enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(m > MIN_INTERVAL_MINUTES, egui::Button::new("  −  ")).clicked() {
+                                    self.autosaver.set_interval_minutes(m - 1);
+                                    changed = true;
+                                }
+                                ui.label(format!("Every {} min", self.autosaver.interval_minutes()));
+                                if ui.add_enabled(m < MAX_INTERVAL_MINUTES, egui::Button::new("  +  ")).clicked() {
+                                    self.autosaver.set_interval_minutes(m + 1);
+                                    changed = true;
+                                }
+                            });
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "Keeps the last {ROTATION}; the oldest is replaced. Separate from Save state."
+                            ))
+                            .weak(),
+                        );
+                        if ui.button("Back").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if changed {
+            self.store_autosave_settings();
+        }
+        if save_now {
+            match self.write_autosave() {
+                Ok(n) => self.toast(format!("Auto-saved (auto-save {n})")),
+                Err(e) => self.toast(e),
+            }
+        }
+        if let Some(n) = load {
+            self.load_autosave(n);
+            self.autosave_menu = false;
+        }
+        if close {
+            self.autosave_menu = false;
+        }
+    }
+
     fn accessibility_ui(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut changed = false;
@@ -856,7 +1000,13 @@ impl eframe::App for CrabBoyApp {
         let back = gamepad::take_back_request() || ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let pad_menu = gamepad::take_menu_request();
         if (back || pad_menu) && self.screen == Screen::Playing {
-            self.menu_open = !self.menu_open;
+            if self.autosave_menu {
+                // Back from the auto-save sheet returns to the menu.
+                self.autosave_menu = false;
+                self.menu_open = true;
+            } else {
+                self.menu_open = !self.menu_open;
+            }
         }
 
         match self.screen {
@@ -869,7 +1019,7 @@ impl eframe::App for CrabBoyApp {
                     Handedness::RightHand => touch::Hand::Right,
                 };
                 let layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
-                let touch = if self.menu_open || self.accessibility_menu {
+                let touch = if self.menu_open || self.accessibility_menu || self.autosave_menu {
                     self.touch.clear();
                     Buttons::default()
                 } else {
@@ -896,6 +1046,10 @@ impl eframe::App for CrabBoyApp {
                 if self.accessibility_menu {
                     self.menu_open = false;
                     self.accessibility_ui(ctx);
+                }
+                if self.autosave_menu {
+                    self.menu_open = false;
+                    self.autosave_ui(ctx);
                 }
             }
             Screen::Playing => self.screen = Screen::Library,
@@ -939,3 +1093,4 @@ fn is_rom(p: &Path) -> bool {
 fn display_name(p: &Path) -> String {
     p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
 }
+

@@ -31,16 +31,18 @@ pub enum Page {
     Hd,
     Screen,
     Speed,
+    Saves,
     Sound,
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [Page::Picture, Page::Enhance, Page::Hd, Page::Screen, Page::Speed, Page::Sound];
+    pub const ALL: [Page; 7] =
+        [Page::Picture, Page::Enhance, Page::Hd, Page::Screen, Page::Speed, Page::Sound, Page::Saves];
 
     /// Sidebar groups, in order.
     const SECTIONS: [(&'static str, &'static [Page]); 3] = [
         ("DISPLAY", &[Page::Picture, Page::Enhance, Page::Hd, Page::Screen]),
-        ("EMULATION", &[Page::Speed]),
+        ("EMULATION", &[Page::Speed, Page::Saves]),
         ("AUDIO", &[Page::Sound]),
     ];
 
@@ -51,6 +53,7 @@ impl Page {
             Page::Hd => "🖼 HD & Widescreen",
             Page::Screen => "🖥 Screen & Frame",
             Page::Speed => "⏱ Speed & Latency",
+            Page::Saves => "💾 Auto-save",
             Page::Sound => "🔊 Sound",
         }
     }
@@ -62,6 +65,7 @@ impl Page {
             Page::Hd => "High-res rendering, sprite packs and widescreen.",
             Page::Screen => "Size, aspect ratio, bezel and screenshots.",
             Page::Speed => "Game speed, slow motion and input latency.",
+            Page::Saves => "Periodic saves, kept apart from your save slots.",
             Page::Sound => "Volume, surround and bass.",
         }
     }
@@ -107,6 +111,11 @@ pub struct Settings<'a> {
     pub bass: &'a mut f32,
     pub width: &'a mut f32,
     pub hw_channels: usize,
+
+    // Saves
+    pub autosave_enabled: &'a mut bool,
+    /// Minutes of play between auto-saves.
+    pub autosave_minutes: &'a mut u32,
 }
 
 /// Things the app has to act on after the window is drawn.
@@ -366,6 +375,7 @@ impl SettingsWindow {
                             Page::Hd => hd(ui, &mut s, &mut act),
                             Page::Screen => screen_page(ui, &mut s, &mut act),
                             Page::Speed => speed_page(ui, &mut s, &mut act),
+                            Page::Saves => saves_page(ui, &mut s, &mut act),
                             Page::Sound => sound_page(ui, &mut s, &mut act),
                         });
                     });
@@ -629,6 +639,43 @@ fn speed_page(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions
     if open_button(ui, "♿ Accessibility…") {
         act.open_accessibility = true;
     }
+}
+
+fn saves_page(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {
+    use crate::autosave::{MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, ROTATION};
+    section(ui, "Auto-save");
+    let enabled = &mut *s.autosave_enabled;
+    row(
+        ui,
+        "Auto-save",
+        "Saves the game state on a timer. Only play time counts: paused time and menus don't.",
+        |ui| {
+            act.changed |= ui.checkbox(enabled, "Enabled").changed();
+        },
+    );
+    let on = *enabled;
+    let minutes = &mut *s.autosave_minutes;
+    ui.add_enabled_ui(on, |ui| {
+        row(ui, "Every", "", |ui| {
+            act.changed |= segmented(ui, minutes, &[(1, "1 min"), (2, "2 min"), (5, "5 min"), (10, "10 min"), (15, "15 min")]);
+        });
+        row(ui, "Custom", "Any interval from 1 to 60 minutes. The default is 5.", |ui| {
+            act.changed |= ui
+                .add(
+                    egui::Slider::new(minutes, MIN_INTERVAL_MINUTES..=MAX_INTERVAL_MINUTES)
+                        .suffix(" min")
+                        .clamping(egui::SliderClamping::Always),
+                )
+                .changed();
+        });
+    });
+    ui.separator();
+    section(ui, "How it works");
+    ui.label(format!(
+        "The last {ROTATION} auto-saves are kept for each game. When all {ROTATION} are used, the oldest is \
+         replaced. They're stored with your saves, stay after you quit, and never touch your manual save slots."
+    ));
+    ui.label(RichText::new("Load them from File › Auto-saves, or from the Save states window.").weak());
 }
 
 fn sound_page(ui: &mut egui::Ui, s: &mut Settings<'_>, act: &mut SettingsActions) {

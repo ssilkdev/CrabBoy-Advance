@@ -25,6 +25,11 @@ impl Default for SaveStateManager {
 }
 
 impl SaveStateManager {
+    /// Directory the slot files live in.
+    pub fn saves_dir(&self) -> &Path {
+        &self.saves_dir
+    }
+
     pub fn new<P: AsRef<Path>>(saves_dir: P) -> Self {
         let path = saves_dir.as_ref().to_path_buf();
         let _ = fs::create_dir_all(&path);

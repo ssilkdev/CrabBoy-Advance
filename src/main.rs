@@ -1,6 +1,7 @@
 //! Game Boy Advance Simulator - Application Entry Point
 //! Supports interactive GUI and headless AI Agent diagnostic execution.
 
+pub mod autosave;
 pub mod dmg;
 pub mod frame_pacing;
 pub mod gba;

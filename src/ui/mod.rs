@@ -119,6 +119,8 @@ pub struct GbaApp {
     pub run_ahead: crate::gba::run_ahead::RunAhead,
     pub run_ahead_config: config::RunAheadSettings,
     pub save_sync_config: config::SaveSyncConfig,
+    /// Periodic auto-save rotation (separate from the manual slots).
+    pub autosaver: crate::autosave::AutoSaver,
     pub frame_blend_mode: crate::gba::frame_blend::FrameBlendMode,
     pub custom_shader_path: Option<PathBuf>,
     pub hd_mode7_config: crate::gba::ppu::hd_mode7::HdMode7Config,
@@ -292,6 +294,11 @@ impl GbaApp {
             run_ahead,
             run_ahead_config,
             save_sync_config: config.save_sync.clone(),
+            autosaver: crate::autosave::AutoSaver::new(
+                "saves",
+                config.autosave.enabled,
+                config.autosave.interval_minutes,
+            ),
             frame_blend_mode,
             custom_shader_path: config.render.custom_shader_path.clone(),
             hd_mode7_config,
@@ -379,6 +386,7 @@ impl GbaApp {
                     self.console = ConsoleKind::GameBoy;
                     self.loaded_rom_name = name;
                     self.rewind_manager.clear();
+                    self.autosaver.restart_timer();
                     self.set_toast(format!("Loaded {} ({}): {}", self.loaded_rom_name, model, title));
                 }
                 Err(e) => self.set_toast(format!("Failed to load GB ROM: {}", e)),
@@ -400,6 +408,7 @@ impl GbaApp {
                         self.console = ConsoleKind::Gba;
                         self.loaded_rom_name = name;
                         self.rewind_manager.clear();
+                        self.autosaver.restart_timer();
                         self.widescreen_config = self.gba.widescreen_config().clone();
                         self.update_run_ahead_for_rom();
                         if let Some(cart) = self.gba.mmu.cartridge.as_ref() {
@@ -463,6 +472,33 @@ impl GbaApp {
             Some(ref mut gb) => self.save_manager.load_slot(slot, gb, &name),
             None => self.save_manager.load_slot(slot, &mut self.gba, &name),
         }
+    }
+
+    /// Write an auto-save into the rotation now.
+    pub fn write_autosave(&mut self) -> Result<usize, String> {
+        let data = match self.gb {
+            Some(ref gb) => crate::ui::emu_core::SnapshotCore::save_state(gb),
+            None => crate::ui::emu_core::SnapshotCore::save_state(&self.gba),
+        };
+        let name = self.loaded_rom_name.clone();
+        let n = self.autosaver.write(&name, &data).map_err(|e| format!("Auto-save failed: {e}"))?;
+        self.sync_saves();
+        Ok(n)
+    }
+
+    /// Restore auto-save `number` (1-3).
+    pub fn load_autosave(&mut self, number: usize) -> Result<(), String> {
+        let name = self.loaded_rom_name.clone();
+        let data = self.autosaver.read(&name, number).map_err(|_| "That auto-save is gone".to_string())?;
+        let ok = match self.gb {
+            Some(ref mut gb) => crate::ui::emu_core::SnapshotCore::load_state(gb, &data),
+            None => crate::ui::emu_core::SnapshotCore::load_state(&mut self.gba, &data),
+        };
+        if !ok {
+            return Err("Auto-save is incompatible with this version".into());
+        }
+        self.autosaver.restart_timer();
+        Ok(())
     }
 
     fn record_rewind_frame(&mut self) {
@@ -569,6 +605,7 @@ impl GbaApp {
             "as the default for all games".into()
         };
         let run_ahead_fallback = self.run_ahead.fallback_reason.clone();
+        let mut autosave_minutes = self.autosaver.interval_minutes();
         let act = self.settings_window.show(
             ctx,
             settings_window::Settings {
@@ -602,8 +639,13 @@ impl GbaApp {
                 bass: &mut bass,
                 width: &mut width,
                 hw_channels,
+                autosave_enabled: &mut self.autosaver.enabled,
+                autosave_minutes: &mut autosave_minutes,
             },
         );
+        if autosave_minutes != self.autosaver.interval_minutes() {
+            self.autosaver.set_interval_minutes(autosave_minutes);
+        }
         let out = self.active_audio_output();
         out.muted = muted;
         out.volume = volume;
@@ -725,6 +767,10 @@ impl GbaApp {
             keyboard: self.key_bindings.clone(),
             run_ahead: self.run_ahead_config.clone(),
             save_sync: self.save_sync_config.clone(),
+            autosave: config::AutoSaveConfig {
+                enabled: self.autosaver.enabled,
+                interval_minutes: self.autosaver.interval_minutes(),
+            },
             render: config::RenderConfig {
                 filter: match self.display_filter {
                     DisplayFilter::Crisp => "crisp",
@@ -1164,6 +1210,7 @@ impl eframe::App for GbaApp {
             if i.key_pressed(kb.reset) && i.modifiers.ctrl {
                 self.reset_active();
                 self.rewind_manager.clear();
+                self.autosaver.restart_timer();
                 self.set_toast("Reset Emulation");
             }
             if i.key_pressed(kb.frame_step) && self.is_paused {
@@ -1370,6 +1417,17 @@ impl eframe::App for GbaApp {
             self.frame_accumulator = Duration::ZERO;
         }
 
+        // Auto-save counts real play time only (not paused, rewinding or
+        // frozen on the agent).
+        let has_game = self.gb.is_some() || self.gba.mmu.cartridge.is_some();
+        let playing = has_game && !self.is_paused && !ai_stall && !self.is_rewinding;
+        if self.autosaver.tick(delta, playing) {
+            match self.write_autosave() {
+                Ok(_) => self.set_toast("💾 Auto-saved"),
+                Err(e) => self.set_toast(e),
+            }
+        }
+
         // Advance the agent's action cursor by the frames actually emulated.
         // Rewound frames are deliberately excluded.
         if self.ai_agent.enabled && !self.is_rewinding {
@@ -1481,6 +1539,39 @@ impl eframe::App for GbaApp {
                             ui.close_menu();
                             self.show_save_manager_dialog = true;
                         }
+                        let auto_label = if self.autosaver.enabled {
+                            format!("🕘 Auto-saves (every {} min)", self.autosaver.interval_minutes())
+                        } else {
+                            "🕘 Auto-saves (off)".to_string()
+                        };
+                        ui.menu_button(auto_label, |ui| {
+                            let list = if has_rom { self.autosaver.list(&self.loaded_rom_name) } else { Vec::new() };
+                            if list.is_empty() {
+                                ui.label(RichText::new("No auto-saves for this game yet").weak());
+                            }
+                            for e in &list {
+                                if ui.button(format!("📥 Load auto-save {} · {}", e.number, e.age_label())).clicked() {
+                                    ui.close_menu();
+                                    let n = e.number;
+                                    match self.load_autosave(n) {
+                                        Ok(()) => self.set_toast(format!("Loaded auto-save {n}")),
+                                        Err(err) => self.set_toast(err),
+                                    }
+                                }
+                            }
+                            ui.separator();
+                            if ui.add_enabled(has_rom, egui::Button::new("💾 Auto-save now")).clicked() {
+                                ui.close_menu();
+                                match self.write_autosave() {
+                                    Ok(n) => self.set_toast(format!("Auto-saved (auto-save {n})")),
+                                    Err(err) => self.set_toast(err),
+                                }
+                            }
+                            if ui.button("⚙ Auto-save settings…").clicked() {
+                                ui.close_menu();
+                                self.settings_window.open_at(settings_window::Page::Saves);
+                            }
+                        });
                         ui.separator();
                         if ui.add_enabled(has_rom, egui::Button::new("🔋 Write battery save now")).on_hover_text("Saves are written automatically; this forces it right away.").clicked() {
                             ui.close_menu();
@@ -1523,6 +1614,7 @@ impl eframe::App for GbaApp {
                             ui.close_menu();
                             self.reset_active();
                             self.rewind_manager.clear();
+                            self.autosaver.restart_timer();
                             self.set_toast("Emulation Reset");
                         }
                         ui.separator();
@@ -2322,6 +2414,51 @@ impl eframe::App for GbaApp {
                                         Ok(()) => action_toast = Some(format!("Saved to Slot {}", slot)),
                                         Err(e) => action_toast = Some(e),
                                     }
+                                }
+                            }
+                        });
+                    }
+
+                    ui.separator();
+                    let status = if self.autosaver.enabled {
+                        let left = self.autosaver.time_until_next().as_secs();
+                        format!(
+                            "every {} min of play · next in {}:{:02}",
+                            self.autosaver.interval_minutes(),
+                            left / 60,
+                            left % 60
+                        )
+                    } else {
+                        "off".to_string()
+                    };
+                    ui.label(RichText::new(format!("🕘 Auto-saves ({status})")).strong());
+                    ui.label(
+                        RichText::new("Kept apart from the slots above: the 3 newest, oldest replaced first.")
+                            .weak(),
+                    );
+                    let list = self.autosaver.list(&self.loaded_rom_name);
+                    for n in 1..=crate::autosave::ROTATION {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("  Auto {n}"));
+                            match list.iter().find(|e| e.number == n) {
+                                Some(e) => {
+                                    let newest = list.first().map(|f| f.number) == Some(n);
+                                    let when = format!(
+                                        "{} ({} KB){}",
+                                        e.age_label(),
+                                        e.size_bytes / 1024,
+                                        if newest { " · newest" } else { "" }
+                                    );
+                                    ui.label(RichText::new(when).color(Color32::LIGHT_GREEN));
+                                    if ui.button("Load").clicked() {
+                                        match self.load_autosave(n) {
+                                            Ok(()) => action_toast = Some(format!("Loaded auto-save {n}")),
+                                            Err(err) => action_toast = Some(err),
+                                        }
+                                    }
+                                }
+                                None => {
+                                    ui.label(RichText::new("[Empty]").weak());
                                 }
                             }
                         });

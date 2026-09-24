@@ -9,6 +9,7 @@
 //! `touch` and `keymap` are plain logic and build (and test) on any host:
 //! `cargo test --manifest-path android/Cargo.toml`.
 
+pub mod autosave_settings;
 pub mod keymap;
 pub mod orientation;
 pub mod touch;
