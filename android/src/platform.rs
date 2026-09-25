@@ -112,6 +112,71 @@ pub fn pick_skin() {
     with_activity(|env, act| env.call_method(act, "pickSkin", "()V", &[]).map(|_| ()));
 }
 
+/// Open the system folder picker (ACTION_OPEN_DOCUMENT_TREE) to scan ROMs.
+pub fn pick_folder() {
+    with_activity(|env, act| env.call_method(act, "pickFolder", "()V", &[]).map(|_| ()));
+}
+
+/// Re-scan the persisted ROM folder in the background.
+pub fn rescan_folder() {
+    with_activity(|env, act| env.call_method(act, "rescanFolder", "()V", &[]).map(|_| ()));
+}
+
+/// Friendly name of the persisted ROM folder, if set.
+pub fn folder_name() -> Option<String> {
+    take_string("getFolderName").filter(|s| !s.is_empty())
+}
+
+/// Unlink the persisted ROM folder and release its URI permission.
+pub fn clear_folder() {
+    with_activity(|env, act| env.call_method(act, "clearFolder", "()V", &[]).map(|_| ()));
+}
+
+/// Whether a background ROM folder scan is currently in progress.
+pub fn is_scanning() -> bool {
+    with_activity(|env, act| {
+        env.call_method(act, "isScanning", "()Z", &[])?.z()
+    })
+    .unwrap_or(false)
+}
+
+/// A status or result notice from the folder scanner, if any.
+pub fn take_scan_notice() -> Option<String> {
+    take_string("takeScanNotice").filter(|s| !s.is_empty())
+}
+
+/// Synchronize a battery save (.sav) back to the user's external ROM folder.
+pub fn sync_save_to_folder(stem: &str) {
+    with_activity(|env, act| {
+        let jstem = env.new_string(stem)?;
+        env.call_method(
+            act,
+            "syncSaveToFolder",
+            "(Ljava/lang/String;)V",
+            &[(&jstem).into()],
+        )
+        .map(|_| ())
+    });
+}
+
+/// Trigger haptic rumble with given duration (ms) and intensity (0.0..=1.0).
+pub fn rumble(duration_ms: i32, intensity: f32) {
+    with_activity(|env, act| {
+        env.call_method(
+            act,
+            "rumble",
+            "(IF)V",
+            &[(duration_ms as i32).into(), (intensity as f32).into()],
+        )
+        .map(|_| ())
+    });
+}
+
+/// Immediately stop any ongoing rumble.
+pub fn stop_rumble() {
+    with_activity(|env, act| env.call_method(act, "stopRumble", "()V", &[]).map(|_| ()));
+}
+
 /// Path of a skin pack the user just picked (a temporary copy), if any.
 pub fn take_imported_skin() -> Option<String> {
     take_string("takeImportedSkin")

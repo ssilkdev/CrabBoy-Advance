@@ -14,6 +14,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.view.DisplayCutout;
 import android.view.View;
@@ -24,20 +25,25 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayDeque;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Hosts the Rust front-end (libcrabboy_android.so) and provides the pieces
- * that need the Android framework: the system file picker, copying the chosen
- * ROM into app storage, immersive fullscreen, and safe-area insets.
- *
- * Rust calls pickRom(), takeImportedRom(), takeImportError(),
- * getSafeInsets(), setOrientation(), vibrate(), setTiltSensor() and getTilt()
- * over JNI.
+ * that need the Android framework: the system file picker, SAF folder auto-scan,
+ * haptic rumble, motion sensors, immersive fullscreen, and safe-area insets.
  */
 public class MainActivity extends NativeActivity {
     private static final int PICK_ROM = 1001;
     private static final int PICK_SKIN = 1002;
+    private static final int PICK_FOLDER = 1003;
+    private static final String PREFS_NAME = "crabboy_prefs";
+    private static final String KEY_ROM_TREE_URI = "rom_tree_uri";
+    private static final String KEY_ROM_FOLDER_NAME = "rom_folder_name";
+
     /** Largest skin pack accepted (checked again, more strictly, in Rust). */
     private static final long MAX_SKIN_BYTES = 16L * 1024 * 1024;
     /** Largest GBA cartridge is 32 MiB (saves are far smaller). */
@@ -53,6 +59,10 @@ public class MainActivity extends NativeActivity {
      * run here, off the emulation thread.
      */
     private Handler background;
+    private volatile boolean scanning;
+    private volatile String scanNotice;
+    private final Map<String, String> saveDocMap = new ConcurrentHashMap<>();
+    private final Map<String, String> parentDocMap = new ConcurrentHashMap<>();
 
     private SensorManager sensors;
     /** Whether Rust wants tilt readings (kept across pause/resume). */
@@ -105,6 +115,23 @@ public class MainActivity extends NativeActivity {
         HandlerThread thread = new HandlerThread("haptics-sensors");
         thread.start();
         background = new Handler(thread.getLooper());
+
+        final String savedTree = getFolderUri();
+        if (savedTree != null && !savedTree.isEmpty()) {
+            boolean valid = false;
+            try {
+                for (android.content.UriPermission p : getContentResolver().getPersistedUriPermissions()) {
+                    if (p.getUri().toString().equals(savedTree) && p.isReadPermission()) {
+                        valid = true;
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            if (valid) {
+                background.post(() -> scanRomTree(Uri.parse(savedTree)));
+            }
+        }
     }
 
     @Override
@@ -176,6 +203,44 @@ public class MainActivity extends NativeActivity {
                 } else {
                     v.vibrate(VibrationEffect.createOneShot(15, VibrationEffect.DEFAULT_AMPLITUDE));
                 }
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    /** Rumble motor for cartridge rumble or audio bass impact. */
+    public void rumble(final int durationMs, final float intensity) {
+        final Vibrator v = vibrator;
+        final Handler h = background;
+        if (v == null || h == null || !v.hasVibrator()) return;
+        h.post(() -> {
+            try {
+                int amp = Math.round(Math.max(0.0f, Math.min(1.0f, intensity)) * 255.0f);
+                if (amp <= 0) {
+                    v.cancel();
+                    return;
+                }
+                if (Build.VERSION.SDK_INT >= 26) {
+                    if (v.hasAmplitudeControl()) {
+                        v.vibrate(VibrationEffect.createOneShot(durationMs, amp));
+                    } else {
+                        v.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE));
+                    }
+                } else {
+                    v.vibrate(durationMs);
+                }
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    public void stopRumble() {
+        final Vibrator v = vibrator;
+        final Handler h = background;
+        if (v == null || h == null || !v.hasVibrator()) return;
+        h.post(() -> {
+            try {
+                v.cancel();
             } catch (Exception ignored) {
             }
         });
@@ -294,6 +359,122 @@ public class MainActivity extends NativeActivity {
         return r;
     }
 
+    public void pickFolder() {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, PICK_FOLDER);
+            } catch (Exception e) {
+                importError = "No folder picker available: " + e.getMessage();
+            }
+        });
+    }
+
+    public void rescanFolder() {
+        String uriStr = getFolderUri();
+        if (uriStr == null || uriStr.isEmpty()) {
+            pickFolder();
+            return;
+        }
+        if (scanning) return;
+        final Handler h = background;
+        if (h != null) {
+            h.post(() -> scanRomTree(Uri.parse(uriStr)));
+        } else {
+            new Thread(() -> scanRomTree(Uri.parse(uriStr)), "rom-tree-scan").start();
+        }
+    }
+
+    public String getFolderUri() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_ROM_TREE_URI, "");
+    }
+
+    public String getFolderName() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_ROM_FOLDER_NAME, "");
+    }
+
+    public void clearFolder() {
+        String uriStr = getFolderUri();
+        if (uriStr != null && !uriStr.isEmpty()) {
+            try {
+                getContentResolver().releasePersistableUriPermission(
+                        Uri.parse(uriStr),
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                );
+            } catch (Exception ignored) {
+            }
+        }
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .remove(KEY_ROM_TREE_URI)
+                .remove(KEY_ROM_FOLDER_NAME)
+                .apply();
+        saveDocMap.clear();
+        parentDocMap.clear();
+        scanNotice = "ROM folder unlinked";
+    }
+
+    public boolean isScanning() {
+        return scanning;
+    }
+
+    public String takeScanNotice() {
+        String notice = scanNotice;
+        scanNotice = null;
+        return notice;
+    }
+
+    public void syncSaveToFolder(final String romStem) {
+        if (romStem == null || romStem.isEmpty()) return;
+        final Handler h = background;
+        if (h == null) return;
+        h.post(() -> {
+            try {
+                File romDir = new File(getFilesDir(), "roms");
+                File localSav = new File(romDir, romStem + ".sav");
+                if (!localSav.exists() || localSav.length() == 0) return;
+
+                String savUriStr = saveDocMap.get(romStem);
+                Uri savDocUri = (savUriStr != null) ? Uri.parse(savUriStr) : null;
+
+                if (savDocUri == null) {
+                    String parentUriStr = parentDocMap.get(romStem);
+                    if (parentUriStr != null) {
+                        Uri parentUri = Uri.parse(parentUriStr);
+                        savDocUri = DocumentsContract.createDocument(
+                                getContentResolver(),
+                                parentUri,
+                                "application/octet-stream",
+                                romStem + ".sav"
+                        );
+                        if (savDocUri != null) {
+                            saveDocMap.put(romStem, savDocUri.toString());
+                        }
+                    }
+                }
+
+                if (savDocUri != null) {
+                    try (InputStream in = new java.io.FileInputStream(localSav);
+                         OutputStream out = getContentResolver().openOutputStream(savDocUri, "wt")) {
+                        if (out != null) {
+                            byte[] buf = new byte[1 << 16];
+                            int n;
+                            while ((n = in.read(buf)) > 0) {
+                                out.write(buf, 0, n);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.w("CrabBoy", "Could not sync save to folder: " + e);
+            }
+        });
+    }
+
     // ---- Picker result -----------------------------------------------------
 
     @Override
@@ -303,6 +484,25 @@ public class MainActivity extends NativeActivity {
             return;
         }
         final Uri uri = data.getData();
+        if (requestCode == PICK_FOLDER) {
+            final int takeFlags = data.getFlags()
+                    & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            try {
+                getContentResolver().takePersistableUriPermission(uri, takeFlags);
+            } catch (Exception e) {
+                android.util.Log.w("CrabBoy", "Failed to take persistable URI permission: " + e);
+            }
+
+            String folderName = queryFolderName(uri);
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_ROM_TREE_URI, uri.toString())
+                    .putString(KEY_ROM_FOLDER_NAME, folderName)
+                    .apply();
+
+            rescanFolder();
+            return;
+        }
         if (requestCode == PICK_SKIN) {
             new Thread(() -> importSkin(uri), "skin-import").start();
             return;
@@ -320,8 +520,8 @@ public class MainActivity extends NativeActivity {
         name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
         String lower = name.toLowerCase(Locale.ROOT);
         boolean isSave = lower.endsWith(".sav");
-        if (!(isSave || lower.endsWith(".gba") || lower.endsWith(".gb") || lower.endsWith(".gbc"))) {
-            importError = "\"" + name + "\" is not a .gba, .gb or .gbc ROM or a .sav file"
+        if (!(isSave || lower.endsWith(".gba") || lower.endsWith(".gb") || lower.endsWith(".gbc") || lower.endsWith(".nds"))) {
+            importError = "\"" + name + "\" is not a supported ROM (.gba, .gb, .gbc, .nds) or .sav file"
                     + (lower.endsWith(".zip") || lower.endsWith(".7z") ? " (unzip it first)" : "");
             return;
         }
@@ -394,6 +594,176 @@ public class MainActivity extends NativeActivity {
         importedSkin = dest.getAbsolutePath();
     }
 
+    private static class DirEntry {
+        final String docId;
+        final int depth;
+        DirEntry(String docId, int depth) {
+            this.docId = docId;
+            this.depth = depth;
+        }
+    }
+
+    private void scanRomTree(Uri treeUri) {
+        scanning = true;
+        try {
+            File romDir = new File(getFilesDir(), "roms");
+            if (!romDir.isDirectory() && !romDir.mkdirs()) {
+                scanNotice = "Cannot create ROM folder";
+                scanning = false;
+                return;
+            }
+
+            String rootDocId = DocumentsContract.getTreeDocumentId(treeUri);
+            Queue<DirEntry> queue = new ArrayDeque<>();
+            queue.add(new DirEntry(rootDocId, 0));
+
+            int newRoms = 0;
+            int totalRoms = 0;
+            int savesSynced = 0;
+
+            while (!queue.isEmpty()) {
+                DirEntry current = queue.poll();
+                Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, current.docId);
+
+                try (Cursor c = getContentResolver().query(
+                        childrenUri,
+                        new String[]{
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                                DocumentsContract.Document.COLUMN_SIZE,
+                                DocumentsContract.Document.COLUMN_LAST_MODIFIED
+                        },
+                        null, null, null)) {
+
+                    if (c == null) continue;
+
+                    while (c.moveToNext()) {
+                        String docId = c.getString(0);
+                        String name = c.getString(1);
+                        String mimeType = c.getString(2);
+                        long size = c.isNull(3) ? 0 : c.getLong(3);
+                        long lastModified = c.isNull(4) ? 0 : c.getLong(4);
+
+                        if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
+                            if (current.depth < 3) {
+                                queue.add(new DirEntry(docId, current.depth + 1));
+                            }
+                            continue;
+                        }
+
+                        if (name == null) continue;
+                        String lower = name.toLowerCase(Locale.ROOT);
+                        String safeName = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+
+                        boolean isRom = lower.endsWith(".gba") || lower.endsWith(".gb")
+                                || lower.endsWith(".gbc") || lower.endsWith(".nds");
+                        boolean isSave = lower.endsWith(".sav");
+
+                        if (isRom) {
+                            totalRoms++;
+                            int dotIdx = safeName.lastIndexOf('.');
+                            String stem = dotIdx > 0 ? safeName.substring(0, dotIdx) : safeName;
+                            Uri parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, current.docId);
+                            parentDocMap.put(stem, parentDocUri.toString());
+
+                            File dest = new File(romDir, safeName);
+                            if (!dest.exists() || (size > 0 && dest.length() != size)) {
+                                File tmp = new File(romDir, safeName + ".part");
+                                Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                                try (InputStream in = getContentResolver().openInputStream(docUri);
+                                     OutputStream out = new FileOutputStream(tmp)) {
+                                    if (in != null) {
+                                        byte[] buf = new byte[1 << 16];
+                                        int n;
+                                        long total = 0;
+                                        while ((n = in.read(buf)) > 0) {
+                                            total += n;
+                                            out.write(buf, 0, n);
+                                        }
+                                        if (total > 0 && tmp.renameTo(dest)) {
+                                            newRoms++;
+                                        } else {
+                                            //noinspection ResultOfMethodCallIgnored
+                                            tmp.delete();
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    //noinspection ResultOfMethodCallIgnored
+                                    tmp.delete();
+                                }
+                            }
+                        } else if (isSave) {
+                            int dotIdx = safeName.lastIndexOf('.');
+                            String stem = dotIdx > 0 ? safeName.substring(0, dotIdx) : safeName;
+                            Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                            saveDocMap.put(stem, docUri.toString());
+
+                            File localSav = new File(romDir, safeName);
+                            if (!localSav.exists() || (lastModified > 0 && lastModified > localSav.lastModified() + 2000)) {
+                                File tmp = new File(romDir, safeName + ".part");
+                                try (InputStream in = getContentResolver().openInputStream(docUri);
+                                     OutputStream out = new FileOutputStream(tmp)) {
+                                    if (in != null) {
+                                        byte[] buf = new byte[1 << 16];
+                                        int n;
+                                        while ((n = in.read(buf)) > 0) {
+                                            out.write(buf, 0, n);
+                                        }
+                                        if (tmp.renameTo(localSav)) {
+                                            if (lastModified > 0) {
+                                                //noinspection ResultOfMethodCallIgnored
+                                                localSav.setLastModified(lastModified);
+                                            }
+                                            savesSynced++;
+                                        } else {
+                                            //noinspection ResultOfMethodCallIgnored
+                                            tmp.delete();
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    //noinspection ResultOfMethodCallIgnored
+                                    tmp.delete();
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("CrabBoy", "Error querying tree directory: " + e);
+                }
+            }
+
+            scanNotice = "Scan complete: " + totalRoms + " games (" + newRoms + " newly imported"
+                    + (savesSynced > 0 ? ", " + savesSynced + " saves updated" : "") + ")";
+        } catch (Exception e) {
+            scanNotice = "Scan failed: " + e.getMessage();
+        } finally {
+            scanning = false;
+        }
+    }
+
+    private String queryFolderName(Uri uri) {
+        try {
+            String docId = DocumentsContract.getTreeDocumentId(uri);
+            Uri docUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId);
+            try (Cursor c = getContentResolver().query(docUri,
+                    new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    String name = c.getString(0);
+                    if (name != null && !name.isEmpty()) return name;
+                }
+            }
+            int idx = docId.lastIndexOf(':');
+            if (idx >= 0 && idx + 1 < docId.length()) {
+                return docId.substring(idx + 1);
+            }
+            return docId;
+        } catch (Exception ignored) {
+        }
+        String last = uri.getLastPathSegment();
+        return last != null ? last : "ROMs";
+    }
+
     private String queryName(Uri uri) {
         try (Cursor c = getContentResolver().query(uri,
                 new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
@@ -401,6 +771,6 @@ public class MainActivity extends NativeActivity {
         } catch (Exception ignored) {
         }
         String last = uri.getLastPathSegment();
-        return last == null ? null : last.substring(last.lastIndexOf('/') + 1);
+        return last != null ? last : null;
     }
 }

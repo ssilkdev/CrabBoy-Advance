@@ -239,19 +239,24 @@ smartphones, foldables, tablets, and dedicated Android handhelds (Odin, Retroid)
 - Custom animated skin packs, on-screen touch layout editor, in-game modal menu,
   fast forward, quick save/load, auto-save rotations, gyro/tilt sensor.
 
-### M18a. Scoped Storage ROM Library Scanner (SAF Auto-Scan)
+### M18a. Scoped Storage ROM Library Scanner (SAF Auto-Scan) ✅
 - Use Android's Storage Access Framework (`ACTION_OPEN_DOCUMENT_TREE`) to let
   the user pick their `ROMs/` folder once.
 - Persist folder URI permissions, automatically scan subdirectories for `.gba`,
   `.gb`, `.gbc`, and `.nds` games, and auto-sync battery saves without manual
   per-file imports.
+- **Completed:** Non-blocking iterative tree scanner, persistent URI permissions,
+  two-way `.sav` sync, library toolbar integration, verified in multi-ABI release APK.
 
-### M18b. Audio-driven haptic rumble & physical tilt
+### M18b. Audio-driven haptic rumble & physical tilt ✅
 - **Dynamic LRA Force Feedback:** Convert low-frequency audio energy (bass
   impacts, explosions, boss roars) into nuanced tactile vibrations using
   Android's `Vibrator` / `VibrationEffect` API.
 - **Authentic Gyro/Tilt:** Map the phone's physical hardware accelerometer and
   gyroscope to cartridge tilt sensors (*WarioWare Twisted!*, *Yoshi Topsy-Turvy*).
+- **Completed:** Screen-aligned gravity/gyro cartridge tilt, APU scope buffer
+  single-pole bass energy filter, amplitude-controlled LRA force feedback,
+  in-game and startup UI toggles.
 
 ### M18c. Android TV & dedicated handheld console navigation
 - Complete D-pad and analog stick focus navigation for the game library, search

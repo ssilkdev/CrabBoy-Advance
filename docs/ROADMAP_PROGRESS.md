@@ -666,3 +666,40 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
   - `batched_peripherals_are_bit_identical`: Confirmed bit-identical with full
     batched peripheral catchup over 2,000 frames.
 
+---
+
+## Stage 6: Android Platform Excellence (Tier-1 Primary Target)
+
+### M18. Android release & core UI ✅
+- Multi-ABI release APK (arm64-v8a + x86_64) with native static linking and high-precision GLES shaders.
+- Custom animated skin packs, on-screen touch layout editor, in-game modal menu,
+  fast forward, quick save/load, auto-save rotations, gyro/tilt sensor.
+
+### M18a. Scoped Storage ROM Library Scanner (SAF Auto-Scan) ✅
+- ✅ **SAF Folder Integration** (`android/java/.../MainActivity.java`, `android/src/platform.rs`):
+  - Uses `Intent.ACTION_OPEN_DOCUMENT_TREE` with `FLAG_GRANT_PERSISTABLE_URI_PERMISSION`.
+  - Persists tree URI permissions in `SharedPreferences` across app restarts.
+  - Iterative breadth-first subdirectory scanner using Android's standard `DocumentsContract`
+    (supports `.gba`, `.gb`, `.gbc`, and `.nds` ROMs up to 3 subdirectories deep).
+  - Incremental sync: only copies new or changed ROMs, avoiding redundant disk I/O.
+  - Two-way battery save (`.sav`) synchronization: auto-imports existing `.sav` files on scan,
+    and automatically pushes updated `.sav` files back to the external SAF tree on flush.
+- ✅ **UI & Workflow** (`android/src/app.rs`):
+  - Primary "Select ROMs Folder (SAF Auto-Scan)" onboarding CTA in empty library.
+  - Library toolbar shows connected folder pill with quick `🔄 Rescan` trigger and status indicators.
+  - Folder management dialog supporting instant rescan, folder switching, and unlinking.
+
+### M18b. Audio-Driven Haptic Rumble & Physical Tilt ✅
+- ✅ **Authentic Cartridge Gyro/Tilt** (`android/src/app.rs`, `android/src/tilt.rs`):
+  - Automatically enables phone motion sensors when a `SensorType::GyroTilt` cartridge is detected
+    (*WarioWare Twisted!*, *Yoshi Topsy-Turvy*).
+  - Rotates phone gravity/accelerometer vectors into screen-space coordinates and feeds
+    normalized tilt angles directly to `cart.sensors.set_tilt(tx, ty)`.
+- ✅ **Dynamic LRA Force Feedback & Audio Bass Haptics** (`MainActivity.java`, `android/src/app.rs`):
+  - Hardware Cartridge Rumble: Drives phone vibrator with amplitude-controlled force feedback
+    when GBA games trigger the rumble motor (*Drill Dozer*, *Pokémon Pinball*).
+  - Audio-Driven Bass Haptics: Analyzes real-time low-frequency energy (single-pole low-pass filter
+    on APU scope buffer) to trigger tactile LRA feedback during explosions, impacts, and heavy attacks.
+  - Added user toggles in startup settings and in-game menu.
+
+
