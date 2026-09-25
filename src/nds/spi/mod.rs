@@ -145,7 +145,7 @@ impl Tsc2046 {
         Self {
             touch_coords: None,
             control_byte: 0,
-            response_byte_idx: 0,
+            response_byte_idx: 2,
             response_bytes: [0, 0],
         }
     }
@@ -168,51 +168,46 @@ impl Tsc2046 {
     }
 
     pub fn deselect(&mut self) {
-        self.response_byte_idx = 0;
+        // CS high aborts any conversion still being shifted out.
+        self.response_byte_idx = 2;
     }
 
+    /// One SPI byte (GBATEK "DS Touch Screen Controller"). The chip shifts
+    /// out the previous conversion (high 7 bits, then low 5 bits << 3) while
+    /// it receives; a byte with bit 7 set is a new command and starts a new
+    /// conversion. Drivers overlap them: cmd, 0, cmd, 0, ..., so a command
+    /// can arrive while the old result's low byte is going out.
     pub fn transfer(&mut self, byte: u8) -> u8 {
-        if self.response_byte_idx > 0 && self.response_byte_idx <= 2 {
-            let out = self.response_bytes[self.response_byte_idx - 1];
-            self.response_byte_idx += 1;
+        let out = if self.response_byte_idx < 2 { self.response_bytes[self.response_byte_idx] } else { 0 };
+        self.response_byte_idx = self.response_byte_idx.saturating_add(1).min(2);
+        if byte & 0x80 == 0 {
             return out;
         }
 
-        // New command byte
         self.control_byte = byte;
         let channel = (byte >> 4) & 0x07;
-
         let adc_val = match self.touch_coords {
-            Some((x, y)) => {
-                match channel {
-                    // Y-Position
-                    0b001 => Self::adc_y(y),
-                    // X-Position
-                    0b101 => Self::adc_x(x),
-                    // Z1 Pressure
-                    0b011 => 0x0700,
-                    // Z2 Pressure
-                    0b100 => 0x0200,
-                    // Battery / Temperature
-                    0b010 => 0x0F00,
-                    _ => 0,
-                }
-            }
+            Some((x, y)) => match channel {
+                0b001 => Self::adc_y(y),
+                0b101 => Self::adc_x(x),
+                // Pressure: Z1 up, Z2 down while touched.
+                0b011 => 0x0700,
+                0b100 => 0x0200,
+                // Temperature / battery / AUX
+                _ => 0x0800,
+            },
+            // Pen up: X/Y float to the rails, no pressure.
             None => match channel {
-                // Not touched: high impedance / release
-                0b011 | 0b100 => 0x0000,
-                _ => 0x0FFF,
+                0b001 | 0b101 => 0x0FFF,
+                0b011 | 0b100 => 0,
+                _ => 0x0800,
             },
         };
-
-        // 12-bit result formatted across 2 bytes:
-        // Byte 1: (adc_val >> 5) & 0x7F
-        // Byte 2: (adc_val & 0x1F) << 3
-        self.response_bytes[0] = ((adc_val >> 5) & 0x7F) as u8;
-        self.response_bytes[1] = ((adc_val & 0x1F) << 3) as u8;
-        self.response_byte_idx = 1;
-
-        0
+        // 8-bit mode (bit 3) returns the top 8 bits of the conversion.
+        let v = if byte & 0x08 != 0 { adc_val & 0xFF0 } else { adc_val };
+        self.response_bytes = [((v >> 5) & 0x7F) as u8, ((v & 0x1F) << 3) as u8];
+        self.response_byte_idx = 0;
+        out
     }
 }
 

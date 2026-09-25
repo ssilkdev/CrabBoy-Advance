@@ -232,6 +232,8 @@ pub struct NdsBus {
     pub vram_views: VramViews,
     /// ARM9 DIV/SQRT unit
     pub math: crate::nds::math::MathUnit,
+    /// ARM7 Wi-Fi registers/RAM (stub, no networking)
+    pub wifi: crate::nds::wifi::Wifi,
     pub card: NdsCard,
     pub spu: NdsSpu,
 }
@@ -292,6 +294,7 @@ impl NdsBus {
             ipc: Ipc::default(),
             vram_views: VramViews::default(),
             math: Default::default(),
+            wifi: Default::default(),
             card: NdsCard::new(),
             spu: NdsSpu::new(),
         }
@@ -846,6 +849,9 @@ impl NdsBus {
     }
 
     pub fn read_arm9_u8(&mut self, addr: u32) -> u8 {
+        if (0x0400_0304..0x0400_0308).contains(&addr) {
+            return ((self.ppu.powcnt1 >> ((addr & 3) * 8)) & 0xFF) as u8;
+        }
         if Self::is_card_reg(addr) || (0x0400_0004..0x0400_0008).contains(&addr) || (0x0400_00B0..0x0400_00F0).contains(&addr) {
             if addr == 0x0400_01A2 {
                 return self.card.auxspidata;
@@ -904,6 +910,9 @@ impl NdsBus {
     }
 
     pub fn read_arm9_u16(&mut self, addr: u32) -> u16 {
+        if (0x0400_0304..0x0400_0308).contains(&addr) {
+            return ((self.ppu.powcnt1 >> ((addr & 2) * 8)) & 0xFFFF) as u16;
+        }
         if Self::is_card_reg(addr) || (0x0400_00B0..0x0400_00F0).contains(&addr) {
             return (self.read_arm9_u32(addr & !3) >> ((addr & 2) * 8)) as u16;
         }
@@ -1191,6 +1200,11 @@ impl NdsBus {
             return;
         }
 
+        if (0x0400_0304..0x0400_0308).contains(&addr) {
+            let sh = (addr & 3) * 8;
+            self.ppu.powcnt1 = (self.ppu.powcnt1 & !(0xFF << sh)) | ((val as u32) << sh);
+            return;
+        }
         match addr {
             0x0200_0000..=0x02FF_FFFF => self.main_ram[(addr & 0x3F_FFFF) as usize] = val,
             0x0300_0000..=0x03FF_FFFF => self.shared_wram[(addr & 0x7FFF) as usize] = val,
@@ -1276,6 +1290,11 @@ impl NdsBus {
             return;
         }
 
+        if (0x0400_0304..0x0400_0308).contains(&addr) {
+            let sh = (addr & 2) * 8;
+            self.ppu.powcnt1 = (self.ppu.powcnt1 & !(0xFFFF << sh)) | ((val as u32) << sh);
+            return;
+        }
         match addr {
             0x0200_0000..=0x02FF_FFFF => {
                 let off = (addr & 0x3F_FFFE) as usize;
@@ -1473,6 +1492,9 @@ impl NdsBus {
     // ==========================================
 
     pub fn read_arm7_u8(&mut self, addr: u32) -> u8 {
+        if (0x0480_0000..0x0481_0000).contains(&addr) {
+            return self.wifi.read8(addr);
+        }
         if Self::is_card_reg(addr) || (0x0400_0004..0x0400_0008).contains(&addr) || (0x0400_00B0..0x0400_00E0).contains(&addr) {
             if addr == 0x0400_01A2 {
                 return self.card.auxspidata;
@@ -1511,6 +1533,9 @@ impl NdsBus {
     }
 
     pub fn read_arm7_u16(&mut self, addr: u32) -> u16 {
+        if (0x0480_0000..0x0481_0000).contains(&addr) {
+            return self.wifi.read16(addr);
+        }
         if Self::is_card_reg(addr) || (0x0400_00B0..0x0400_00E0).contains(&addr) {
             return (self.read_arm7_u32(addr & !3) >> ((addr & 2) * 8)) as u16;
         }
@@ -1568,6 +1593,9 @@ impl NdsBus {
     }
 
     pub fn read_arm7_u32(&mut self, addr: u32) -> u32 {
+        if (0x0480_0000..0x0481_0000).contains(&addr) {
+            return self.wifi.read32(addr);
+        }
         if Self::is_card_reg(addr) {
             if let Some(v) = self.read_card_u32(addr) {
                 return v;
@@ -1686,6 +1714,10 @@ impl NdsBus {
     }
 
     pub fn write_arm7_u16(&mut self, addr: u32, val: u16) {
+        if (0x0480_0000..0x0481_0000).contains(&addr) {
+            self.wifi.write16(addr, val);
+            return;
+        }
         if Self::is_card_reg(addr) {
             if addr == 0x0400_01A0 {
                 self.card.write_auxspicnt(val);
@@ -1758,6 +1790,10 @@ impl NdsBus {
     }
 
     pub fn write_arm7_u32(&mut self, addr: u32, val: u32) {
+        if (0x0480_0000..0x0481_0000).contains(&addr) {
+            self.wifi.write32(addr, val);
+            return;
+        }
         if Self::is_card_reg(addr) {
             if addr == 0x0400_01A4 {
                 self.write_romctrl(val);

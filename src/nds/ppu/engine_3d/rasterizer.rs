@@ -32,13 +32,13 @@ impl Rasterizer {
         Self {
             disp3dcnt: 0,
             clear_color: 0x0000_0000,
-            clear_depth: 0x007F_FFFF,
+            clear_depth: 0x7FFF,
             fog_color: 0,
             fog_offset: 0,
             fog_table: [0; 32],
             toon_table: [0; 32],
             color_buffer: vec![0xFF000000; SCREEN_WIDTH * SCREEN_HEIGHT],
-            depth_buffer: vec![0x007F_FFFF; SCREEN_WIDTH * SCREEN_HEIGHT],
+            depth_buffer: vec![0x00FF_FFFF; SCREEN_WIDTH * SCREEN_HEIGHT],
         }
     }
 
@@ -51,7 +51,9 @@ impl Rasterizer {
         let clear_rgba = (a << 24) | (b << 16) | (g << 8) | r;
 
         self.color_buffer.fill(clear_rgba);
-        self.depth_buffer.fill(self.clear_depth);
+        // CLEAR_DEPTH is 15 bits; GBATEK: depth24 = val*0x200 + ((val+1)/0x8000)*0x1FF.
+        let d = self.clear_depth & 0x7FFF;
+        self.depth_buffer.fill(d * 0x200 + ((d + 1) / 0x8000) * 0x1FF);
     }
 
     /// Rasterize all front-buffered polygons for the current frame
@@ -81,13 +83,14 @@ impl Rasterizer {
             return; // Degenerate triangle
         }
 
-        let is_front = cross > 0;
-        let cull_mode = (poly.polygon_attr >> 6) & 3;
-        match cull_mode {
-            1 if is_front => return,  // Cull front
-            2 if !is_front => return, // Cull back
-            3 => return,              // Cull both
-            _ => {}
+        // Facing: DS front faces wind clockwise as seen on screen, which with
+        // y pointing down is a negative cross product here.
+        let is_front = cross < 0;
+        // POLYGON_ATTR bit 6 = render back faces, bit 7 = render front faces.
+        let render_back = poly.polygon_attr & (1 << 6) != 0;
+        let render_front = poly.polygon_attr & (1 << 7) != 0;
+        if (is_front && !render_front) || (!is_front && !render_back) {
+            return;
         }
 
         // Bounding box in integer screen coordinates
@@ -103,9 +106,10 @@ impl Rasterizer {
         let w1 = if v1.clip_w != 0 { 1.0 / (v1.clip_w as f64) } else { 1.0 };
         let w2 = if v2.clip_w != 0 { 1.0 / (v2.clip_w as f64) } else { 1.0 };
 
-        let z0 = (v0.clip_z as f64) * w0;
-        let z1 = (v1.clip_z as f64) * w1;
-        let z2 = (v2.clip_z as f64) * w2;
+        // z/w per vertex (dimensionless), interpolated with 1/w weights.
+        let z0 = v0.clip_z as f64 / v0.clip_w.max(1) as f64 * w0;
+        let z1 = v1.clip_z as f64 / v1.clip_w.max(1) as f64 * w1;
+        let z2 = v2.clip_z as f64 / v2.clip_w.max(1) as f64 * w2;
 
         let (r0, g0, b0) = Self::unpack_rgb555(v0.color);
         let (r1, g1, b1) = Self::unpack_rgb555(v1.color);
@@ -129,8 +133,8 @@ impl Rasterizer {
                 let w_edge1 = (x0 - x2) * (sy - y2) - (y0 - y2) * (sx - x2);
                 let w_edge2 = (x1 - x0) * (sy - y0) - (y1 - y0) * (sx - x0);
 
-                if (is_front && w_edge0 >= 0 && w_edge1 >= 0 && w_edge2 >= 0)
-                    || (!is_front && w_edge0 <= 0 && w_edge1 <= 0 && w_edge2 <= 0)
+                if (cross > 0 && w_edge0 >= 0 && w_edge1 >= 0 && w_edge2 >= 0)
+                    || (cross < 0 && w_edge0 <= 0 && w_edge1 <= 0 && w_edge2 <= 0)
                 {
                     let b0 = (w_edge0 as f64) * inv_cross;
                     let b1 = (w_edge1 as f64) * inv_cross;
@@ -143,16 +147,17 @@ impl Rasterizer {
                     let w = 1.0 / interp_w;
 
                     // Interpolate depth
+                    // z/w in -1..1 (12-bit fixed point) -> 24-bit depth, 0 = near.
                     let interp_z = (b0 * z0 + b1 * z1 + b2 * z2) * w;
-                    let depth = (interp_z as i64).clamp(0, 0x007F_FFFF) as u32;
+                    let depth = (((interp_z + 1.0) * 0.5) * 16_777_215.0).clamp(0.0, 16_777_215.0) as u32;
 
                     let pixel_idx = py * SCREEN_WIDTH + px;
                     let existing_depth = self.depth_buffer[pixel_idx];
 
-                    // Depth test (DISP3DCNT bit 4: 0 = Less, 1 = Equal)
-                    let depth_equal = (self.disp3dcnt & (1 << 4)) != 0;
-                    let pass = if depth_equal {
-                        depth == existing_depth
+                    // Depth test mode is POLYGON_ATTR bit 14 (0 = less, 1 = equal
+                    // within a small margin); DISP3DCNT bit 4 is anti-aliasing.
+                    let pass = if poly.polygon_attr & (1 << 14) != 0 {
+                        depth.abs_diff(existing_depth) <= 0x200
                     } else {
                         depth < existing_depth
                     };

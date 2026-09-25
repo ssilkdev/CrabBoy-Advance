@@ -12,6 +12,7 @@ pub mod math;
 pub mod ppu;
 pub mod spi;
 pub mod spu;
+pub mod wifi;
 
 use bus::NdsBus;
 use card::NdsCard;
@@ -545,6 +546,29 @@ mod tests {
         let adc_x = (((b1 as u16) & 0x7F) << 5) | (((b2 as u16) >> 3) & 0x1F);
         // ((128 * (3800 - 300)) / 255) + 300 ≈ 2058
         assert!((adc_x as i32 - 2058).abs() < 10);
+
+        // Back-to-back 24-bit reads (cmd, 0, 0 / cmd, 0, 0) with CS held:
+        // each command's result follows it in the next two bytes.
+        let hi = touch.transfer(0x90);
+        assert_eq!(hi, 0, "nothing pending after the previous result was read out");
+        let y_hi = touch.transfer(0x00);
+        let y_lo = touch.transfer(0x00);
+        let adc_y = (((y_hi as u16) & 0x7F) << 5) | ((y_lo as u16) >> 3);
+        assert!((adc_y as i32 - spi::Tsc2046::adc_y(96) as i32).abs() <= 1, "adc_y={adc_y}");
+        // A command overlapping the low byte (cmd, 0, cmd, 0 pattern) still
+        // hands out the old low byte, then the new result.
+        touch.transfer(0xD0);
+        let x_hi = touch.transfer(0x00);
+        let low_during_cmd = touch.transfer(0x90);
+        assert_eq!((((x_hi as u16) & 0x7F) << 5) | ((low_during_cmd as u16) >> 3), adc_x);
+        let y2_hi = touch.transfer(0x00);
+        let y2_lo = touch.transfer(0x00);
+        assert_eq!((((y2_hi as u16) & 0x7F) << 5) | ((y2_lo as u16) >> 3), adc_y);
+        // Pen up: X/Y read full scale.
+        touch.set_touch(None);
+        touch.transfer(0xD0);
+        let (h, l) = (touch.transfer(0), touch.transfer(0));
+        assert_eq!((((h as u16) & 0x7F) << 5) | ((l as u16) >> 3), 0xFFF);
     }
 
     #[test]
@@ -815,8 +839,8 @@ mod tests {
         bus.write_arm9_u32(0x0400_0454, 0);
 
         // 4. Set Polygon Attributes (Cmd 0x29 via port 0x0400_04A4)
-        // Culling: None (bits 6..7 = 0)
-        bus.write_arm9_u32(0x0400_04A4, 0x0000_0000);
+        // GBATEK: bit 6 = render back, bit 7 = render front, bits 16-20 alpha.
+        bus.write_arm9_u32(0x0400_04A4, 0x001F_00C0);
 
         // 5. Begin Triangles (Cmd 0x40 via port 0x0400_0500)
         bus.write_arm9_u32(0x0400_0500, 0); // 0 = Triangles

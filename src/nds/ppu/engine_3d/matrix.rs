@@ -65,19 +65,18 @@ impl Matrix4x4 {
         Self { m }
     }
 
-    /// Fixed-point matrix multiplication: C = M * C (self = rhs * self)
-    /// Performs standard 4x4 matrix multiplication with 12-bit right shift.
+    /// The DS multiply commands: returns `lhs * self` (GBATEK: M = Param * M),
+    /// so `lhs` is applied to vertices before the current matrix. `m[i*4+j]`
+    /// is row i, column j of the DS's row-vector matrix (vertex * M).
     pub fn mul_4x4(&self, lhs: &Matrix4x4) -> Matrix4x4 {
         let mut res = [0i32; 16];
-        for col in 0..4 {
-            for row in 0..4 {
+        for i in 0..4 {
+            for j in 0..4 {
                 let mut sum: i64 = 0;
                 for k in 0..4 {
-                    let a = lhs.m[k * 4 + row] as i64;
-                    let b = self.m[col * 4 + k] as i64;
-                    sum += a * b;
+                    sum += lhs.m[i * 4 + k] as i64 * self.m[k * 4 + j] as i64;
                 }
-                res[col * 4 + row] = (sum >> 12) as i32;
+                res[i * 4 + j] = (sum >> 12) as i32;
             }
         }
         Matrix4x4 { m: res }
@@ -153,5 +152,40 @@ impl Matrix4x4 {
         let rz = (vx * self.m[2] as i64 + vy * self.m[6] as i64 + vz * self.m[10] as i64) >> 12;
 
         (rx as i32, ry as i32, rz as i32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Matrix4x4;
+
+    // GBATEK "DS 3D Matrix Types": vectors are rows, and every multiply
+    // command computes M = Param * M, so the newest transform applies to the
+    // vertex first: TRANS then SCALE gives v*S*T = scale first, then move.
+    #[test]
+    fn multiply_commands_premultiply() {
+        let one = Matrix4x4::FIXED_ONE;
+        let mut m = Matrix4x4::identity();
+        m.translate(10 * one, 0, 0);
+        m.scale(2 * one, one, one);
+        let (x, _, _, w) = m.transform_vertex(one, 0, 0);
+        assert_eq!((x, w), (12 * one as i64, one as i64), "expected scale then translate");
+
+        let mut t = [0i32; 12];
+        t[0] = one;
+        t[4] = one;
+        t[8] = one;
+        t[9] = 5 * one; // translation row
+        let m2 = Matrix4x4::identity().mul_4x4(&Matrix4x4::from_slice_4x4(&{
+            let mut s = [0i32; 16];
+            s[0] = 3 * one;
+            s[5] = one;
+            s[10] = one;
+            s[15] = one;
+            s
+        }));
+        let m3 = m2.mul_4x3(&t); // M = T * S: translate applies first
+        let (x, _, _, _) = m3.transform_vertex(one, 0, 0);
+        assert_eq!(x, 18 * one as i64, "(1 + 5) * 3");
     }
 }

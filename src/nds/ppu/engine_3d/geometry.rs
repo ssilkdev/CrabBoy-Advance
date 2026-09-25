@@ -263,7 +263,7 @@ impl GeometryEngine {
     /// Ensure Clip Matrix is up to date (M_clip = M_proj * M_pos)
     pub fn update_clip_matrix(&mut self) {
         if self.clip_mtx_dirty {
-            self.clip_mtx = self.pos_mtx.mul_4x4(&self.proj_mtx);
+            self.clip_mtx = self.proj_mtx.mul_4x4(&self.pos_mtx); // Clip = Pos * Proj
             self.clip_mtx_dirty = false;
         }
     }
