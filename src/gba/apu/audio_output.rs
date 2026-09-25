@@ -5,6 +5,10 @@ use super::ring::SampleRing;
 use super::spatial::SpatialDsp;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How often to retry opening the audio device after it went away.
+const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurroundMode {
@@ -96,6 +100,14 @@ pub struct AudioOutput {
     last_slow_speed: AtomicU32,
     /// Dropping grains to shed leftover slow-motion buffering.
     catching_up: AtomicBool,
+    /// Set by the stream's error callback when the device went away
+    /// (see `recover_lost_device`).
+    device_lost: Arc<AtomicBool>,
+    last_reopen: Option<Instant>,
+    /// Reused per-batch buffers (resampler output, volume-scaled copy), so
+    /// queueing audio doesn't allocate every few milliseconds.
+    resampled_buf: Mutex<Vec<f32>>,
+    scaled_buf: Mutex<Vec<f32>>,
 }
 
 impl Default for AudioOutput {
@@ -140,6 +152,7 @@ impl AudioOutput {
         let fast_forward_mode = Arc::new(AtomicU8::new(1)); // Default Smart Mute during fast-forward
         let is_fast_forwarding = Arc::new(AtomicBool::new(false));
 
+        let device_lost = Arc::new(AtomicBool::new(false));
         let (stream, sample_rate, channels) = if HEADLESS.load(Ordering::Relaxed) {
             (None, super::resample::CORE_SAMPLE_RATE, 2)
         } else {
@@ -148,6 +161,7 @@ impl AudioOutput {
                 Arc::clone(&surround_mode),
                 Arc::clone(&bass_boost),
                 Arc::clone(&surround_width),
+                Arc::clone(&device_lost),
             )
             .unwrap_or((None, 44100, 2))
         };
@@ -173,7 +187,55 @@ impl AudioOutput {
             stretcher: Mutex::new(super::slowmo_stretch::TimeStretcher::new()),
             last_slow_speed: AtomicU32::new(1.0f32.to_bits()),
             catching_up: AtomicBool::new(false),
+            device_lost,
+            last_reopen: None,
+            resampled_buf: Mutex::new(Vec::new()),
+            scaled_buf: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Reopen the audio device if it went away. On Android, plugging in or
+    /// unplugging headphones or connecting a Bluetooth device closes the
+    /// stream (cpal reports `DeviceNotAvailable`), and without this the
+    /// game stays silent until it is restarted. Cheap to call every frame:
+    /// one atomic load unless the device was lost, then at most one retry
+    /// per `REOPEN_INTERVAL`.
+    pub fn recover_lost_device(&mut self) {
+        if !self.device_lost.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.last_reopen.is_some_and(|t| t.elapsed() < REOPEN_INTERVAL) {
+            return;
+        }
+        self.last_reopen = Some(Instant::now());
+        // Close the dead stream before opening its replacement.
+        self._stream = None;
+        let opened = Self::init_cpal_stream(
+            Arc::clone(&self.buffer),
+            Arc::clone(&self.surround_mode),
+            Arc::clone(&self.bass_boost),
+            Arc::clone(&self.surround_width),
+            Arc::clone(&self.device_lost),
+        );
+        let Ok((Some(stream), sample_rate, channels)) = opened else {
+            log::warn!("Audio device still unavailable; retrying");
+            return;
+        };
+        self.device_lost.store(false, Ordering::Relaxed);
+        if sample_rate != self.sample_rate {
+            // e.g. a Bluetooth headset at 16 kHz after the 48 kHz speaker.
+            if let Ok(mut r) = self.resampler.lock() {
+                *r = super::resample::Resampler::new(sample_rate);
+            }
+        }
+        self.sample_rate = sample_rate;
+        self.channels = channels;
+        self._stream = Some(stream);
+        // The new stream starts playing; keep it paused if it should be.
+        let want_active = self.stream_active;
+        self.stream_active = true;
+        self.set_stream_active(want_active);
+        log::info!("Audio device reopened: {sample_rate} Hz, {channels} channels");
     }
 
     fn init_cpal_stream(
@@ -181,6 +243,7 @@ impl AudioOutput {
         surround_mode: Arc<AtomicU8>,
         bass_boost: Arc<AtomicU32>,
         surround_width: Arc<AtomicU32>,
+        device_lost: Arc<AtomicBool>,
     ) -> Result<(Option<cpal::Stream>, u32, usize), cpal::DefaultStreamConfigError> {
         let host = cpal::default_host();
         let device = match host.default_output_device() {
@@ -202,7 +265,12 @@ impl AudioOutput {
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
 
-        let err_fn = |err| log::error!("Audio stream error: {}", err);
+        let err_fn = move |err| {
+            log::error!("Audio stream error: {}", err);
+            if matches!(err, cpal::StreamError::DeviceNotAvailable) {
+                device_lost.store(true, Ordering::Relaxed);
+            }
+        };
 
         // All DSP state lives in the callback (see `spatial`).
         let mut dsp = SpatialDsp::new(sample_rate);
@@ -363,7 +431,9 @@ impl AudioOutput {
     /// "drop 3000 queued samples at once", which clicked.
     fn enqueue(&self, samples: &[f32]) {
         let room = self.buffer.capacity().saturating_sub(self.buffer.len());
-        let mut scaled: Vec<f32> = samples.iter().map(|&s| (s * self.volume).clamp(-1.0, 1.0)).collect();
+        let mut scaled = self.scaled_buf.lock().unwrap_or_else(|e| e.into_inner());
+        scaled.clear();
+        scaled.extend(samples.iter().map(|&s| (s * self.volume).clamp(-1.0, 1.0)));
         if scaled.len() > room {
             let keep = room & !1; // whole stereo frames
             let fade = keep.min(FADE_SAMPLES);
@@ -438,10 +508,14 @@ impl AudioOutput {
 
     /// Resample to the device rate, apply fast-forward decimation, queue.
     fn enqueue_resampled(&self, samples: &[f32], tape_speed: f32, (low, high): (usize, usize)) {
-        let resampled = match self.resampler.lock() {
-            Ok(mut r) => r.process_at_speed(samples, self.buffer_len(), low, high, tape_speed),
-            Err(_) => samples.to_vec(),
-        };
+        let mut resampled = self.resampled_buf.lock().unwrap_or_else(|e| e.into_inner());
+        match self.resampler.lock() {
+            Ok(mut r) => r.process_at_speed_into(samples, self.buffer_len(), low, high, tape_speed, &mut resampled),
+            Err(_) => {
+                resampled.clear();
+                resampled.extend_from_slice(samples);
+            }
+        }
         let samples = &resampled[..];
         if samples.is_empty() {
             return;

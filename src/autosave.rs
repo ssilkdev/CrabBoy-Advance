@@ -143,9 +143,7 @@ impl AutoSaver {
         std::fs::create_dir_all(&self.dir)?;
         let n = self.next_number(game);
         let path = self.path(game, n);
-        let tmp = path.with_extension("state.tmp");
-        std::fs::write(&tmp, state)?;
-        std::fs::rename(&tmp, &path)?;
+        crate::fs_util::write_atomic(&path, state)?;
         Ok(n)
     }
 

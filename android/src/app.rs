@@ -19,6 +19,7 @@ use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
 use gba_simulator::gba::shader::{apply_shader, ShaderPreset};
 use gba_simulator::gba::Gba;
 use gba_simulator::nds::Nds;
+#[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
 use touch::{Buttons, TouchPad};
@@ -32,6 +33,7 @@ const IDLE_TICK: Duration = Duration::from_millis(500);
 const FAST_FORWARD_SPEED: u32 = 3;
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon_256.png");
 
+#[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
@@ -39,6 +41,18 @@ fn android_main(app: AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("CrabBoy"),
     );
+    // Android discards stderr, so a panic's message would be lost; release
+    // builds abort right after the hook, making this the only trace.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        log::error!("panic{location}: {message}\n{}", std::backtrace::Backtrace::force_capture());
+    }));
     gamepad::install();
     platform::init(&app);
 
@@ -57,6 +71,30 @@ fn android_main(app: AndroidApp) {
         Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, files_dir)))),
     ) {
         log::error!("eframe exited with error: {e}");
+    }
+}
+
+/// iOS / iPadOS entry point (called from the `crabboy-ios` binary's `main`).
+/// App data (ROMs, saves, settings) lives in the app's `Documents` folder,
+/// which the Files app shows under "On My iPad › CrabBoy Advance".
+#[cfg(target_os = "ios")]
+pub fn ios_main() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("CrabBoy panic: {info}\n{}", std::backtrace::Backtrace::force_capture());
+    }));
+    gamepad::install();
+    let files_dir = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Documents"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/crabboy"));
+    platform::init(&files_dir);
+
+    let options = eframe::NativeOptions { vsync: true, ..Default::default() };
+    if let Err(e) = eframe::run_native(
+        "CrabBoy Advance",
+        options,
+        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, files_dir)))),
+    ) {
+        eprintln!("eframe exited with error: {e}");
     }
 }
 
@@ -81,6 +119,10 @@ impl Core {
             "gba" => {
                 let mut gba = Box::new(Gba::new());
                 gba.load_rom(path).map_err(|e| e.to_string())?;
+                // Nothing on Android reads the diagnostic report or the IO
+                // flight recorder; don't pay for them every frame.
+                gba.diagnostics.enabled = false;
+                gba.mmu.flight_recorder.enabled = false;
                 Ok(Core::Gba(gba))
             }
             "nds" | "srl" => {
@@ -141,14 +183,19 @@ impl Core {
         }
     }
 
-    /// Screen size and RGBA pixels (the cores store 0xAABBGGRR, i.e. RGBA
-    /// bytes in little-endian order).
-    fn frame_rgba(&self, out: &mut Vec<u8>) -> [usize; 2] {
-        let (fb, size): (&[u32], [usize; 2]) = match self {
+    /// The displayed frame (0xAABBGGRR words, i.e. RGBA bytes in
+    /// little-endian order) and its size.
+    fn framebuffer(&self) -> (&[u32], [usize; 2]) {
+        match self {
             Core::Gba(g) => (&g.get_framebuffer()[..], [240, 160]),
             Core::GameBoy(g) => (&g.get_framebuffer()[..], [160, 144]),
             Core::Nds(n) => (&n.get_framebuffer()[..], [256, 384]),
-        };
+        }
+    }
+
+    /// Screen size and RGBA pixels.
+    fn frame_rgba(&self, out: &mut Vec<u8>) -> [usize; 2] {
+        let (fb, size) = self.framebuffer();
         out.clear();
         out.reserve(fb.len() * 4);
         for &px in fb {
@@ -199,11 +246,7 @@ impl Core {
     /// Cheap fingerprint of the displayed frame, to skip re-uploading a
     /// picture that hasn't changed (menus, text boxes, pauses in-game).
     fn frame_fingerprint(&self) -> u64 {
-        let fb: &[u32] = match self {
-            Core::Gba(g) => &g.get_framebuffer()[..],
-            Core::GameBoy(g) => &g.get_framebuffer()[..],
-            Core::Nds(n) => &n.get_framebuffer()[..],
-        };
+        let (fb, _) = self.framebuffer();
         // FNV-1a over 64-bit words: ~20 µs for a GBA frame.
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         for w in fb.chunks_exact(2) {
@@ -262,6 +305,8 @@ struct CrabBoyApp {
     stats: (u32, u32),
     stats_since: Instant,
     frame_blender: FrameBlender,
+    /// The last frame skipped the blender (see `upload_frame`).
+    blender_bypassed: bool,
     blend_mode: FrameBlendMode,
     shader_preset: ShaderPreset,
     hd_mode7: HdMode7Config,
@@ -373,6 +418,7 @@ impl CrabBoyApp {
             stats: (0, 0),
             stats_since: Instant::now(),
             frame_blender: FrameBlender::new(),
+            blender_bypassed: false,
             blend_mode: FrameBlendMode::Off,
             shader_preset: ShaderPreset::Crisp,
             hd_mode7: HdMode7Config::default(),
@@ -434,7 +480,7 @@ impl CrabBoyApp {
     fn cycle_orientation(&mut self) {
         self.orientation = self.orientation.next();
         platform::set_orientation(self.orientation.activity_info());
-        if let Err(e) = std::fs::write(&self.orientation_path, self.orientation.as_str()) {
+        if let Err(e) = gba_simulator::fs_util::write_atomic(&self.orientation_path, self.orientation.as_str()) {
             log::warn!("Could not save rotation setting: {e}");
         }
     }
@@ -445,7 +491,7 @@ impl CrabBoyApp {
         // without `commit` reporting it.
         self.accessibility.commit();
         {
-            if let Err(e) = std::fs::write(&self.accessibility_path, self.accessibility.store.to_json()) {
+            if let Err(e) = gba_simulator::fs_util::write_atomic(&self.accessibility_path, self.accessibility.store.to_json()) {
                 log::warn!("Could not save accessibility settings: {e}");
             }
         }
@@ -499,7 +545,7 @@ impl CrabBoyApp {
     fn save_state(&mut self) {
         self.load_confirm = None;
         let (Some(path), Some(g)) = (self.state_path(), self.game.as_ref()) else { return };
-        match std::fs::write(&path, g.core.save_state()) {
+        match gba_simulator::fs_util::write_atomic(&path, g.core.save_state()) {
             Ok(()) => self.toast("State saved"),
             Err(e) => self.toast(format!("Save state failed: {e}")),
         }
@@ -563,7 +609,7 @@ impl CrabBoyApp {
 
     fn store_autosave_settings(&self) {
         let body = crate::autosave_settings::format(self.autosaver.enabled, self.autosaver.interval_minutes());
-        if let Err(e) = std::fs::write(&self.autosave_path, body) {
+        if let Err(e) = gba_simulator::fs_util::write_atomic(&self.autosave_path, body) {
             log::warn!("Could not save auto-save settings: {e}");
         }
     }
@@ -579,7 +625,7 @@ impl CrabBoyApp {
     }
 
     fn store_skin_settings(&self) {
-        if let Err(e) = std::fs::write(&self.skin_path, self.skin.to_json()) {
+        if let Err(e) = gba_simulator::fs_util::write_atomic(&self.skin_path, self.skin.to_json()) {
             log::warn!("Could not save skin settings: {e}");
         }
     }
@@ -693,7 +739,10 @@ impl CrabBoyApp {
         }
         if let Some(path) = platform::take_imported_rom() {
             self.refresh_library();
-            self.start_game(PathBuf::from(path));
+            // iOS reports a multi-file import as "" (refresh, don't start).
+            if !path.is_empty() {
+                self.start_game(PathBuf::from(path));
+            }
         }
     }
 
@@ -763,9 +812,18 @@ impl CrabBoyApp {
             && self.hd_mode7.scale == HdScale::Off
             && !matches!(&game.core, Core::Gba(g) if g.is_hd_pack_enabled());
         let settings = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&format!("{:?}{:?}", self.shader_preset, self.accessibility.active), &mut h);
-            std::hash::Hasher::finish(&h)
+            // Hash the settings' Debug text without building a String
+            // (this runs every UI frame).
+            struct HashWriter(std::collections::hash_map::DefaultHasher);
+            impl std::fmt::Write for HashWriter {
+                fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                    std::hash::Hasher::write(&mut self.0, s.as_bytes());
+                    Ok(())
+                }
+            }
+            let mut w = HashWriter(Default::default());
+            let _ = std::fmt::Write::write_fmt(&mut w, format_args!("{:?}{:?}", self.shader_preset, self.accessibility.active));
+            std::hash::Hasher::finish(&w.0)
         };
         let key = (game.core.frame_fingerprint(), settings);
         if static_pipeline && self.texture.is_some() && self.uploaded == Some(key) {
@@ -811,6 +869,37 @@ impl CrabBoyApp {
                 }
             }
         }
+
+        // Nothing to change about the pixels (no blending, a pass-through
+        // shader, no colour filter): one pass from the core's framebuffer
+        // straight into the texture image, instead of converting to bytes,
+        // back to words, through the blender and shader and back again.
+        let plain = self.blend_mode == FrameBlendMode::Off
+            && self.shader_preset.is_passthrough()
+            && self.accessibility.active.colorblind_mode == ColorblindMode::None;
+        if plain {
+            if !self.blender_bypassed {
+                // Blending turned back on later must not blend with frames
+                // from before it was bypassed.
+                self.frame_blender.reset();
+                self.blender_bypassed = true;
+            }
+            let (fb, size) = game.core.framebuffer();
+            let pixels = fb
+                .iter()
+                .map(|&px| {
+                    let [r, g, b, _] = px.to_le_bytes();
+                    Color32::from_rgb(r, g, b)
+                })
+                .collect();
+            let image = ColorImage { size, pixels };
+            match self.texture.as_mut() {
+                Some(t) if t.size() == size => t.set(image, TextureOptions::NEAREST),
+                _ => self.texture = Some(ctx.load_texture("screen", image, TextureOptions::NEAREST)),
+            }
+            return;
+        }
+        self.blender_bypassed = false;
 
         let size = game.core.frame_rgba(&mut self.rgba);
         if size != [240, 160] && self.accessibility.active.colorblind_mode != ColorblindMode::None {
@@ -1546,32 +1635,19 @@ impl CrabBoyApp {
         }
         let can_dismiss = self.menu_opened_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(200));
 
-        let full = ctx.screen_rect();
-        let backdrop_resp = egui::Area::new(egui::Id::new("menu_backdrop"))
-            .fixed_pos(full.min)
-            .order(egui::Order::Middle)
-            .show(ctx, |ui| {
-                let (_, resp) = ui.allocate_exact_size(full.size(), egui::Sense::click());
-                ui.painter().rect_filled(full, 0.0, Color32::from_black_alpha(100));
-                resp
-            });
-
-        let mut clicked_outside = can_dismiss && backdrop_resp.inner.clicked();
-
         let title = self.game.as_ref().map(|g| g.title.clone()).unwrap_or_default();
-        let win_resp = egui::Window::new("Menu")
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.set_min_width(260.0);
-                // Taller than a landscape phone: scroll rather than clip.
-                let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
-                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-                    ui.vertical_centered_justified(|ui| {
-                        ui.label(RichText::new(&title).strong());
-                        ui.separator();
+        let modal = egui::Modal::new(egui::Id::new("in_game_menu"))
+            .backdrop_color(Color32::from_black_alpha(120))
+            .frame(egui::Frame::window(&ctx.style()));
+
+        let modal_resp = modal.show(ctx, |ui| {
+            ui.set_min_width(260.0);
+            // Taller than a landscape phone: scroll rather than clip.
+            let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                ui.vertical_centered_justified(|ui| {
+                    ui.label(RichText::new(&title).strong());
+                    ui.separator();
                         if ui.button("Resume").clicked() {
                             self.menu_open = false;
                         }
@@ -1724,20 +1800,7 @@ impl CrabBoyApp {
                 });
             });
 
-        if can_dismiss {
-            if let Some(win) = win_resp {
-                let win_rect = win.response.rect;
-                let clicked_off = ctx.input(|i| {
-                    i.pointer.any_click()
-                        && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|pos| !win_rect.contains(pos))
-                });
-                if clicked_off {
-                    clicked_outside = true;
-                }
-            }
-        }
-
-        if clicked_outside {
+        if can_dismiss && modal_resp.should_close() {
             self.menu_open = false;
             self.menu_opened_at = None;
         }
@@ -2370,7 +2433,16 @@ impl eframe::App for CrabBoyApp {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(g) = self.game.as_mut() {
+            g.core.flush_save();
+        }
+    }
+
+    /// The iOS build renders with wgpu, whose `on_exit` takes no GL context.
+    #[cfg(target_os = "ios")]
+    fn on_exit(&mut self) {
         if let Some(g) = self.game.as_mut() {
             g.core.flush_save();
         }

@@ -337,7 +337,7 @@ impl GbCartridge {
             return;
         }
         if let Some(ref path) = self.save_path {
-            if let Err(e) = fs::write(path, &self.ram) {
+            if let Err(e) = crate::fs_util::write_atomic(path, &self.ram) {
                 log::warn!("Failed to write GB save {}: {}", path.display(), e);
                 return;
             }
