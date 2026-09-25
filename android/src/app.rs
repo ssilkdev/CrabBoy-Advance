@@ -18,6 +18,7 @@ use gba_simulator::gba::keypad::Key;
 use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
 use gba_simulator::gba::shader::{apply_shader, ShaderPreset};
 use gba_simulator::gba::Gba;
+use gba_simulator::nds::Nds;
 use winit::platform::android::activity::AndroidApp;
 
 use touch::{Buttons, TouchPad};
@@ -63,6 +64,7 @@ fn android_main(app: AndroidApp) {
 enum Core {
     Gba(Box<Gba>),
     GameBoy(Box<GameBoy>),
+    Nds(Box<Nds>),
 }
 
 impl Core {
@@ -81,6 +83,11 @@ impl Core {
                 gba.load_rom(path).map_err(|e| e.to_string())?;
                 Ok(Core::Gba(gba))
             }
+            "nds" | "srl" => {
+                let mut nds = Box::new(Nds::new());
+                nds.load_rom(path).map_err(|e| e.to_string())?;
+                Ok(Core::Nds(nds))
+            }
             other => Err(format!("Unsupported file type '.{other}'")),
         }
     }
@@ -89,6 +96,7 @@ impl Core {
         match self {
             Core::Gba(g) => g.run_frame(),
             Core::GameBoy(g) => g.run_frame(),
+            Core::Nds(n) => n.run_frame(),
         }
     }
 
@@ -102,6 +110,7 @@ impl Core {
                 .map(|c| (c.game_code.clone(), c.title.clone()))
                 .unwrap_or_default(),
             Core::GameBoy(g) => (String::new(), g.mmu.cart.title.clone()),
+            Core::Nds(n) => (n.game_code().to_string(), n.title().to_string()),
         }
     }
 
@@ -127,6 +136,7 @@ impl Core {
                         g.set_key(k, pressed);
                     }
                 }
+                Core::Nds(n) => n.set_key(key, pressed),
             }
         }
     }
@@ -137,6 +147,7 @@ impl Core {
         let (fb, size): (&[u32], [usize; 2]) = match self {
             Core::Gba(g) => (&g.get_framebuffer()[..], [240, 160]),
             Core::GameBoy(g) => (&g.get_framebuffer()[..], [160, 144]),
+            Core::Nds(n) => (&n.get_framebuffer()[..], [256, 384]),
         };
         out.clear();
         out.reserve(fb.len() * 4);
@@ -156,6 +167,7 @@ impl Core {
                 }
             }
             Core::GameBoy(g) => g.mmu.cart.sync_to_disk(),
+            Core::Nds(n) => n.flush_save(),
         }
     }
 
@@ -163,6 +175,7 @@ impl Core {
         match self {
             Core::Gba(g) => g.save_state(),
             Core::GameBoy(g) => g.save_state(),
+            Core::Nds(n) => n.save_state(),
         }
     }
 
@@ -170,6 +183,7 @@ impl Core {
         match self {
             Core::Gba(g) => g.load_state(data),
             Core::GameBoy(g) => g.load_state(data),
+            Core::Nds(n) => n.load_state(data),
         }
     }
 
@@ -178,6 +192,7 @@ impl Core {
         match self {
             Core::Gba(g) => g.mmu.apu.audio_output.set_stream_active(active),
             Core::GameBoy(g) => g.mmu.apu.audio_output.set_stream_active(active),
+            Core::Nds(_) => {}
         }
     }
 
@@ -187,6 +202,7 @@ impl Core {
         let fb: &[u32] = match self {
             Core::Gba(g) => &g.get_framebuffer()[..],
             Core::GameBoy(g) => &g.get_framebuffer()[..],
+            Core::Nds(n) => &n.get_framebuffer()[..],
         };
         // FNV-1a over 64-bit words: ~20 µs for a GBA frame.
         let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -200,6 +216,7 @@ impl Core {
         let out = match self {
             Core::Gba(g) => &mut g.mmu.apu.audio_output,
             Core::GameBoy(g) => &mut g.mmu.apu.audio_output,
+            Core::Nds(_) => return,
         };
         out.muted = muted;
         out.set_fast_forwarding(fast_forward);
@@ -945,6 +962,7 @@ impl CrabBoyApp {
                 let gba_count = self.library.iter().filter(|p| console_tag(p) == "GBA").count();
                 let gbc_count = self.library.iter().filter(|p| console_tag(p) == "GBC").count();
                 let gb_count = self.library.iter().filter(|p| console_tag(p) == "GB").count();
+                let nds_count = self.library.iter().filter(|p| console_tag(p) == "NDS").count();
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Console:").weak().size(13.0));
@@ -984,6 +1002,9 @@ impl CrabBoyApp {
                     }
                     if gb_count > 0 && chip(ui, "GB", self.filter_console == Some("GB"), gb_count) {
                         self.filter_console = if self.filter_console == Some("GB") { None } else { Some("GB") };
+                    }
+                    if nds_count > 0 && chip(ui, "NDS", self.filter_console == Some("NDS"), nds_count) {
+                        self.filter_console = if self.filter_console == Some("NDS") { None } else { Some("NDS") };
                     }
                 });
 
@@ -1065,6 +1086,7 @@ impl CrabBoyApp {
                                 ui.horizontal(|ui| {
                                     // Console Badge Pill
                                     let (pill_bg, pill_fg) = match tag {
+                                        "NDS" => (Color32::from_rgb(180, 50, 50), Color32::from_rgb(255, 235, 235)),
                                         "GBA" => (Color32::from_rgb(86, 68, 155), Color32::from_rgb(240, 235, 255)),
                                         "GBC" => (Color32::from_rgb(20, 120, 140), Color32::from_rgb(220, 250, 255)),
                                         _ => (Color32::from_rgb(72, 108, 48), Color32::from_rgb(235, 252, 225)),
@@ -1197,7 +1219,7 @@ impl CrabBoyApp {
                 );
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Your high-performance Game Boy Advance, Color & Classic emulator")
+                    RichText::new("Your high-performance Nintendo DS, Game Boy Advance, Color & Classic emulator")
                         .size(15.0)
                         .weak(),
                 );
@@ -1219,7 +1241,7 @@ impl CrabBoyApp {
 
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("Tap to pick a .gba, .gbc, or .gb file from your phone storage.")
+                    RichText::new("Tap to pick a .gba, .gbc, .gb, or .nds file from your phone storage.")
                         .size(13.0)
                         .weak(),
                 );
@@ -1548,7 +1570,7 @@ impl CrabBoyApp {
                 let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
                 egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
                     ui.vertical_centered_justified(|ui| {
-                        ui.label(RichText::new(title).strong());
+                        ui.label(RichText::new(&title).strong());
                         ui.separator();
                         if ui.button("Resume").clicked() {
                             self.menu_open = false;
@@ -1617,6 +1639,7 @@ impl CrabBoyApp {
                                         gb.mmu.apu.audio_output.set_surround_mode(next);
                                     }
                                 }
+                                Core::Nds(_) => {}
                             }
                         }
                         let blend_label = match self.blend_mode {
@@ -2357,7 +2380,7 @@ impl eframe::App for CrabBoyApp {
 fn is_rom(p: &Path) -> bool {
     matches!(
         p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
-        Some("gba" | "gb" | "gbc")
+        Some("gba" | "gb" | "gbc" | "nds" | "srl")
     )
 }
 
@@ -2369,6 +2392,7 @@ fn console_tag(p: &Path) -> &'static str {
     match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("gba") => "GBA",
         Some("gbc") => "GBC",
+        Some("nds" | "srl") => "NDS",
         _ => "GB",
     }
 }
