@@ -26,6 +26,12 @@
 //! Every field is optional. Image keys are a control name (`dpad`, `a`, `b`,
 //! `l`, `r`, `start`, `select`, `menu`, `fast`), optionally with `_pressed`,
 //! or `background_portrait` / `background_landscape`.
+//!
+//! Animation (`"animations": {"<image key>": {...}}`): an image can be a
+//! sprite sheet of `frames` equal frames in a grid `columns` wide (default
+//! 1: stacked top to bottom), read left to right then top to bottom and
+//! played at `fps`; and/or scroll (`scroll_x`, `scroll_y`, in image
+//! widths/heights per second, wrapping around).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -387,7 +393,76 @@ pub struct SkinManifest {
     pub author: String,
     pub colors: BTreeMap<String, String>,
     pub images: BTreeMap<String, String>,
+    /// Per image key: how it animates.
+    pub animations: BTreeMap<String, Animation>,
     pub layout: LayoutOverrides,
+}
+
+/// How a skin image animates. The default is a still image.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Animation {
+    /// Frames in the image (1 = not a sprite sheet).
+    pub frames: u32,
+    /// Frames per row of the sheet; rows = frames / columns (rounded up).
+    pub columns: u32,
+    /// Frames per second.
+    pub fps: f32,
+    /// Scroll speed in image widths / heights per second (wraps around).
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self { frames: 1, columns: 1, fps: 12.0, scroll_x: 0.0, scroll_y: 0.0 }
+    }
+}
+
+pub const MAX_FRAMES: u32 = 64;
+
+impl Animation {
+    pub fn is_animated(&self) -> bool {
+        self.frames > 1 || self.scroll_x != 0.0 || self.scroll_y != 0.0
+    }
+
+    /// Part of the image (in 0..1 texture coordinates) to show `t` seconds
+    /// in. Scrolling goes past 1.0; the texture repeats.
+    pub fn uv(&self, t: f64) -> Rect {
+        let frames = self.frames.clamp(1, MAX_FRAMES);
+        let (cols, rows) = self.grid();
+        let frame = if frames > 1 && self.fps > 0.0 {
+            (t * self.fps as f64) as u64 % frames as u64
+        } else {
+            0
+        } as u32;
+        let (w, h) = (1.0 / cols as f32, 1.0 / rows as f32);
+        let (fx, fy) = ((frame % cols) as f32 * w, (frame / cols) as f32 * h);
+        let wrap = |v: f64| v.rem_euclid(1.0) as f32;
+        let (sx, sy) = (wrap(t * self.scroll_x as f64) * w, wrap(t * self.scroll_y as f64) * h);
+        Rect::from_min_size(Pos2::new(fx + sx, fy + sy), Vec2::new(w, h))
+    }
+
+    /// (columns, rows) of the frame grid.
+    pub fn grid(&self) -> (u32, u32) {
+        let frames = self.frames.clamp(1, MAX_FRAMES);
+        let cols = self.columns.clamp(1, frames);
+        (cols, frames.div_ceil(cols))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.frames == 0 || self.frames > MAX_FRAMES {
+            return Err(format!("frames must be 1 to {MAX_FRAMES}"));
+        }
+        if self.columns == 0 || self.columns > self.frames {
+            return Err("columns must be 1 to the number of frames".into());
+        }
+        let finite = [self.fps, self.scroll_x, self.scroll_y].iter().all(|v| v.is_finite());
+        if !finite || self.fps < 0.0 || self.fps > 60.0 || self.scroll_x.abs() > 10.0 || self.scroll_y.abs() > 10.0 {
+            return Err("fps must be 0-60 and scroll speeds -10 to 10".into());
+        }
+        Ok(())
+    }
 }
 
 impl SkinManifest {
@@ -468,8 +543,20 @@ pub fn read_pack(zip: &[u8]) -> Result<SkinPack, String> {
             return Err(format!("Image \"{file}\" must be a .png at the top of the skin"));
         }
         let data = files.get(file).ok_or_else(|| format!("skin.json lists \"{file}\", but it is missing"))?;
-        check_png(data).map_err(|e| format!("{file}: {e}"))?;
+        let (w, h) = check_png(data).map_err(|e| format!("{file}: {e}"))?;
+        if let Some(a) = manifest.animations.get(key) {
+            a.validate().map_err(|e| format!("Animation \"{key}\": {e}"))?;
+            let (cols, rows) = a.grid();
+            if w % cols != 0 || h % rows != 0 {
+                return Err(format!("{file}: {w}x{h} doesn't split into {cols}x{rows} equal frames"));
+            }
+        }
         out.insert(file.clone(), data.clone());
+    }
+    for key in manifest.animations.keys() {
+        if !manifest.images.contains_key(key) {
+            return Err(format!("Animation \"{key}\" has no image"));
+        }
     }
     for (k, v) in &manifest.colors {
         if parse_color(v).is_none() {
@@ -560,6 +647,16 @@ pub struct InstalledSkin {
 impl InstalledSkin {
     pub fn display_name(&self) -> &str {
         if self.manifest.name.trim().is_empty() { &self.id } else { &self.manifest.name }
+    }
+
+    /// Animation for each animated image.
+    pub fn animations(&self) -> BTreeMap<SkinImage, Animation> {
+        self.manifest
+            .animations
+            .iter()
+            .filter_map(|(k, a)| Some((SkinImage::parse(k)?, *a)))
+            .filter(|(_, a)| a.is_animated() && a.validate().is_ok())
+            .collect()
     }
 
     /// Image files by what they're for.
@@ -1071,6 +1168,56 @@ mod tests {
         let pack = read_pack(&bytes).unwrap();
         assert_eq!(pack.manifest.name, "Gold Rush");
         assert_eq!(pack.files.len(), 8);
+    }
+
+    /// The generated Synthwave pack (docs/skins/make_synthwave_skin.py)
+    /// validates, with its animations, if present.
+    #[test]
+    fn synthwave_pack_reads() {
+        let Some(home) = std::env::var_os("HOME") else { return };
+        let p = std::path::Path::new(&home).join(".hermes/cache/scratch/Synthwave-skin.zip");
+        let Ok(bytes) = std::fs::read(&p) else { return };
+        let pack = read_pack(&bytes).unwrap();
+        assert_eq!(pack.manifest.name, "Synthwave");
+        assert!(pack.manifest.animations.len() >= 9);
+        assert!(pack.manifest.animations["background_portrait"].frames == 8);
+        assert!(pack.manifest.animations["background_portrait"].columns > 1);
+    }
+
+    #[test]
+    fn animation_frames_and_scrolling() {
+        // 2x2 grid: frames go left to right, then down.
+        let g = Animation { frames: 4, columns: 2, fps: 1.0, ..Default::default() };
+        let at = |t: f64| (g.uv(t).min.x, g.uv(t).min.y);
+        assert_eq!(at(0.0), (0.0, 0.0));
+        assert_eq!(at(1.1), (0.5, 0.0));
+        assert_eq!(at(2.1), (0.0, 0.5));
+        assert_eq!(at(3.1), (0.5, 0.5));
+        assert_eq!(g.uv(0.0).size(), Vec2::new(0.5, 0.5));
+        let odd = Animation { frames: 5, columns: 2, ..Default::default() };
+        assert_eq!(odd.grid(), (2, 3));
+        let a = Animation { frames: 4, fps: 2.0, ..Default::default() };
+        assert_eq!(a.uv(0.0).min.y, 0.0);
+        assert!((a.uv(0.6).min.y - 0.25).abs() < 1e-6, "frame 1 after 0.5 s");
+        assert!((a.uv(2.1).min.y - 0.0).abs() < 1e-6, "loops after 4 frames");
+        assert!((a.uv(0.0).height() - 0.25).abs() < 1e-6);
+        let s = Animation { scroll_x: 0.5, ..Default::default() };
+        assert!((s.uv(0.5).min.x - 0.25).abs() < 1e-6);
+        assert!((s.uv(3.0).min.x - 0.5).abs() < 1e-6, "wraps");
+        assert!(!Animation::default().is_animated());
+        let png = test_zip::png(16, 30);
+        let json = br#"{"images": {"a": "a.png"}, "animations": {"a": {"frames": 3, "fps": 8}}}"#;
+        assert!(read_pack(&test_zip::build(&[("skin.json", json, false), ("a.png", &png, false)])).is_ok());
+        let bad = [
+            (&br#"{"images": {"a": "a.png"}, "animations": {"a": {"frames": 4}}}"#[..], "equal frames"),
+            (&br#"{"images": {"a": "a.png"}, "animations": {"a": {"frames": 3, "columns": 4}}}"#[..], "columns"),
+            (&br#"{"images": {"a": "a.png"}, "animations": {"a": {"frames": 3, "fps": 500}}}"#[..], "fps"),
+            (&br#"{"images": {"a": "a.png"}, "animations": {"b": {"frames": 3}}}"#[..], "has no image"),
+        ];
+        for (json, want) in bad {
+            let err = read_pack(&test_zip::build(&[("skin.json", json, false), ("a.png", &png, false)])).unwrap_err();
+            assert!(err.contains(want), "{want}: {err}");
+        }
     }
 
     #[test]

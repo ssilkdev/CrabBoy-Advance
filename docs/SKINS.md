@@ -20,6 +20,15 @@ The **Menu → Skin & controls…** screen changes how the on-screen buttons loo
 
 All of this is saved in `files/skin.json`.
 
+## Included examples
+
+- `docs/skins/make_sample_skin.py` builds **Gold Rush**, a still skin.
+- `docs/skins/make_synthwave_skin.py` builds **Synthwave**, an animated skin:
+  - A striped retro sun and a neon grid rolling towards you, with twinkling stars.
+  - Pulsing neon buttons that flare when pressed.
+
+  Run `python3 docs/skins/make_synthwave_skin.py Synthwave.zip`; it needs Pillow.
+
 ## Making a skin
 
 A skin is a `.zip` file with a `skin.json`, plus PNG images if you want them. The files can sit at the top level of the zip or inside one folder.
@@ -63,6 +72,21 @@ Every field is optional.
   - Add `_pressed` to a name for the image shown while the button is held, for example `a_pressed`. Without one, the normal image is darkened while held.
   - `background_portrait` and `background_landscape` fill the whole screen behind the game.
   - Images must be PNG files, 2048×2048 pixels or smaller. They're stretched to fit the button, so square images work best for round buttons and the D-pad.
+- **`animations`**
+  - Makes an image move. Each entry is keyed by an image slot, for example `"a"` or `"background_portrait"`.
+  - `frames` is the number of animation frames in the image.
+  - `columns` sets how many frames sit side by side. The default is 1, meaning the frames are stacked top to bottom. Frames are read left to right, then top to bottom.
+  - `fps` is the playback speed, from 0 to 60 frames per second.
+  - `scroll_x` and `scroll_y` make an image scroll and wrap around, in image widths or heights per second (-10 to 10).
+  - The image has to divide evenly into the frames.
+  - Example:
+
+    ```json
+    "animations": {
+      "a": { "frames": 8, "fps": 6 },
+      "background_portrait": { "frames": 8, "columns": 4, "fps": 8 }
+    }
+    ```
 - **`layout`**
   - Moves and resizes buttons relative to where they normally sit.
   - `dx` and `dy` are fractions of the screen size; `-0.05` means 5% towards the top or left.

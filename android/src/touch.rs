@@ -329,13 +329,13 @@ impl TouchPad {
 /// How to draw the controls: theme colours plus optional skin images.
 pub struct Look<'a> {
     pub colors: crate::skin::ThemeColors,
-    /// Texture for a control, by (control, pressed). A pressed image falls
-    /// back to the normal one.
-    pub images: &'a dyn Fn(crate::skin::Control, bool) -> Option<egui::TextureId>,
+    /// Texture and the part of it to show (animation frame) for a control,
+    /// by (control, pressed). A pressed image falls back to the normal one.
+    pub images: &'a dyn Fn(crate::skin::Control, bool) -> Option<(egui::TextureId, Rect)>,
 }
 
 impl Look<'_> {
-    fn image(&self, c: crate::skin::Control, pressed: bool) -> Option<egui::TextureId> {
+    fn image(&self, c: crate::skin::Control, pressed: bool) -> Option<(egui::TextureId, Rect)> {
         (self.images)(c, pressed).or_else(|| if pressed { (self.images)(c, false) } else { None })
     }
 }
@@ -345,10 +345,10 @@ pub fn classic_look() -> Look<'static> {
     Look { colors: crate::skin::Theme::CLASSIC.colors(1.0), images: &|_, _| None }
 }
 
-fn draw_image(p: &Painter, tex: egui::TextureId, rect: Rect, pressed: bool) {
+fn draw_image(p: &Painter, (tex, uv): (egui::TextureId, Rect), rect: Rect, pressed: bool) {
     // Pressed without its own image: darken the normal one.
     let tint = if pressed { Color32::from_gray(170) } else { Color32::WHITE };
-    p.image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+    p.image(tex, rect, uv, tint);
 }
 
 pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look<'_>) {

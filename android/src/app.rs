@@ -271,6 +271,10 @@ struct CrabBoyApp {
     skins_dir: PathBuf,
     /// The active skin's textures, loaded on demand.
     skin_textures: std::collections::BTreeMap<SkinImage, TextureHandle>,
+    /// Animated skin images and their settings.
+    skin_animations: std::collections::BTreeMap<SkinImage, skin::Animation>,
+    /// Clock for skin animations.
+    skin_clock: Instant,
     /// The active custom skin, if any (its colours, images and layout).
     custom_skin: Option<skin::InstalledSkin>,
     skin_textures_for: String,
@@ -357,6 +361,8 @@ impl CrabBoyApp {
             skin_path,
             skins_dir,
             skin_textures: Default::default(),
+            skin_animations: Default::default(),
+            skin_clock: Instant::now(),
             custom_skin: None,
             skin_textures_for: String::new(),
             skin_menu: false,
@@ -536,8 +542,11 @@ impl CrabBoyApp {
             return;
         }
         self.skin_textures.clear();
+        self.skin_animations.clear();
         self.skin_textures_for = self.skin.skin.clone();
         let Some(custom) = &self.custom_skin else { return };
+        self.skin_animations = custom.animations();
+        let animations = self.skin_animations.clone();
         for (what, path) in custom.images() {
             let loaded = std::fs::read(&path)
                 .ok()
@@ -548,7 +557,14 @@ impl CrabBoyApp {
                     let size = [rgba.width() as usize, rgba.height() as usize];
                     let ci = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                     let name = format!("skin-{what:?}");
-                    self.skin_textures.insert(what, ctx.load_texture(name, ci, TextureOptions::LINEAR));
+                    // Scrolling images repeat; everything else clamps.
+                    let scrolls = animations.get(&what).is_some_and(|a| a.scroll_x != 0.0 || a.scroll_y != 0.0);
+                    let options = if scrolls {
+                        TextureOptions { wrap_mode: egui::TextureWrapMode::Repeat, ..TextureOptions::LINEAR }
+                    } else {
+                        TextureOptions::LINEAR
+                    };
+                    self.skin_textures.insert(what, ctx.load_texture(name, ci, options));
                 }
                 None => log::warn!("Skin image {} could not be loaded", path.display()),
             }
@@ -824,13 +840,12 @@ impl CrabBoyApp {
                 let painter = ui.painter();
                 let full = ctx.screen_rect();
                 let portrait = full.height() > full.width();
-                if let Some(bg) = self.skin_textures.get(&SkinImage::Background { portrait }) {
-                    painter.image(
-                        bg.id(),
-                        full,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                let t = self.skin_clock.elapsed().as_secs_f64();
+                let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                let bg_key = SkinImage::Background { portrait };
+                if let Some(bg) = self.skin_textures.get(&bg_key) {
+                    let uv = self.skin_animations.get(&bg_key).map_or(full_uv, |a| a.uv(t));
+                    painter.image(bg.id(), full, uv, Color32::WHITE);
                 }
                 if let Some(tex) = &self.texture {
                     painter.image(
@@ -842,7 +857,12 @@ impl CrabBoyApp {
                 }
                 let colors = self.theme().colors(self.skin.opacity);
                 let textures = &self.skin_textures;
-                let images = |c: Control, pressed: bool| textures.get(&SkinImage::Control(c, pressed)).map(|t| t.id());
+                let animations = &self.skin_animations;
+                let images = |c: Control, pressed: bool| {
+                    let key = SkinImage::Control(c, pressed);
+                    let uv = animations.get(&key).map_or(full_uv, |a| a.uv(t));
+                    textures.get(&key).map(|tex| (tex.id(), uv))
+                };
                 let look = touch::Look { colors, images: &images };
                 let show_controls = match self.skin.visibility {
                     skin::Visibility::Always => true,
@@ -1514,8 +1534,12 @@ impl eframe::App for CrabBoyApp {
         let emulating = self.screen == Screen::Playing
             && self.game.is_some()
             && !(self.menu_open || self.any_sheet_open());
+        let animating = self.screen == Screen::Playing && !self.skin_animations.is_empty();
         if emulating {
             ctx.request_repaint();
+        } else if animating {
+            // Animated skin behind a menu: ~30 fps is plenty.
+            ctx.request_repaint_after(Duration::from_millis(33));
         } else {
             let toast_left = self
                 .toast
