@@ -29,6 +29,7 @@ const MAX_CATCHUP_FRAMES: u32 = 3;
 /// imports and expiring toasts without redrawing 60 times a second.
 const IDLE_TICK: Duration = Duration::from_millis(500);
 const FAST_FORWARD_SPEED: u32 = 3;
+const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon_256.png");
 
 #[no_mangle]
 fn android_main(app: AndroidApp) {
@@ -287,6 +288,11 @@ struct CrabBoyApp {
     installed_skins: Vec<skin::InstalledSkin>,
     /// Pending quick-load confirmation timestamp for accidental-tap protection.
     load_confirm: Option<Instant>,
+    logo_texture: Option<TextureHandle>,
+    search_query: String,
+    filter_console: Option<&'static str>,
+    confirm_delete_rom: Option<PathBuf>,
+    startup_settings_open: bool,
 }
 
 impl CrabBoyApp {
@@ -376,6 +382,11 @@ impl CrabBoyApp {
             layout_editor: None,
             installed_skins: Vec::new(),
             load_confirm: None,
+            logo_texture: None,
+            search_query: String::new(),
+            filter_console: None,
+            confirm_delete_rom: None,
+            startup_settings_open: false,
         };
         app.refresh_skins();
         app.refresh_library();
@@ -540,7 +551,12 @@ impl CrabBoyApp {
 
     /// A sheet over the game (settings, editor) is open: the game pauses.
     fn any_sheet_open(&self) -> bool {
-        self.accessibility_menu || self.autosave_menu || self.skin_menu || self.layout_editor.is_some()
+        self.accessibility_menu
+            || self.autosave_menu
+            || self.skin_menu
+            || self.layout_editor.is_some()
+            || self.startup_settings_open
+            || self.confirm_delete_rom.is_some()
     }
 
     fn store_skin_settings(&self) {
@@ -812,57 +828,644 @@ impl CrabBoyApp {
         }
     }
 
+    fn ensure_logo_texture(&mut self, ctx: &egui::Context) {
+        if self.logo_texture.is_none() {
+            if let Ok(img) = image::load_from_memory_with_format(APP_ICON_PNG, image::ImageFormat::Png) {
+                let rgba = img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let ci = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                self.logo_texture = Some(ctx.load_texture("app-logo-256", ci, TextureOptions::LINEAR));
+            }
+        }
+    }
+
     fn library_ui(&mut self, ctx: &egui::Context) {
         let insets = self.insets.to_points(ctx);
+        self.ensure_logo_texture(ctx);
+        let logo_id = self.logo_texture.as_ref().map(|t| t.id());
+
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(insets.margin(12.0)))
+            .frame(
+                egui::Frame::central_panel(&ctx.style())
+                    .fill(Color32::from_rgb(14, 16, 22))
+                    .inner_margin(insets.margin(12.0)),
+            )
             .show(ctx, |ui| {
+                // Top Header Row
                 ui.horizontal(|ui| {
-                    ui.heading(RichText::new("CrabBoy Advance").strong());
+                    if let Some(id) = logo_id {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                        ui.painter().image(
+                            id,
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                        ui.add_space(2.0);
+                    }
+                    ui.label(RichText::new("CrabBoy Advance").heading().strong().color(Color32::WHITE));
+
+                    // Version pill badge
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgb(32, 38, 54))
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("v5.2")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(Color32::from_rgb(140, 175, 230)),
+                            );
+                        });
+
+                    // Right-to-left action toolbar
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Import ROM").clicked() {
-                            platform::pick_rom();
+                        if self.game.is_some() {
+                            let resume_btn = egui::Button::new(
+                                RichText::new("▶ Resume")
+                                    .strong()
+                                    .color(Color32::from_rgb(80, 255, 170)),
+                            )
+                            .min_size(egui::vec2(0.0, 36.0));
+                            if ui.add(resume_btn).clicked() {
+                                self.screen = Screen::Playing;
+                            }
                         }
-                        if self.game.is_some() && ui.button("Resume").clicked() {
-                            self.screen = Screen::Playing;
+
+                        if ui.add(egui::Button::new("⚙").min_size(egui::vec2(36.0, 36.0))).on_hover_text("Settings").clicked() {
+                            self.startup_settings_open = true;
+                        }
+
+                        if ui.add(egui::Button::new("🎨 Skins").min_size(egui::vec2(0.0, 36.0))).clicked() {
+                            self.refresh_skins();
+                            self.skin_menu = true;
+                        }
+
+                        let import_btn = egui::Button::new(
+                            RichText::new("📥 Import").strong().color(Color32::from_rgb(220, 240, 255)),
+                        )
+                        .min_size(egui::vec2(0.0, 36.0));
+                        if ui.add(import_btn).clicked() {
+                            platform::pick_rom();
                         }
                     });
                 });
-                ui.separator();
 
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                // If library is completely empty: show onboarding empty state
                 if self.library.is_empty() {
-                    ui.add_space(24.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label("No games yet.");
-                        ui.label("Tap \"Import ROM\" and pick a .gba, .gb or .gbc file from your phone.");
-                        ui.label("Have a save from another emulator? Import its .sav the same way.");
-                        ui.add_space(12.0);
-                        if ui.button(RichText::new("Import ROM").size(22.0)).clicked() {
-                            platform::pick_rom();
-                        }
-                    });
+                    self.empty_library_ui(ui, logo_id);
+                    self.startup_dialogs(ctx);
                     return;
                 }
 
-                let mut launch = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for path in &self.library {
-                        let tag = match path.extension().and_then(|e| e.to_str()) {
-                            Some(e) if e.eq_ignore_ascii_case("gba") => "GBA",
-                            Some(e) if e.eq_ignore_ascii_case("gbc") => "GBC",
-                            _ => "GB",
-                        };
-                        let text = RichText::new(format!("{tag}   {}", display_name(path))).size(20.0);
-                        let button = egui::Button::new(text).min_size(egui::vec2(ui.available_width(), 56.0));
-                        if ui.add(button).clicked() {
-                            launch = Some(path.clone());
-                        }
+                // Search & Filter Toolbar
+                ui.horizontal(|ui| {
+                    let text_w = (ui.available_width() - if self.search_query.is_empty() { 0.0 } else { 38.0 }).max(100.0);
+                    ui.add_sized(
+                        [text_w, 36.0],
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text("🔍 Search games..."),
+                    );
+                    if !self.search_query.is_empty() && ui.add(egui::Button::new("✖").min_size(egui::vec2(32.0, 36.0))).clicked() {
+                        self.search_query.clear();
                     }
                 });
+
+                ui.add_space(6.0);
+
+                // Console Filter Chips
+                let total_all = self.library.len();
+                let gba_count = self.library.iter().filter(|p| console_tag(p) == "GBA").count();
+                let gbc_count = self.library.iter().filter(|p| console_tag(p) == "GBC").count();
+                let gb_count = self.library.iter().filter(|p| console_tag(p) == "GB").count();
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Console:").weak().size(13.0));
+
+                    let chip = |ui: &mut egui::Ui, label: &str, active: bool, count: usize| -> bool {
+                        let text = format!("{label} ({count})");
+                        let fill = if active {
+                            Color32::from_rgb(60, 75, 120)
+                        } else {
+                            Color32::from_rgb(25, 28, 38)
+                        };
+                        let stroke = if active {
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 150, 240))
+                        } else {
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(45, 50, 65))
+                        };
+                        let text_color = if active {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_rgb(170, 175, 195)
+                        };
+                        let btn = egui::Button::new(RichText::new(text).size(13.0).strong().color(text_color))
+                            .fill(fill)
+                            .stroke(stroke)
+                            .corner_radius(egui::CornerRadius::same(12));
+                        ui.add(btn).clicked()
+                    };
+
+                    if chip(ui, "All", self.filter_console.is_none(), total_all) {
+                        self.filter_console = None;
+                    }
+                    if gba_count > 0 && chip(ui, "GBA", self.filter_console == Some("GBA"), gba_count) {
+                        self.filter_console = if self.filter_console == Some("GBA") { None } else { Some("GBA") };
+                    }
+                    if gbc_count > 0 && chip(ui, "GBC", self.filter_console == Some("GBC"), gbc_count) {
+                        self.filter_console = if self.filter_console == Some("GBC") { None } else { Some("GBC") };
+                    }
+                    if gb_count > 0 && chip(ui, "GB", self.filter_console == Some("GB"), gb_count) {
+                        self.filter_console = if self.filter_console == Some("GB") { None } else { Some("GB") };
+                    }
+                });
+
+                ui.add_space(6.0);
+
+                // Filter games
+                let query = self.search_query.trim().to_lowercase();
+                let matches_filter = |p: &Path| -> bool {
+                    match self.filter_console {
+                        Some(tag) => console_tag(p) == tag,
+                        None => true,
+                    }
+                };
+                let matches_search = |p: &Path| -> bool {
+                    if query.is_empty() {
+                        true
+                    } else {
+                        display_name(p).to_lowercase().contains(&query)
+                    }
+                };
+
+                let filtered: Vec<&PathBuf> = self
+                    .library
+                    .iter()
+                    .filter(|p| matches_filter(p) && matches_search(p))
+                    .collect();
+
+                if filtered.is_empty() {
+                    ui.add_space(32.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("No games found").heading().color(Color32::from_rgb(200, 210, 230)));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("No games match your current search or console filter.").weak());
+                        ui.add_space(12.0);
+                        if ui.button("Clear Search & Filter").clicked() {
+                            self.search_query.clear();
+                            self.filter_console = None;
+                        }
+                    });
+                    self.startup_dialogs(ctx);
+                    return;
+                }
+
+                // Game List ScrollArea
+                let mut launch = None;
+                let mut delete_req = None;
+                let running_path = self.game.as_ref().map(|g| g.rom_path.clone());
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(2.0);
+                    for path in &filtered {
+                        let title = display_name(path);
+                        let tag = console_tag(path);
+                        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let has_state = self.states_dir.join(format!("{stem}.state")).exists();
+                        let has_sav = self.states_dir.join(format!("{stem}.sav")).exists()
+                            || self.roms_dir.join(format!("{stem}.sav")).exists();
+                        let is_active = running_path.as_ref() == Some(*path);
+                        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        let size_str = format_size(file_size);
+
+                        let card_bg = if is_active {
+                            Color32::from_rgb(22, 34, 30)
+                        } else {
+                            Color32::from_rgb(24, 27, 37)
+                        };
+                        let card_stroke = if is_active {
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 160, 100))
+                        } else {
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(40, 45, 60))
+                        };
+
+                        egui::Frame::NONE
+                            .fill(card_bg)
+                            .stroke(card_stroke)
+                            .corner_radius(egui::CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Console Badge Pill
+                                    let (pill_bg, pill_fg) = match tag {
+                                        "GBA" => (Color32::from_rgb(86, 68, 155), Color32::from_rgb(240, 235, 255)),
+                                        "GBC" => (Color32::from_rgb(20, 120, 140), Color32::from_rgb(220, 250, 255)),
+                                        _ => (Color32::from_rgb(72, 108, 48), Color32::from_rgb(235, 252, 225)),
+                                    };
+                                    egui::Frame::NONE
+                                        .fill(pill_bg)
+                                        .corner_radius(egui::CornerRadius::same(6))
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .show(ui, |ui| {
+                                            ui.label(RichText::new(tag).strong().size(13.0).color(pill_fg));
+                                        });
+
+                                    ui.add_space(8.0);
+
+                                    // Main column: title and metadata
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(&title).strong().size(17.0).color(Color32::WHITE));
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(&size_str).size(12.0).weak());
+                                            if has_sav {
+                                                egui::Frame::NONE
+                                                    .fill(Color32::from_rgb(22, 54, 38))
+                                                    .corner_radius(egui::CornerRadius::same(4))
+                                                    .inner_margin(egui::Margin::symmetric(5, 2))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new("🔋 Save")
+                                                                .size(11.0)
+                                                                .color(Color32::from_rgb(140, 230, 170)),
+                                                        );
+                                                    });
+                                            }
+                                            if has_state {
+                                                egui::Frame::NONE
+                                                    .fill(Color32::from_rgb(32, 48, 76))
+                                                    .corner_radius(egui::CornerRadius::same(4))
+                                                    .inner_margin(egui::Margin::symmetric(5, 2))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new("💾 State")
+                                                                .size(11.0)
+                                                                .color(Color32::from_rgb(160, 200, 255)),
+                                                        );
+                                                    });
+                                            }
+                                            if is_active {
+                                                egui::Frame::NONE
+                                                    .fill(Color32::from_rgb(18, 65, 45))
+                                                    .corner_radius(egui::CornerRadius::same(4))
+                                                    .inner_margin(egui::Margin::symmetric(5, 2))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new("● Running")
+                                                                .strong()
+                                                                .size(11.0)
+                                                                .color(Color32::from_rgb(80, 255, 160)),
+                                                        );
+                                                    });
+                                            }
+                                        });
+                                    });
+
+                                    // Right column: Actions
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        // Delete icon button
+                                        let del_btn = egui::Button::new(
+                                            RichText::new("🗑").size(15.0).color(Color32::from_rgb(210, 100, 100)),
+                                        )
+                                        .min_size(egui::vec2(36.0, 38.0));
+                                        if ui.add(del_btn).on_hover_text("Delete ROM").clicked() {
+                                            delete_req = Some((*path).clone());
+                                        }
+
+                                        // Play / Resume button
+                                        let play_label = if is_active { "▶ Resume" } else { "▶ Play" };
+                                        let play_color = if is_active {
+                                            Color32::from_rgb(100, 255, 180)
+                                        } else {
+                                            Color32::from_rgb(220, 235, 255)
+                                        };
+                                        let play_btn = egui::Button::new(
+                                            RichText::new(play_label).strong().size(15.0).color(play_color),
+                                        )
+                                        .min_size(egui::vec2(84.0, 38.0));
+                                        if ui.add(play_btn).clicked() {
+                                            launch = Some((*path).clone());
+                                        }
+                                    });
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+
+                if let Some(p) = delete_req {
+                    self.confirm_delete_rom = Some(p);
+                }
                 if let Some(p) = launch {
-                    self.start_game(p);
+                    if running_path.as_ref() == Some(&p) {
+                        self.screen = Screen::Playing;
+                    } else {
+                        self.start_game(p);
+                    }
+                }
+
+                self.startup_dialogs(ctx);
+            });
+    }
+
+    fn empty_library_ui(&mut self, ui: &mut egui::Ui, logo_id: Option<egui::TextureId>) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                if let Some(id) = logo_id {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover());
+                    ui.painter().image(
+                        id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    ui.add_space(8.0);
+                }
+
+                ui.heading(
+                    RichText::new("Welcome to CrabBoy Advance")
+                        .size(24.0)
+                        .strong()
+                        .color(Color32::WHITE),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Your high-performance Game Boy Advance, Color & Classic emulator")
+                        .size(15.0)
+                        .weak(),
+                );
+                ui.add_space(16.0);
+
+                let cta_btn = egui::Button::new(
+                    RichText::new("📥  Import Your First ROM")
+                        .size(18.0)
+                        .strong()
+                        .color(Color32::from_rgb(240, 245, 255)),
+                )
+                .fill(Color32::from_rgb(58, 80, 160))
+                .min_size(egui::vec2(240.0, 48.0))
+                .corner_radius(egui::CornerRadius::same(10));
+
+                if ui.add(cta_btn).clicked() {
+                    platform::pick_rom();
+                }
+
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Tap to pick a .gba, .gbc, or .gb file from your phone storage.")
+                        .size(13.0)
+                        .weak(),
+                );
+                ui.label(
+                    RichText::new("Have save files (.sav) from another emulator? Import them the same way.")
+                        .size(12.0)
+                        .weak(),
+                );
+                ui.add_space(24.0);
+
+                // Feature Highlights Grid/Cards
+                ui.label(
+                    RichText::new("FEATURE HIGHLIGHTS")
+                        .size(12.0)
+                        .strong()
+                        .color(Color32::from_rgb(120, 140, 180)),
+                );
+                ui.add_space(8.0);
+
+                let feature_cards = [
+                    (
+                        "⚡ High Accuracy Emulation",
+                        "Cycle-accurate GBA ARM7TDMI & Game Boy cores running at full 60 FPS with low input latency.",
+                    ),
+                    (
+                        "🎨 Custom Touch Skins",
+                        "Fully themeable touch controls, on-screen skin packs, drag-and-drop layout editor & haptics.",
+                    ),
+                    (
+                        "💾 Safe Saves & Auto-Saves",
+                        "Instant state saves, battery .sav compatibility, and automatic rolling backup saves.",
+                    ),
+                    (
+                        "🔊 HD Audio & Visuals",
+                        "3D headphone surround sound, HD re-synthesis, CRT scanlines, LCD grids & HD Mode 7.",
+                    ),
+                ];
+
+                for (heading, desc) in feature_cards {
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgb(22, 25, 34))
+                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(38, 42, 56)))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width().min(460.0));
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(heading).strong().size(15.0).color(Color32::from_rgb(210, 225, 255)));
+                                ui.add_space(2.0);
+                                ui.label(RichText::new(desc).size(13.0).weak());
+                            });
+                        });
+                    ui.add_space(8.0);
                 }
             });
+        });
+    }
+
+    fn startup_dialogs(&mut self, ctx: &egui::Context) {
+        // Delete Confirmation Modal
+        if let Some(path) = self.confirm_delete_rom.clone() {
+            let name = display_name(&path);
+            let mut close_modal = false;
+            let mut do_delete = false;
+
+            egui::Window::new("Confirm Deletion")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Remove ROM?").heading().strong().color(Color32::WHITE));
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(&name).strong().size(16.0).color(Color32::from_rgb(220, 230, 255)));
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Remove this game from your CrabBoy library? Your save files (.sav) and save states (.state) will remain safe and will NOT be deleted.")
+                                .size(13.0)
+                                .weak(),
+                        );
+                        ui.add_space(16.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(80.0, 36.0))).clicked() {
+                                close_modal = true;
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let del_btn = egui::Button::new(
+                                    RichText::new("Delete").strong().color(Color32::from_rgb(255, 100, 100)),
+                                )
+                                .fill(Color32::from_rgb(60, 25, 25))
+                                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(140, 40, 40)))
+                                .min_size(egui::vec2(90.0, 36.0));
+                                if ui.add(del_btn).clicked() {
+                                    do_delete = true;
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                    });
+                });
+
+            if do_delete {
+                if self.game.as_ref().is_some_and(|g| g.rom_path == path) {
+                    self.close_game();
+                }
+                let _ = std::fs::remove_file(&path);
+                self.confirm_delete_rom = None;
+                self.refresh_library();
+                self.toast(format!("Removed {name}"));
+            } else if close_modal {
+                self.confirm_delete_rom = None;
+            }
+        }
+
+        // Startup Settings Modal
+        if self.startup_settings_open {
+            let mut close = false;
+            let max_w = (ctx.screen_rect().width() - 24.0).max(200.0);
+            let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
+            egui::Window::new("Settings")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .max_width(max_w)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_min_width(280.0f32.min(max_w));
+                    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                        ui.vertical_centered_justified(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("⚙ Settings").strong().size(18.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("Done").clicked() {
+                                        close = true;
+                                    }
+                                });
+                            });
+                            ui.separator();
+
+                            ui.label(RichText::new("Display & Orientation").weak());
+                            if ui.button(self.orientation.label()).clicked() {
+                                self.cycle_orientation();
+                            }
+
+                            let shader_label = match self.shader_preset {
+                                ShaderPreset::Crisp => "Shader: Crisp",
+                                ShaderPreset::Linear => "Shader: Bilinear",
+                                ShaderPreset::LcdGrid => "Shader: LCD Grid",
+                                ShaderPreset::LcdSubpixel => "Shader: LCD Subpixels",
+                                ShaderPreset::CrtScanlines => "Shader: CRT Scanlines",
+                                ShaderPreset::CrtGeom => "Shader: CRT Aperture",
+                                _ => "Shader: Crisp",
+                            };
+                            if ui.button(shader_label).clicked() {
+                                self.shader_preset = match self.shader_preset {
+                                    ShaderPreset::Crisp => ShaderPreset::LcdGrid,
+                                    ShaderPreset::LcdGrid => ShaderPreset::LcdSubpixel,
+                                    ShaderPreset::LcdSubpixel => ShaderPreset::CrtScanlines,
+                                    ShaderPreset::CrtScanlines => ShaderPreset::CrtGeom,
+                                    ShaderPreset::CrtGeom => ShaderPreset::Linear,
+                                    _ => ShaderPreset::Crisp,
+                                };
+                            }
+
+                            let blend_label = match self.blend_mode {
+                                FrameBlendMode::Off => "Blend: Off (Instant)",
+                                FrameBlendMode::Simple50 => "Blend: 50/50",
+                                FrameBlendMode::SmartDeFlicker => "Blend: De-Flicker",
+                                FrameBlendMode::LcdGhosting { .. } => "Blend: LCD Ghosting",
+                            };
+                            if ui.button(blend_label).clicked() {
+                                self.blend_mode = match self.blend_mode {
+                                    FrameBlendMode::Off => FrameBlendMode::Simple50,
+                                    FrameBlendMode::Simple50 => FrameBlendMode::SmartDeFlicker,
+                                    FrameBlendMode::SmartDeFlicker => FrameBlendMode::LcdGhosting { decay: 0.65 },
+                                    FrameBlendMode::LcdGhosting { .. } => FrameBlendMode::Off,
+                                };
+                            }
+
+                            let hd_label = match self.hd_mode7.scale {
+                                HdScale::Off => "Mode 7: Native (Off)",
+                                HdScale::X2 => "Mode 7: 2x HD",
+                                HdScale::X4 => "Mode 7: 4x HD",
+                                HdScale::X8 => "Mode 7: 8x Ultra HD",
+                            };
+                            if ui.button(hd_label).clicked() {
+                                self.hd_mode7.scale = match self.hd_mode7.scale {
+                                    HdScale::Off => HdScale::X2,
+                                    HdScale::X2 => HdScale::X4,
+                                    HdScale::X4 => HdScale::X8,
+                                    HdScale::X8 => HdScale::Off,
+                                };
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("Audio").weak());
+                            let mute_label = if self.muted { "Sound: Muted" } else { "Sound: On" };
+                            if ui.button(mute_label).clicked() {
+                                self.muted = !self.muted;
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("Customization & Controls").weak());
+                            if ui.button("🎨 Touch Skins & Layout...").clicked() {
+                                self.refresh_skins();
+                                self.skin_menu = true;
+                            }
+                            if ui.button("♿ Accessibility & Scaling...").clicked() {
+                                self.accessibility_menu = true;
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("Auto-Save").weak());
+                            let on = if self.autosaver.enabled { "Auto-save: ON" } else { "Auto-save: off" };
+                            if ui.button(on).clicked() {
+                                self.autosaver.enabled = !self.autosaver.enabled;
+                                self.store_autosave_settings();
+                            }
+                            let m = self.autosaver.interval_minutes();
+                            use gba_simulator::autosave::{MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES};
+                            ui.add_enabled_ui(self.autosaver.enabled, |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(m > MIN_INTERVAL_MINUTES, egui::Button::new("  −  ")).clicked() {
+                                        self.autosaver.set_interval_minutes(m - 1);
+                                        self.store_autosave_settings();
+                                    }
+                                    ui.label(format!("Every {} min", self.autosaver.interval_minutes()));
+                                    if ui.add_enabled(m < MAX_INTERVAL_MINUTES, egui::Button::new("  +  ")).clicked() {
+                                        self.autosaver.set_interval_minutes(m + 1);
+                                        self.store_autosave_settings();
+                                    }
+                                });
+                            });
+
+                            ui.separator();
+                            if ui.button("Done").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+            if close {
+                self.startup_settings_open = false;
+            }
+        }
     }
 
     fn game_ui(&mut self, ctx: &egui::Context, layout: &touch::Layout) {
@@ -1303,11 +1906,17 @@ impl CrabBoyApp {
         }
         if edit {
             self.skin_menu = false;
-            self.layout_editor = Some(None);
+            if self.screen == Screen::Playing {
+                self.layout_editor = Some(None);
+            } else {
+                self.toast("Start a game to customize button positions");
+            }
         }
         if close {
             self.skin_menu = false;
-            self.menu_open = true;
+            if self.screen == Screen::Playing {
+                self.menu_open = true;
+            }
         }
     }
 
@@ -1550,8 +2159,28 @@ impl eframe::App for CrabBoyApp {
             }
         }
 
+        if back && self.screen == Screen::Library {
+            if self.confirm_delete_rom.is_some() {
+                self.confirm_delete_rom = None;
+            } else if self.startup_settings_open {
+                self.startup_settings_open = false;
+            } else if self.skin_menu {
+                self.skin_menu = false;
+            } else if self.accessibility_menu {
+                self.accessibility_menu = false;
+            }
+        }
+
         match self.screen {
-            Screen::Library => self.library_ui(ctx),
+            Screen::Library => {
+                self.library_ui(ctx);
+                if self.skin_menu {
+                    self.skin_ui(ctx);
+                }
+                if self.accessibility_menu {
+                    self.accessibility_ui(ctx);
+                }
+            }
             Screen::Playing if self.game.is_some() => {
                 let safe = self.insets.to_points(ctx).shrink(ctx.screen_rect());
                 let hand = match self.accessibility.active.one_handed_touch {
@@ -1694,5 +2323,25 @@ fn is_rom(p: &Path) -> bool {
 
 fn display_name(p: &Path) -> String {
     p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn console_tag(p: &Path) -> &'static str {
+    match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("gba") => "GBA",
+        Some("gbc") => "GBC",
+        _ => "GB",
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
