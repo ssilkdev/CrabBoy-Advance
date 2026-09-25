@@ -326,6 +326,24 @@ impl Mmu {
         }
     }
 
+    /// `len` writable bytes at an aligned `addr` in EWRAM or IWRAM, where a
+    /// write has no side effects, else `None`. The write-side twin of
+    /// `plain_memory` (ROM writes go to the cartridge's GPIO/save logic).
+    #[inline(always)]
+    fn plain_ram_mut(&mut self, addr: u32, len: usize) -> Option<&mut [u8]> {
+        match addr >> 24 {
+            0x02 => {
+                let off = (addr & 0x3_FFFF) as usize;
+                self.ewram.get_mut(off..off + len)
+            }
+            0x03 => {
+                let off = (addr & 0x7FFF) as usize;
+                self.iwram.get_mut(off..off + len)
+            }
+            _ => None,
+        }
+    }
+
     pub fn read16_raw(&self, addr: u32) -> u16 {
         // 8-bit save bus: the one byte read appears in every lane
         // (jsmolka save tests #4).
@@ -424,6 +442,12 @@ impl Mmu {
             return;
         }
         let aligned = addr & !1;
+        // Fast path for RAM (stack pushes, most stores): one slice write
+        // instead of two byte-wise region decodes. Same bytes.
+        if let Some(bytes) = self.plain_ram_mut(aligned, 2) {
+            bytes.copy_from_slice(&val.to_le_bytes());
+            return;
+        }
         match (aligned >> 24) & 0xFF {
             0x04 if debug_port::DebugPort::contains(aligned) => self.debug_port.write16(aligned, val),
             0x04 if (aligned & 0x00FF_FFFF) >= 0x400 => {} // unmapped (see read8)
@@ -460,6 +484,10 @@ impl Mmu {
             return;
         }
         let aligned = addr & !3;
+        if let Some(bytes) = self.plain_ram_mut(aligned, 4) {
+            bytes.copy_from_slice(&val.to_le_bytes());
+            return;
+        }
         self.write16_raw(aligned, (val & 0xFFFF) as u16);
         self.write16_raw(aligned + 2, (val >> 16) as u16);
     }
@@ -1290,5 +1318,40 @@ mod plain_memory_tests {
                 assert_eq!(m.read32_raw(addr), slow32(&m, addr), "read32 {addr:#010x}");
             }
         }
+    }
+
+    #[test]
+    fn fast_ram_writes_match_byte_writes() {
+        let (mut fast, mut slow) = (Mmu::new(), Mmu::new());
+        let mut x = 0x1234_5678u32;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let mut addrs = vec![0x0203_FFFC, 0x0203_FFFE, 0x0300_7FFC, 0x0300_7FFE, 0x0200_0000, 0x0300_0000];
+        for _ in 0..50_000 {
+            // Any address in the RAM regions, mirrors included.
+            let region = if rnd() & 1 == 0 { 0x02u32 } else { 0x03 };
+            addrs.push(region << 24 | (rnd() & 0x00FF_FFFF));
+        }
+        for a in addrs {
+            let v = rnd();
+            if v & 1 == 0 {
+                fast.write32_raw(a, v);
+                let al = a & !3;
+                for i in 0..4 {
+                    slow.write8_raw(al + i, (v >> (8 * i)) as u8);
+                }
+            } else {
+                fast.write16_raw(a, v as u16);
+                let al = a & !1;
+                slow.write8_raw(al, v as u8);
+                slow.write8_raw(al + 1, (v >> 8) as u8);
+            }
+        }
+        assert!(fast.ewram[..] == slow.ewram[..]);
+        assert!(fast.iwram[..] == slow.iwram[..]);
     }
 }

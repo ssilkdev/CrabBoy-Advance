@@ -44,6 +44,15 @@ impl Resampler {
     /// times longer at proportionally lower pitch ("tape" slow motion,
     /// ROADMAP M10).
     pub fn process_at_speed(&mut self, input: &[f32], fill: usize, low: usize, high: usize, speed: f32) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.process_at_speed_into(input, fill, low, high, speed, &mut out);
+        out
+    }
+
+    /// `process_at_speed` into a reused buffer (cleared first), so the
+    /// per-batch audio path doesn't allocate.
+    pub fn process_at_speed_into(&mut self, input: &[f32], fill: usize, low: usize, high: usize, speed: f32, out: &mut Vec<f32>) {
+        out.clear();
         let speed = (speed as f64).clamp(0.05, 1.0);
         let adjust = if fill > high + high / 2 {
             1.015
@@ -58,7 +67,7 @@ impl Resampler {
         };
         // Input frames consumed per output frame.
         let step = self.base_step * adjust * speed;
-        let mut out = Vec::with_capacity((input.len() as f64 / step) as usize + 4);
+        out.reserve((input.len() as f64 / step) as usize + 4);
         for frame in input.chunks_exact(2) {
             let cur = [frame[0], frame[1]];
             if !self.primed {
@@ -76,7 +85,6 @@ impl Resampler {
             self.pos -= 1.0;
             self.prev = cur;
         }
-        out
     }
 }
 

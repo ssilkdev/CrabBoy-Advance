@@ -145,6 +145,15 @@ impl CustomShaderParams {
     }
 }
 
+impl ShaderPreset {
+    /// Presets that leave the pixels as they are (`apply_shader` copies;
+    /// any filtering happens when the frame is drawn). Front-ends can skip
+    /// the shader pass for these.
+    pub fn is_passthrough(self) -> bool {
+        matches!(self, ShaderPreset::Crisp | ShaderPreset::Linear | ShaderPreset::NvidiaSharpen | ShaderPreset::Xbrz)
+    }
+}
+
 /// Applies a shader preset or custom profile to an RGBA pixel buffer.
 pub fn apply_shader(
     src: &[u32; FRAME_PIXELS],
@@ -307,6 +316,26 @@ pub fn apply_shader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passthrough_presets_leave_pixels_alone_and_the_rest_do_not() {
+        let src: Box<[u32; FRAME_PIXELS]> =
+            Box::new(std::array::from_fn(|i| 0xFF00_0000 | (i as u32).wrapping_mul(0x9E37_79B9) & 0xFF_FFFF));
+        let mut dst = Box::new([0u32; FRAME_PIXELS]);
+        for preset in [
+            ShaderPreset::Crisp,
+            ShaderPreset::Linear,
+            ShaderPreset::LcdGrid,
+            ShaderPreset::LcdSubpixel,
+            ShaderPreset::CrtScanlines,
+            ShaderPreset::CrtGeom,
+            ShaderPreset::NvidiaSharpen,
+            ShaderPreset::Xbrz,
+        ] {
+            apply_shader(&src, &mut dst, preset, None);
+            assert_eq!(dst[..] == src[..], preset.is_passthrough(), "{preset:?}");
+        }
+    }
 
     #[test]
     fn test_custom_shader_parser() {

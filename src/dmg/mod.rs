@@ -176,6 +176,7 @@ impl GameBoy {
         self.frame_counter += 1;
 
         self.mmu.apu.flush_samples();
+        self.mmu.apu.audio_output.recover_lost_device();
 
         if self.frame_counter.is_multiple_of(60) {
             self.mmu.cart.sync_to_disk();
@@ -311,7 +312,19 @@ impl GameBoy {
         d
     }
 
+    /// Restore a state from `save_state`. On `false` the machine is left
+    /// exactly as it was (see `Gba::load_state`).
     pub fn load_state(&mut self, data: &[u8]) -> bool {
+        let backup = self.save_state();
+        if self.load_state_unchecked(data) {
+            return true;
+        }
+        let restored = self.load_state_unchecked(&backup);
+        debug_assert!(restored, "a state this core just saved must load");
+        false
+    }
+
+    fn load_state_unchecked(&mut self, data: &[u8]) -> bool {
         if data.len() < 5 || &data[0..4] != STATE_MAGIC {
             return false;
         }
@@ -501,6 +514,21 @@ mod tests {
         assert_eq!(gb.cpu.sp, sp);
         assert_eq!(gb.mmu.read(0xC123), wram);
         assert_eq!(gb.frame_counter, 10);
+    }
+
+    #[test]
+    fn a_truncated_state_leaves_the_game_untouched() {
+        let mut src = GameBoy::from_bytes(spin_rom(false), false);
+        src.run_frame();
+        src.mmu.write(0xC123, 0x5A);
+        let state = src.save_state();
+        let mut gb = GameBoy::from_bytes(spin_rom(false), false);
+        gb.run_frame();
+        let before = gb.save_state();
+        for cut in (0..state.len()).step_by(97) {
+            assert!(!gb.load_state(&state[..cut]), "cut {cut}");
+            assert!(gb.save_state() == before, "cut {cut}: failed load changed the game");
+        }
     }
 
     #[test]
