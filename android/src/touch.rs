@@ -36,6 +36,12 @@ pub enum Hand {
     Right,
 }
 
+/// How far (degrees) either side of its axis a D-pad direction reaches.
+/// Past 45 the neighbouring directions overlap into a diagonal: 60 leaves
+/// each diagonal a 30 degree band and each lone direction 60 degrees, so a
+/// thumb slightly off-axis doesn't press two directions at once.
+pub const DPAD_ARM_HALF_ANGLE: f32 = 60.0;
+
 /// Where everything goes on screen, in egui points.
 pub struct Layout {
     /// The game image.
@@ -232,7 +238,7 @@ impl Layout {
     }
 
     /// Buttons under one finger. The D-pad resolves to one or two directions
-    /// (diagonals), and face buttons get a generous hit radius so a thumb
+    /// (diagonals only in a narrow band, see `DPAD_ARM_HALF_ANGLE`), and face buttons get a generous hit radius so a thumb
     /// resting between A and B presses both, like on real hardware.
     pub fn hit(&self, p: Pos2) -> u16 {
         let mut bits = 0;
@@ -243,7 +249,7 @@ impl Layout {
             let angle = d.y.atan2(d.x).to_degrees(); // 0 = right, 90 = down
             let dir = |center: f32| {
                 let diff = (angle - center + 540.0).rem_euclid(360.0) - 180.0;
-                diff.abs() <= 67.5
+                diff.abs() <= DPAD_ARM_HALF_ANGLE
             };
             if dir(0.0) {
                 bits |= Buttons::RIGHT;
@@ -319,6 +325,11 @@ impl TouchPad {
 
     pub fn held(&self) -> u16 {
         self.held
+    }
+
+    /// Buttons that went down this frame (for haptic feedback).
+    pub fn newly_pressed(&self) -> u16 {
+        self.held & !self.prev
     }
 
     pub fn just_pressed(&self, bit: u16) -> bool {
@@ -459,6 +470,25 @@ mod tests {
         assert_eq!(l.hit(c + Vec2::new(0.0, -r)), Buttons::UP);
         assert_eq!(l.hit(c + Vec2::new(r, r) * 0.7), Buttons::RIGHT | Buttons::DOWN);
         assert_eq!(l.hit(c), 0, "the dead zone in the middle presses nothing");
+    }
+
+    #[test]
+    fn dpad_off_axis_presses_one_direction() {
+        let l = portrait();
+        let c = l.dpad_center;
+        let r = l.dpad_radius * 0.8;
+        let at = |deg: f32| {
+            let a = deg.to_radians();
+            l.hit(c + Vec2::new(a.cos(), a.sin()) * r)
+        };
+        // 25 degrees off an axis is still a single direction...
+        assert_eq!(at(25.0), Buttons::RIGHT);
+        assert_eq!(at(-25.0), Buttons::RIGHT);
+        assert_eq!(at(90.0 + 25.0), Buttons::DOWN);
+        assert_eq!(at(-90.0 - 25.0), Buttons::UP);
+        // ...and only near 45 degrees does it become a diagonal.
+        assert_eq!(at(40.0), Buttons::RIGHT | Buttons::DOWN);
+        assert_eq!(at(-135.0), Buttons::LEFT | Buttons::UP);
     }
 
     #[test]

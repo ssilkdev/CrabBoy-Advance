@@ -1221,6 +1221,11 @@ impl CrabBoyApp {
                             self.skin.visibility = self.skin.visibility.next();
                             changed = true;
                         }
+                        let haptics = if self.skin.haptics { "Vibrate on press: ON" } else { "Vibrate on press: off" };
+                        if ui.button(haptics).clicked() {
+                            self.skin.haptics = !self.skin.haptics;
+                            changed = true;
+                        }
                         ui.separator();
                         if ui.button("Move & resize buttons...").clicked() {
                             edit = true;
@@ -1516,6 +1521,9 @@ impl eframe::App for CrabBoyApp {
                 } else {
                     self.touch.update(ctx, &layout)
                 };
+                if self.skin.haptics && self.touch.newly_pressed() != 0 {
+                    platform::vibrate();
+                }
                 if self.touch.just_pressed(Buttons::MENU) {
                     self.menu_open = true;
                 }

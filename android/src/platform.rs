@@ -60,6 +60,11 @@ pub fn set_game_refresh_rate(on: bool) {
     with_activity(|env, act| env.call_method(act, "setGameRefreshRate", "(Z)V", &[on.into()]).map(|_| ()));
 }
 
+/// A short click for an on-screen button press (see MainActivity).
+pub fn vibrate() {
+    with_activity(|env, act| env.call_method(act, "vibrate", "()V", &[]).map(|_| ()));
+}
+
 /// Apply an `ActivityInfo.SCREEN_ORIENTATION_*` value.
 pub fn set_orientation(value: i32) {
     with_activity(|env, act| env.call_method(act, "setOrientation", "(I)V", &[value.into()]).map(|_| ()));

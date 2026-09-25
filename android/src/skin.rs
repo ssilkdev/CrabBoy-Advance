@@ -744,6 +744,8 @@ pub struct SkinSettings {
     /// The user's own arrangement (from the layout editor). A custom skin's
     /// own layout applies underneath it.
     pub layout: LayoutOverrides,
+    /// Vibrate briefly when an on-screen button is pressed.
+    pub haptics: bool,
 }
 
 impl Default for SkinSettings {
@@ -754,6 +756,7 @@ impl Default for SkinSettings {
             scale: 1.0,
             visibility: Visibility::Auto,
             layout: LayoutOverrides::default(),
+            haptics: true,
         }
     }
 }

@@ -6,6 +6,10 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.provider.OpenableColumns;
 import android.view.DisplayCutout;
 import android.view.View;
@@ -24,7 +28,7 @@ import java.util.Locale;
  * ROM into app storage, immersive fullscreen, and safe-area insets.
  *
  * Rust calls pickRom(), takeImportedRom(), takeImportError(),
- * getSafeInsets() and setOrientation() over JNI.
+ * getSafeInsets(), setOrientation() and vibrate() over JNI.
  */
 public class MainActivity extends NativeActivity {
     private static final int PICK_ROM = 1001;
@@ -38,6 +42,9 @@ public class MainActivity extends NativeActivity {
     private volatile String importedSkin;
     private volatile String importError;
     private volatile int[] safeInsets = new int[4];
+    private Vibrator vibrator;
+    /** Vibrator calls are binder IPC; keep them off the emulation thread. */
+    private Handler hapticsHandler;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,6 +62,16 @@ public class MainActivity extends NativeActivity {
             return v.onApplyWindowInsets(insets);
         });
         hideSystemBars();
+        vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+        HandlerThread haptics = new HandlerThread("haptics");
+        haptics.start();
+        hapticsHandler = new Handler(haptics.getLooper());
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (hapticsHandler != null) hapticsHandler.getLooper().quitSafely();
+        super.onDestroy();
     }
 
     @Override
@@ -93,6 +110,23 @@ public class MainActivity extends NativeActivity {
 
     public int[] getSafeInsets() {
         return safeInsets;
+    }
+
+    /** A short click for an on-screen button press. */
+    public void vibrate() {
+        final Vibrator v = vibrator;
+        final Handler h = hapticsHandler;
+        if (v == null || h == null || !v.hasVibrator()) return;
+        h.post(() -> {
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    v.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK));
+                } else {
+                    v.vibrate(VibrationEffect.createOneShot(15, VibrationEffect.DEFAULT_AMPLITUDE));
+                }
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     /** ActivityInfo.SCREEN_ORIENTATION_* value chosen in the in-game menu. */
