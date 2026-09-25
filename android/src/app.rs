@@ -918,6 +918,30 @@ impl CrabBoyApp {
         }
     }
 
+    /// Library toolbar, added right-to-left: Resume (if a game is loaded),
+    /// Settings, Skins, Import.
+    fn library_toolbar(&mut self, ui: &mut egui::Ui) {
+        if self.game.is_some() {
+            let resume_btn = egui::Button::new(RichText::new("▶ Resume").strong().color(Color32::from_rgb(80, 255, 170)))
+                .min_size(egui::vec2(0.0, 36.0));
+            if ui.add(resume_btn).clicked() {
+                self.screen = Screen::Playing;
+            }
+        }
+        if ui.add(egui::Button::new("⚙").min_size(egui::vec2(36.0, 36.0))).on_hover_text("Settings").clicked() {
+            self.startup_settings_open = true;
+        }
+        if ui.add(egui::Button::new("🎨 Skins").min_size(egui::vec2(0.0, 36.0))).clicked() {
+            self.refresh_skins();
+            self.skin_menu = true;
+        }
+        let import_btn = egui::Button::new(RichText::new("📥 Import").strong().color(Color32::from_rgb(220, 240, 255)))
+            .min_size(egui::vec2(0.0, 36.0));
+        if ui.add(import_btn).clicked() {
+            platform::pick_rom();
+        }
+    }
+
     fn library_ui(&mut self, ctx: &egui::Context) {
         let insets = self.insets.to_points(ctx);
         self.ensure_logo_texture(ctx);
@@ -931,65 +955,26 @@ impl CrabBoyApp {
             )
             .show(ctx, |ui| {
                 // Top Header Row
-                ui.horizontal(|ui| {
-                    if let Some(id) = logo_id {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                        ui.painter().image(
-                            id,
-                            rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                        ui.add_space(2.0);
-                    }
-                    ui.label(RichText::new("CrabBoy Advance").heading().strong().color(Color32::WHITE));
-
-                    // Version pill badge
-                    egui::Frame::NONE
-                        .fill(Color32::from_rgb(32, 38, 54))
-                        .corner_radius(egui::CornerRadius::same(6))
-                        .inner_margin(egui::Margin::symmetric(6, 2))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new("v5.2")
-                                    .size(11.0)
-                                    .strong()
-                                    .color(Color32::from_rgb(140, 175, 230)),
-                            );
+                // Buttons are placed before the title so the two can't overlap;
+                // on a narrow (portrait) screen they get their own row.
+                if ui.available_width() < 560.0 {
+                    ui.horizontal(|ui| library_title(ui, logo_id));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.library_toolbar(ui);
                         });
-
-                    // Right-to-left action toolbar
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.game.is_some() {
-                            let resume_btn = egui::Button::new(
-                                RichText::new("▶ Resume")
-                                    .strong()
-                                    .color(Color32::from_rgb(80, 255, 170)),
-                            )
-                            .min_size(egui::vec2(0.0, 36.0));
-                            if ui.add(resume_btn).clicked() {
-                                self.screen = Screen::Playing;
-                            }
-                        }
-
-                        if ui.add(egui::Button::new("⚙").min_size(egui::vec2(36.0, 36.0))).on_hover_text("Settings").clicked() {
-                            self.startup_settings_open = true;
-                        }
-
-                        if ui.add(egui::Button::new("🎨 Skins").min_size(egui::vec2(0.0, 36.0))).clicked() {
-                            self.refresh_skins();
-                            self.skin_menu = true;
-                        }
-
-                        let import_btn = egui::Button::new(
-                            RichText::new("📥 Import").strong().color(Color32::from_rgb(220, 240, 255)),
-                        )
-                        .min_size(egui::vec2(0.0, 36.0));
-                        if ui.add(import_btn).clicked() {
-                            platform::pick_rom();
-                        }
                     });
-                });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.library_toolbar(ui);
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                library_title(ui, logo_id);
+                            });
+                        });
+                    });
+                }
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -1143,99 +1128,62 @@ impl CrabBoyApp {
                             .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::symmetric(14, 10))
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    // Console Badge Pill
-                                    let (pill_bg, pill_fg) = match tag {
-                                        "NDS" => (Color32::from_rgb(180, 50, 50), Color32::from_rgb(255, 235, 235)),
-                                        "GBA" => (Color32::from_rgb(86, 68, 155), Color32::from_rgb(240, 235, 255)),
-                                        "GBC" => (Color32::from_rgb(20, 120, 140), Color32::from_rgb(220, 250, 255)),
-                                        _ => (Color32::from_rgb(72, 108, 48), Color32::from_rgb(235, 252, 225)),
-                                    };
-                                    egui::Frame::NONE
-                                        .fill(pill_bg)
-                                        .corner_radius(egui::CornerRadius::same(6))
-                                        .inner_margin(egui::Margin::symmetric(8, 4))
-                                        .show(ui, |ui| {
-                                            ui.label(RichText::new(tag).strong().size(13.0).color(pill_fg));
-                                        });
-
-                                    ui.add_space(8.0);
-
-                                    // Main column: title and metadata
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new(&title).strong().size(17.0).color(Color32::WHITE));
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(&size_str).size(12.0).weak());
-                                            if has_sav {
-                                                egui::Frame::NONE
-                                                    .fill(Color32::from_rgb(22, 54, 38))
-                                                    .corner_radius(egui::CornerRadius::same(4))
-                                                    .inner_margin(egui::Margin::symmetric(5, 2))
-                                                    .show(ui, |ui| {
-                                                        ui.label(
-                                                            RichText::new("🔋 Save")
-                                                                .size(11.0)
-                                                                .color(Color32::from_rgb(140, 230, 170)),
-                                                        );
-                                                    });
-                                            }
-                                            if has_state {
-                                                egui::Frame::NONE
-                                                    .fill(Color32::from_rgb(32, 48, 76))
-                                                    .corner_radius(egui::CornerRadius::same(4))
-                                                    .inner_margin(egui::Margin::symmetric(5, 2))
-                                                    .show(ui, |ui| {
-                                                        ui.label(
-                                                            RichText::new("💾 State")
-                                                                .size(11.0)
-                                                                .color(Color32::from_rgb(160, 200, 255)),
-                                                        );
-                                                    });
-                                            }
-                                            if is_active {
-                                                egui::Frame::NONE
-                                                    .fill(Color32::from_rgb(18, 65, 45))
-                                                    .corner_radius(egui::CornerRadius::same(4))
-                                                    .inner_margin(egui::Margin::symmetric(5, 2))
-                                                    .show(ui, |ui| {
-                                                        ui.label(
-                                                            RichText::new("● Running")
-                                                                .strong()
-                                                                .size(11.0)
-                                                                .color(Color32::from_rgb(80, 255, 160)),
-                                                        );
-                                                    });
-                                            }
-                                        });
+                                // Lay the actions out FIRST (right-to-left) and give the
+                                // text only the space that's left, so long titles are
+                                // wrapped/truncated instead of drawn under the buttons.
+                                let narrow = ui.available_width() < 460.0;
+                                let (play, del) = if narrow {
+                                    // Portrait phone: title row, then chips + actions.
+                                    ui.horizontal(|ui| {
+                                        console_badge(ui, tag);
+                                        ui.add(
+                                            egui::Label::new(RichText::new(&title).strong().size(17.0).color(Color32::WHITE))
+                                                .wrap(),
+                                        );
                                     });
-
-                                    // Right column: Actions
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        // Delete icon button
-                                        let del_btn = egui::Button::new(
-                                            RichText::new("🗑").size(15.0).color(Color32::from_rgb(210, 100, 100)),
-                                        )
-                                        .min_size(egui::vec2(36.0, 38.0));
-                                        if ui.add(del_btn).on_hover_text("Delete ROM").clicked() {
-                                            delete_req = Some((*path).clone());
-                                        }
-
-                                        // Play / Resume button
-                                        let play_label = if is_active { "▶ Resume" } else { "▶ Play" };
-                                        let play_color = if is_active {
-                                            Color32::from_rgb(100, 255, 180)
-                                        } else {
-                                            Color32::from_rgb(220, 235, 255)
-                                        };
-                                        let play_btn = egui::Button::new(
-                                            RichText::new(play_label).strong().size(15.0).color(play_color),
-                                        )
-                                        .min_size(egui::vec2(84.0, 38.0));
-                                        if ui.add(play_btn).clicked() {
-                                            launch = Some((*path).clone());
-                                        }
-                                    });
-                                });
+                                    ui.add_space(2.0);
+                                    ui.horizontal(|ui| {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let r = card_actions(ui, is_active);
+                                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                meta_chips(ui, &size_str, has_sav, has_state, is_active);
+                                            });
+                                            r
+                                        })
+                                        .inner
+                                    })
+                                    .inner
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let r = card_actions(ui, is_active);
+                                            ui.add_space(8.0);
+                                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                console_badge(ui, tag);
+                                                ui.vertical(|ui| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&title).strong().size(17.0).color(Color32::WHITE),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    ui.horizontal(|ui| {
+                                                        meta_chips(ui, &size_str, has_sav, has_state, is_active);
+                                                    });
+                                                });
+                                            });
+                                            r
+                                        })
+                                        .inner
+                                    })
+                                    .inner
+                                };
+                                if play {
+                                    launch = Some((*path).clone());
+                                }
+                                if del {
+                                    delete_req = Some((*path).clone());
+                                }
                             });
                         ui.add_space(6.0);
                     }
@@ -2443,3 +2391,80 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Logo, app name and version pill for the library header.
+fn library_title(ui: &mut egui::Ui, logo_id: Option<egui::TextureId>) {
+    if let Some(id) = logo_id {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+        ui.painter().image(
+            id,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        ui.add_space(2.0);
+    }
+    ui.add(egui::Label::new(RichText::new("CrabBoy Advance").heading().strong().color(Color32::WHITE)).truncate());
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(32, 38, 54))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new("v5.2").size(11.0).strong().color(Color32::from_rgb(140, 175, 230)));
+        });
+}
+
+/// The coloured GBA / GBC / GB pill on a game card.
+fn console_badge(ui: &mut egui::Ui, tag: &str) {
+    let (pill_bg, pill_fg) = match tag {
+        "NDS" => (Color32::from_rgb(180, 50, 50), Color32::from_rgb(255, 235, 235)),
+        "GBA" => (Color32::from_rgb(86, 68, 155), Color32::from_rgb(240, 235, 255)),
+        "GBC" => (Color32::from_rgb(20, 120, 140), Color32::from_rgb(220, 250, 255)),
+        _ => (Color32::from_rgb(72, 108, 48), Color32::from_rgb(235, 252, 225)),
+    };
+    egui::Frame::NONE
+        .fill(pill_bg)
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.label(RichText::new(tag).strong().size(13.0).color(pill_fg));
+        });
+    ui.add_space(4.0);
+}
+
+/// Size plus Save / State / Running chips on a game card.
+fn meta_chips(ui: &mut egui::Ui, size: &str, has_sav: bool, has_state: bool, is_active: bool) {
+    ui.label(RichText::new(size).size(12.0).weak());
+    let chip = |ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32| {
+        egui::Frame::NONE
+            .fill(bg)
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(5, 2))
+            .show(ui, |ui| {
+                ui.label(RichText::new(text).size(11.0).color(fg));
+            });
+    };
+    if has_sav {
+        chip(ui, "🔋 Save", Color32::from_rgb(22, 54, 38), Color32::from_rgb(140, 230, 170));
+    }
+    if has_state {
+        chip(ui, "💾 State", Color32::from_rgb(32, 48, 76), Color32::from_rgb(160, 200, 255));
+    }
+    if is_active {
+        chip(ui, "● Running", Color32::from_rgb(18, 65, 45), Color32::from_rgb(80, 255, 160));
+    }
+}
+
+/// Delete and Play/Resume buttons, added right-to-left. Returns (play, delete).
+fn card_actions(ui: &mut egui::Ui, is_active: bool) -> (bool, bool) {
+    let del_btn = egui::Button::new(RichText::new("🗑").size(15.0).color(Color32::from_rgb(210, 100, 100)))
+        .min_size(egui::vec2(36.0, 38.0));
+    let del = ui.add(del_btn).on_hover_text("Delete ROM").clicked();
+    let (label, color) = if is_active {
+        ("▶ Resume", Color32::from_rgb(100, 255, 180))
+    } else {
+        ("▶ Play", Color32::from_rgb(220, 235, 255))
+    };
+    let play_btn = egui::Button::new(RichText::new(label).strong().size(15.0).color(color)).min_size(egui::vec2(84.0, 38.0));
+    let play = ui.add(play_btn).clicked();
+    (play, del)
+}
