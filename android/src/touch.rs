@@ -40,6 +40,31 @@ pub enum Hand {
     Right,
 }
 
+/// How far (degrees) either side of its axis a D-pad direction reaches.
+/// Past 45 the neighbouring directions overlap into a diagonal: 60 leaves
+/// each diagonal a 30 degree band and each lone direction 60 degrees, so a
+/// thumb slightly off-axis doesn't press two directions at once.
+pub const DPAD_ARM_HALF_ANGLE: f32 = 60.0;
+
+/// D-pad directions for an offset from its centre (screen axes, y down):
+/// one direction, or two within the narrow diagonal bands.
+pub fn direction_bits(d: Vec2) -> u16 {
+    let angle = d.y.atan2(d.x).to_degrees(); // 0 = right, 90 = down
+    let dir = |center: f32| {
+        let diff = (angle - center + 540.0).rem_euclid(360.0) - 180.0;
+        diff.abs() <= DPAD_ARM_HALF_ANGLE
+    };
+    let mut bits = 0;
+    for (center, bit) in [(0.0, Buttons::RIGHT), (90.0, Buttons::DOWN), (180.0, Buttons::LEFT), (-90.0, Buttons::UP)] {
+        if dir(center) {
+            bits |= bit;
+        }
+    }
+    bits
+}
+
+const NO_EDGES: [(Rect, u16); 2] = [(Rect::NOTHING, 0), (Rect::NOTHING, 0)];
+
 /// Where everything goes on screen, in egui points.
 pub struct Layout {
     /// The game image.
@@ -56,7 +81,14 @@ pub struct Layout {
     pub fast: Rect,
     pub quick_save: Rect,
     pub quick_load: Rect,
+    /// Optional strips along the left and right edges of the display, each
+    /// with the button it presses (0 = off). See `set_edge_zones`.
+    pub edges: [(Rect, u16); 2],
 }
+
+/// Width of an edge zone, in points (about 4-5 mm): enough for a finger
+/// wrapped around the side of the phone to land in it.
+pub const EDGE_ZONE_WIDTH: f32 = 28.0;
 
 impl Layout {
     /// Portrait: game on top, controls below. Landscape: a control column on
@@ -121,7 +153,7 @@ impl Layout {
         let quick_save = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, util_y), small);
         let quick_load = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, util_y), small);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
     }
 
     fn landscape(safe: Rect, aspect: f32, unit: f32) -> Self {
@@ -155,7 +187,7 @@ impl Layout {
         let select = Rect::from_center_size(Pos2::new(dpad_center.x, bottom_y), pill);
         let start = Rect::from_center_size(Pos2::new((a.0.x + b.0.x) / 2.0, bottom_y), pill);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
     }
 
     /// Height of the one-handed control stack, in units.
@@ -237,7 +269,7 @@ impl Layout {
         let quick_save = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
         let quick_load = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
     }
 
     /// D-pad hugging `left_x`, A/B cluster hugging `right_x`, both around `y`.
@@ -250,8 +282,17 @@ impl Layout {
         (dpad_center, dpad_radius, (a, face_r), (b, face_r))
     }
 
+    /// Turn on the edge zones: strips down the left and right sides of
+    /// `full` (the whole display, not the safe area, so they sit right at
+    /// the glass edge) pressing `left` / `right`. 0 turns a side off.
+    pub fn set_edge_zones(&mut self, full: Rect, left: u16, right: u16) {
+        let w = EDGE_ZONE_WIDTH.min(full.width() * 0.1);
+        let strip = |x0: f32| Rect::from_min_max(Pos2::new(x0, full.top()), Pos2::new(x0 + w, full.bottom()));
+        self.edges = [(strip(full.left()), left), (strip(full.right() - w), right)];
+    }
+
     /// Buttons under one finger. The D-pad resolves to one or two directions
-    /// (diagonals), and face buttons get a generous hit radius so a thumb
+    /// (diagonals only in a narrow band, see `DPAD_ARM_HALF_ANGLE`), and face buttons get a generous hit radius so a thumb
     /// resting between A and B presses both, like on real hardware.
     pub fn hit(&self, p: Pos2) -> u16 {
         let mut bits = 0;
@@ -259,23 +300,7 @@ impl Layout {
         let d = p - self.dpad_center;
         let dist = d.length();
         if dist <= self.dpad_radius * 1.25 && dist >= self.dpad_radius * 0.18 {
-            let angle = d.y.atan2(d.x).to_degrees(); // 0 = right, 90 = down
-            let dir = |center: f32| {
-                let diff = (angle - center + 540.0).rem_euclid(360.0) - 180.0;
-                diff.abs() <= 67.5
-            };
-            if dir(0.0) {
-                bits |= Buttons::RIGHT;
-            }
-            if dir(90.0) {
-                bits |= Buttons::DOWN;
-            }
-            if dir(180.0) {
-                bits |= Buttons::LEFT;
-            }
-            if dir(-90.0) {
-                bits |= Buttons::UP;
-            }
+            bits |= direction_bits(d);
         }
 
         for ((center, r), bit) in [(self.a, Buttons::A), (self.b, Buttons::B)] {
@@ -295,6 +320,15 @@ impl Layout {
         ] {
             if rect.expand(8.0).contains(p) {
                 bits |= bit;
+            }
+        }
+        // Edge zones only count where no real control is: a thumb reaching
+        // for a button near the edge presses just that button.
+        if bits == 0 {
+            for (rect, bit) in self.edges {
+                if bit != 0 && rect.contains(p) {
+                    bits |= bit;
+                }
             }
         }
         bits
@@ -342,6 +376,11 @@ impl TouchPad {
         self.held
     }
 
+    /// Buttons that went down this frame (for haptic feedback).
+    pub fn newly_pressed(&self) -> u16 {
+        self.held & !self.prev
+    }
+
     pub fn just_pressed(&self, bit: u16) -> bool {
         self.held & bit != 0 && self.prev & bit == 0
     }
@@ -377,6 +416,14 @@ pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look
     let k = look.colors;
     let stroke = Stroke::new(2.0_f32, k.edge);
     let fill = |bit: u16| if held & bit != 0 { k.pressed } else { k.fill };
+
+    // Edge zones: a faint strip, brighter while pressed.
+    for (rect, bit) in l.edges {
+        if bit != 0 {
+            let c = if held & bit != 0 { k.pressed.gamma_multiply(0.6) } else { k.fill.gamma_multiply(0.25) };
+            p.rect_filled(rect, 0.0, c);
+        }
+    }
 
     // D-pad: a plus shape made of four arms around a hub, or the skin's
     // image (a pressed direction then shows as a highlighted arm).
@@ -487,6 +534,25 @@ mod tests {
     }
 
     #[test]
+    fn dpad_off_axis_presses_one_direction() {
+        let l = portrait();
+        let c = l.dpad_center;
+        let r = l.dpad_radius * 0.8;
+        let at = |deg: f32| {
+            let a = deg.to_radians();
+            l.hit(c + Vec2::new(a.cos(), a.sin()) * r)
+        };
+        // 25 degrees off an axis is still a single direction...
+        assert_eq!(at(25.0), Buttons::RIGHT);
+        assert_eq!(at(-25.0), Buttons::RIGHT);
+        assert_eq!(at(90.0 + 25.0), Buttons::DOWN);
+        assert_eq!(at(-90.0 - 25.0), Buttons::UP);
+        // ...and only near 45 degrees does it become a diagonal.
+        assert_eq!(at(40.0), Buttons::RIGHT | Buttons::DOWN);
+        assert_eq!(at(-135.0), Buttons::LEFT | Buttons::UP);
+    }
+
+    #[test]
     fn face_buttons_do_not_overlap_the_dpad_or_screen() {
         let l = portrait();
         assert_eq!(l.hit(l.a.0), Buttons::A);
@@ -563,6 +629,35 @@ mod tests {
                 }
                 assert!(l.screen.width() > size.x.min(size.y) * 0.6, "{ctx}: game too small");
                 assert!((l.screen.width() / l.screen.height() - 1.5).abs() < 0.01, "{ctx}");
+            }
+        }
+    }
+
+    #[test]
+    fn edge_zones_press_their_button_but_never_steal_a_control() {
+        for size in [Vec2::new(412.0, 915.0), Vec2::new(915.0, 412.0)] {
+            let full = Rect::from_min_size(Pos2::ZERO, size);
+            let mut l = Layout::compute(full, Some([240, 160]));
+            let ctx = format!("{size:?}");
+            assert!(l.edges.iter().all(|&(_, bit)| bit == 0), "{ctx}: off by default");
+            l.set_edge_zones(full, Buttons::B, Buttons::A);
+            let plain = Layout::compute(full, Some([240, 160]));
+            // Down both edges: an edge zone presses its button wherever no
+            // control is, and anything under a real control presses exactly
+            // what it did without edge zones.
+            let mut edge_hits = [0, 0];
+            for (side, x, bit) in [(0, 2.0, Buttons::B), (1, size.x - 2.0, Buttons::A)] {
+                for i in 0..100 {
+                    let p = Pos2::new(x, size.y * (i as f32 + 0.5) / 100.0);
+                    let want = if plain.hit(p) == 0 { bit } else { plain.hit(p) };
+                    assert_eq!(l.hit(p), want, "{ctx}: {p:?}");
+                    edge_hits[side] += (l.hit(p) == bit) as u32;
+                }
+            }
+            assert!(edge_hits.iter().all(|&n| n >= 30), "{ctx}: edge zones mostly covered {edge_hits:?}");
+            assert_eq!(l.hit(Pos2::new(size.x * 0.5, 1.0)), plain.hit(Pos2::new(size.x * 0.5, 1.0)), "{ctx}");
+            for rect in all_controls(&l) {
+                assert_eq!(l.hit(rect.center()), plain.hit(rect.center()), "{ctx}: {rect:?}");
             }
         }
     }

@@ -11,6 +11,10 @@ The **Menu → Skin & controls…** screen changes how the on-screen buttons loo
   - **Auto** hides the buttons while a controller is in use.
   - **Always** keeps the buttons on screen all the time.
   - **Hidden** shows only the menu button, for controller or TV play.
+- **Vibrate on press.** A short click when an on-screen button goes down. On by default.
+- **Experimental**
+  - **Edge zones** turn thin strips down the left and right edges of the screen into buttons, for a finger wrapped around the side of the phone. Choose **B | A** or **L | R**. A real button under your finger always wins over an edge zone.
+  - **Tilt to move** presses the D-pad when you lean the phone (lower an edge to press towards it, like rolling a marble). The pose you hold when a game starts, or when you close a menu, is neutral.
 - **Move & resize buttons…**
   - Drag any button to move it.
   - Tap a button, then use **−** and **+** to resize it.
