@@ -48,6 +48,8 @@ public class MainActivity extends NativeActivity {
     private static final long MAX_SKIN_BYTES = 16L * 1024 * 1024;
     /** Largest GBA cartridge is 32 MiB (saves are far smaller). */
     private static final long MAX_ROM_BYTES = 32L * 1024 * 1024;
+    /** DS cards go up to 512 MB (Platinum is 128 MB). */
+    private static final long MAX_NDS_BYTES = 512L * 1024 * 1024;
 
     private volatile String importedRom;
     private volatile String importedSkin;
@@ -533,6 +535,7 @@ public class MainActivity extends NativeActivity {
         File dest = new File(dir, name);
         File tmp = new File(dir, name + ".part");
         long total = 0;
+        long limit = lower.endsWith(".nds") ? MAX_NDS_BYTES : MAX_ROM_BYTES;
         try (InputStream in = getContentResolver().openInputStream(uri);
              OutputStream out = new FileOutputStream(tmp)) {
             if (in == null) throw new java.io.IOException("cannot open file");
@@ -540,7 +543,7 @@ public class MainActivity extends NativeActivity {
             int n;
             while ((n = in.read(buf)) > 0) {
                 total += n;
-                if (total > MAX_ROM_BYTES) throw new java.io.IOException("file is larger than 32 MB");
+                if (total > limit) throw new java.io.IOException("file is larger than " + (limit >> 20) + " MB");
                 out.write(buf, 0, n);
             }
         } catch (Exception e) {

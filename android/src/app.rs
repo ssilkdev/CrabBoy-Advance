@@ -1795,14 +1795,21 @@ impl CrabBoyApp {
                                         gb.mmu.apu.audio_output.set_surround_mode(next);
                                     }
                                 }
-                                Core::Nds(n) => {
-                                    let next = match n.bus.spu.audio_output.surround_mode() {
-                                        gba_simulator::gba::apu::SurroundMode::Stereo => gba_simulator::gba::apu::SurroundMode::Headphone3D,
-                                        gba_simulator::gba::apu::SurroundMode::Headphone3D => gba_simulator::gba::apu::SurroundMode::Surround51,
-                                        gba_simulator::gba::apu::SurroundMode::Surround51 => gba_simulator::gba::apu::SurroundMode::Stereo,
-                                        _ => gba_simulator::gba::apu::SurroundMode::Stereo,
+                                Core::Nds(ref mut n) => {
+                                    let out = &mut n.bus.spu.audio_output;
+                                    let sur_label = match out.surround_mode() {
+                                        gba_simulator::gba::apu::SurroundMode::Stereo => "Output: Pure Stereo",
+                                        gba_simulator::gba::apu::SurroundMode::Headphone3D => "Output: 3D Headphones",
+                                        gba_simulator::gba::apu::SurroundMode::Surround51 => "Output: 5.1 Surround",
                                     };
-                                    n.bus.spu.audio_output.set_surround_mode(next);
+                                    if ui.button(sur_label).clicked() {
+                                        let next = match out.surround_mode() {
+                                            gba_simulator::gba::apu::SurroundMode::Stereo => gba_simulator::gba::apu::SurroundMode::Headphone3D,
+                                            gba_simulator::gba::apu::SurroundMode::Headphone3D => gba_simulator::gba::apu::SurroundMode::Surround51,
+                                            gba_simulator::gba::apu::SurroundMode::Surround51 => gba_simulator::gba::apu::SurroundMode::Stereo,
+                                        };
+                                        out.set_surround_mode(next);
+                                    }
                                 }
                             }
                         }
