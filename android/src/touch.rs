@@ -124,8 +124,7 @@ impl Layout {
         );
         let ctrl = Rect::from_min_max(Pos2::new(safe.left(), screen.bottom()), safe.max);
         let shoulder_y = ctrl.top() + unit * 0.9;
-        let face_y = ctrl.top() + ctrl.height() * 0.45;
-        let meta_y = ctrl.bottom() - unit * 0.9;
+        let face_y = ctrl.top() + ctrl.height() * 0.42;
         let margin = unit * 0.35;
         let (dpad_center, dpad_radius, a, b) = Self::pads(safe.left() + margin, safe.right() - margin, face_y, unit);
 
@@ -139,8 +138,13 @@ impl Layout {
         let cx = safe.center().x;
         let pill = Vec2::new(unit * 1.6, unit * 0.62);
         let gap = unit * 0.3;
+        // Bottom rows: Select / Start, then Save / Load right below them.
+        let util_y = ctrl.bottom() - unit * 0.6;
+        let meta_y = util_y - pill.y - gap * 0.8;
         let select = Rect::from_center_size(Pos2::new(cx - pill.x / 2.0 - gap / 2.0, meta_y), pill);
         let start = Rect::from_center_size(Pos2::new(cx + pill.x / 2.0 + gap / 2.0, meta_y), pill);
+        let quick_save = Rect::from_center_size(Pos2::new(select.center().x, util_y), pill);
+        let quick_load = Rect::from_center_size(Pos2::new(start.center().x, util_y), pill);
 
         // Menu and fast-forward sit centered between the shoulders, apart
         // enough that a sloppy tap cannot hit both.
@@ -149,21 +153,29 @@ impl Layout {
         let menu = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, shoulder_y), small);
         let fast = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, shoulder_y), small);
 
-        let util_y = shoulder_y + small.y + unit * 0.35;
-        let quick_save = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, util_y), small);
-        let quick_load = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, util_y), small);
-
         Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
     }
 
+    /// Width of a landscape control column, in units: margins (0.35 each
+    /// side) plus the D-pad or the A/B cluster (2.9).
+    const COLUMN_UNITS: f32 = 3.6;
+    /// Landscape controls shrink down to this fraction of their normal size
+    /// to let the game fill the full height.
+    const LANDSCAPE_MIN_SCALE: f32 = 0.72;
+
     fn landscape(safe: Rect, aspect: f32, unit: f32) -> Self {
-        let margin = unit * 0.35;
-        // Each side column holds the D-pad or the A/B cluster.
-        let column = margin * 2.0 + unit * 2.9;
-        let fit_w = (safe.width() - 2.0 * column).max(safe.width() * 0.5);
+        // Game first: full height if the side gaps can hold controls at no
+        // less than LANDSCAPE_MIN_SCALE; otherwise as big as that allows
+        // (tablets, where full height would leave no room at the sides).
+        let min_column = Self::COLUMN_UNITS * unit * Self::LANDSCAPE_MIN_SCALE;
+        let fit_w = (safe.width() - 2.0 * min_column).max(safe.width() * 0.5);
         let screen_w = (safe.height() * aspect).min(fit_w);
         let screen = Rect::from_center_size(safe.center(), Vec2::new(screen_w, screen_w / aspect));
+        // Controls then fill the side gaps, never bigger than normal.
+        let gutter = (safe.width() - screen_w) / 2.0;
+        let unit = unit.min(gutter / Self::COLUMN_UNITS);
 
+        let margin = unit * 0.35;
         let left_x = safe.left() + margin;
         let right_x = safe.right() - margin;
         let (dpad_center, dpad_radius, a, b) = Self::pads(left_x, right_x, safe.center().y + unit * 0.2, unit);
@@ -177,15 +189,15 @@ impl Layout {
         let r = Rect::from_min_size(Pos2::new(right_x - shoulder.x, top_y - shoulder.y / 2.0), shoulder);
         let fast = Rect::from_center_size(Pos2::new(r.left() - margin - small.x / 2.0, top_y), small);
 
-        let util_y = top_y + small.y + unit * 0.35;
-        let quick_save = Rect::from_center_size(Pos2::new(menu.center().x, util_y), small);
-        let quick_load = Rect::from_center_size(Pos2::new(fast.center().x, util_y), small);
-
-        // Bottom of each column: Select under the D-pad, Start under A/B.
-        let bottom_y = safe.bottom() - unit * 0.55;
+        // Bottom of each column: Select under the D-pad, Start under A/B,
+        // and Save / Load right below them.
         let pill = Vec2::new(unit * 1.6, unit * 0.62);
+        let util_y = safe.bottom() - unit * 0.45;
+        let bottom_y = util_y - pill.y - unit * 0.24;
         let select = Rect::from_center_size(Pos2::new(dpad_center.x, bottom_y), pill);
         let start = Rect::from_center_size(Pos2::new((a.0.x + b.0.x) / 2.0, bottom_y), pill);
+        let quick_save = Rect::from_center_size(Pos2::new(select.center().x, util_y), pill);
+        let quick_load = Rect::from_center_size(Pos2::new(start.center().x, util_y), pill);
 
         Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
     }
@@ -232,12 +244,15 @@ impl Layout {
         let half_w = unit * Self::STACK_WIDTH_UNITS / 2.0;
         let cx = if left { area.left() + margin + half_w } else { area.right() - margin - half_w };
         let gap = unit * 0.3;
-        // Stack from the bottom up, where the thumb rests: Select/Start,
-        // D-pad, A/B, shoulders, then menu / fast-forward, then quick save / load.
+        // Stack from the bottom up, where the thumb rests: Save/Load,
+        // Select/Start, D-pad, A/B, shoulders, then menu / fast-forward.
         let mut y = area.bottom() - margin;
 
         let pill = Vec2::new(unit * 1.5, unit * 0.62);
         y -= pill.y / 2.0;
+        let quick_save = Rect::from_center_size(Pos2::new(cx - pill.x / 2.0 - gap / 2.0, y), pill);
+        let quick_load = Rect::from_center_size(Pos2::new(cx + pill.x / 2.0 + gap / 2.0, y), pill);
+        y -= pill.y + gap;
         let select = Rect::from_center_size(Pos2::new(cx - pill.x / 2.0 - gap / 2.0, y), pill);
         let start = Rect::from_center_size(Pos2::new(cx + pill.x / 2.0 + gap / 2.0, y), pill);
         y -= pill.y / 2.0 + gap;
@@ -263,11 +278,6 @@ impl Layout {
         y -= small.y / 2.0;
         let menu = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
         let fast = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
-        y -= small.y / 2.0 + gap;
-
-        y -= small.y / 2.0;
-        let quick_save = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
-        let quick_load = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
 
         Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
     }
@@ -488,10 +498,8 @@ pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look
             draw_image(p, tex, rect, down && !own);
             continue;
         }
-        let radius = if ctl == Control::QuickSave || ctl == Control::QuickLoad { 8.0 } else { rect.height() / 2.0 };
-        p.rect(rect, radius, fill(bit), stroke, egui::StrokeKind::Inside);
-        let font_size = if ctl == Control::QuickSave || ctl == Control::QuickLoad { rect.height() * 0.36 } else { rect.height() * 0.42 };
-        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(font_size), k.label);
+        p.rect(rect, rect.height() / 2.0, fill(bit), stroke, egui::StrokeKind::Inside);
+        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(rect.height() * 0.42), k.label);
     }
 
     if let Some(tex) = look.image(Control::Fast, fast_forward) {
@@ -677,6 +685,62 @@ mod tests {
                 (l.start.center(), Buttons::START),
             ] {
                 assert_eq!(l.hit(p), want, "size {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn landscape_phone_game_fills_the_height() {
+        // 20:9 and 19.5:9 phones: full-height game, controls shrunk no more
+        // than LANDSCAPE_MIN_SCALE, nothing over the game.
+        for size in [Vec2::new(914.0, 411.0), Vec2::new(844.0, 390.0), Vec2::new(780.0, 360.0)] {
+            let safe = Rect::from_min_size(Pos2::ZERO, size);
+            let l = Layout::compute(safe, Some([240, 160]));
+            // Full height on 20:9 phones; the odd narrower phone gets
+            // within a few percent (controls hit their minimum size first).
+            let want = if size.x / size.y >= 2.2 { size.y - 0.5 } else { size.y * 0.95 };
+            assert!(l.screen.height() >= want, "{size:?}: {:?}", l.screen);
+            let normal = (size.y * 0.135).clamp(34.0, 80.0);
+            assert!(l.dpad_radius >= normal * 1.45 * Layout::LANDSCAPE_MIN_SCALE - 0.01, "{size:?}");
+            for rect in all_controls(&l) {
+                assert!(!rect.intersects(l.screen), "{size:?}: {rect:?} covers the game");
+                assert!(safe.expand(1.0).contains_rect(rect), "{size:?}: {rect:?} off screen");
+            }
+        }
+    }
+
+    #[test]
+    fn save_and_load_sit_below_select_and_start() {
+        let sizes = [
+            Vec2::new(360.0, 780.0),
+            Vec2::new(412.0, 915.0),
+            Vec2::new(820.0, 1180.0), // tablet portrait
+            Vec2::new(915.0, 412.0),
+            Vec2::new(780.0, 360.0),
+            Vec2::new(1180.0, 820.0), // tablet landscape
+        ];
+        for size in sizes {
+            let safe = Rect::from_min_size(Pos2::ZERO, size);
+            for hand in [Hand::Both, Hand::Left, Hand::Right] {
+                let l = Layout::compute_for(safe, Some([240, 160]), hand);
+                let ctx = format!("{size:?} {hand:?}");
+                // Same pill shape as Select / Start, one row lower, lined up.
+                assert!((l.quick_save.size() - l.select.size()).length() < 0.01, "{ctx}");
+                assert!((l.quick_load.size() - l.start.size()).length() < 0.01, "{ctx}");
+                assert!(l.quick_save.top() > l.select.bottom(), "{ctx}: save under select");
+                assert!(l.quick_load.top() > l.start.bottom(), "{ctx}: load under start");
+                assert!((l.quick_save.center().x - l.select.center().x).abs() < 0.5, "{ctx}");
+                assert!((l.quick_load.center().x - l.start.center().x).abs() < 0.5, "{ctx}");
+                assert!(safe.expand(1.0).contains_rect(l.quick_save), "{ctx}: save off screen");
+                assert!(safe.expand(1.0).contains_rect(l.quick_load), "{ctx}: load off screen");
+                // No two controls' boxes touch.
+                let all = all_controls(&l);
+                for (i, a) in all.iter().enumerate() {
+                    assert!(!a.intersects(l.screen), "{ctx}: {a:?} covers the game");
+                    for b in &all[i + 1..] {
+                        assert!(!a.intersects(*b), "{ctx}: {a:?} overlaps {b:?}");
+                    }
+                }
             }
         }
     }

@@ -260,7 +260,8 @@ def main():
 
     PW, PH = 200, 80
     for key, label, col in [("l", "L", PURPLE), ("r", "R", PURPLE),
-                            ("start", "START", ORANGE), ("select", "SELECT", ORANGE)]:
+                            ("start", "START", ORANGE), ("select", "SELECT", ORANGE),
+                            ("quick_save", "SAVE", ORANGE), ("quick_load", "LOAD", ORANGE)]:
         fs = 44 if len(label) == 1 else 26
         add(key, f"{key}.png", pulsing(lambda p, l=label, c=col: neon_ring((PW, PH), c, l, p, False, "pill", fs), F), F, 5)
         add(f"{key}_pressed", f"{key}_down.png", neon_ring((PW, PH), col, label, 1.0, True, "pill", fs))

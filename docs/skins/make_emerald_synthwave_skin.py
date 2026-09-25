@@ -354,8 +354,8 @@ def main():
         add(key, f"{key}.png", pulsing(lambda p, l=label, c=col: neon_ring((PW, PH), c, l, p, False, "pill", 44), F), F, 5)
         add(f"{key}_pressed", f"{key}_down.png", neon_ring((PW, PH), col, label, 1.0, True, "pill", 44))
 
-    # Start & Select: Solar Gold pills
-    for key, label in [("start", "START"), ("select", "SELECT")]:
+    # Start & Select, and Save & Load below them: Solar Gold pills
+    for key, label in [("start", "START"), ("select", "SELECT"), ("quick_save", "SAVE"), ("quick_load", "LOAD")]:
         col = GOLD_AMBER
         add(key, f"{key}.png", pulsing(lambda p, l=label, c=col: neon_ring((PW, PH), c, l, p, False, "pill", 26), F), F, 5)
         add(f"{key}_pressed", f"{key}_down.png", neon_ring((PW, PH), col, label, 1.0, True, "pill", 26))

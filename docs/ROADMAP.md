@@ -4,6 +4,12 @@ An ordered sequence of milestones. There are no dates: each milestone starts
 once the ones it depends on are done. Milestones in the same stage that don't
 depend on each other can run in parallel.
 
+> **Platform Focus**: CrabBoy Advance is developed with an **Android-First**
+> philosophy. Android is our primary tier-1 target, driving our performance
+> budgets, battery/thermal efficiency, touch ergonomics, and presentation.
+> Desktop functions as our reference testing platform, developer toolchain, and
+> CI foundation.
+
 Tags:
 - **[New]**: no mainstream handheld emulator does this, as far as we know.
 - **[Catch-up]**: mGBA, melonDS, NanoBoyAdvance or RetroArch already have it.
@@ -163,11 +169,12 @@ deterministic, so this comes first.
 
 ### M12. Dialogue reader [New]
 - Take text-box text from game memory when a memory map exists, otherwise
-  read the screen with OCR, and speak it with text-to-speech. Read at the
-  game's pace, with manual repeat.
+  read the screen with OCR, and speak it with text-to-speech (using Android's
+  native `TextToSpeech` service on mobile).
+- Read at the game's pace, with manual repeat.
 - **Depends on:** M11.
-- **Done when:** a whole Emerald conversation is read out correctly, both
-  from memory and through the OCR fallback.
+- **Done when:** an Emerald conversation is read out correctly on Android and
+  desktop, both from memory and through the OCR fallback.
 
 ### M13. Live translation overlay [New as a built-in]
 - OCR Japanese text and translate it with a local or remote LLM through the
@@ -181,13 +188,14 @@ deterministic, so this comes first.
 - The AI agent acts as a companion and advisor: on request it inspects the
   screen, the M11 memory map, and indexed game guide manuals (PDF / Web
   guides) to provide context-aware hints with configurable spoiler levels.
+- Mobile floating action button / split-pane companion on Android.
 - **Depends on:** M11, and the existing guide import subsystem.
 - **Done when:** hints are relevant to what's on screen in a set of scripted
   "stuck" scenarios, and the spoiler setting is respected.
 
 ---
 
-## Stage 5: Tools
+## Stage 5: Tools & Visual History
 
 ### M15. Time-travel debugger [New for GBA]
 - Step backwards one instruction or one frame at a time, and ask "who last
@@ -197,12 +205,15 @@ deterministic, so this comes first.
 - **Done when:** you can go from a corrupted value in the hex editor back to
   the instruction that wrote it in one click.
 
-### M16. Branching save-state timeline [New]
-- Save states and rewind points form a tree you can browse, like git
-  history, instead of 10 flat slots. Every branch has thumbnails, and any
-  point can be named, compared and resumed.
-- **Depends on:** M2 and M4 (the same format everywhere).
-- **Done when:** the tree works on desktop and Android and survives a sync.
+### M16. Visual filmstrip rewind & branching timeline [New]
+- **Mobile Filmstrip Scrubber:** Swipe from the screen edge on Android to open
+  a horizontal thumbnail filmstrip of the last 15–30 seconds. Slide your
+  thumb to the exact jump or battle turn and release to resume.
+- **Branching Save-State Tree:** Save states form a visual tree you can
+  browse with thumbnails, branch names, and instant restore points.
+- **Depends on:** M2 and M4.
+- **Done when:** filmstrip scrub works smoothly on Android at 60 FPS and state
+  trees survive cloud sync.
 
 ### M17. Plugin and scripting API [Catch-up; sandboxed WASM plugins would be new]
 - A stable API for reading and writing memory, watching frames and inputs,
@@ -217,117 +228,145 @@ deterministic, so this comes first.
 
 ---
 
-## Stage 6: Platforms and extras
+## Stage 6: Android Platform Excellence (Tier-1 Primary Target)
 
-These don't depend on each other. Pick them in any order after Stage 5, or
-earlier when there's spare capacity.
+All mobile milestones designed to deliver the best handheld experience on
+smartphones, foldables, tablets, and dedicated Android handhelds (Odin, Retroid).
 
-### M18. Android release & polish [Catch-up] ✅ (Core Release Live)
-- Multi-ABI release APK (arm64-v8a + x86_64) with native C++ static linking
-  and high-precision GLES shaders.
+### M18. Android release & core UI [Catch-up] ✅ (Core Release Live)
+- Multi-ABI release APK (arm64-v8a + x86_64) with native C++ static runtime
+  linking and high-precision GLES shaders.
 - Custom animated skin packs, on-screen touch layout editor, in-game modal menu,
   fast forward, quick save/load, auto-save rotations, gyro/tilt sensor.
-- **Remaining polish:**
-  - Scoped Storage folder selector to auto-populate and monitor ROM collections.
-  - Android TV / Leanback navigation (full D-pad UI focus navigation).
-  - F-Droid and Play Store submission metadata.
 
-### M19. Web (WASM) build [Catch-up]
-- Pure Rust core compiled to `wasm32-unknown-unknown` running in modern
-  browsers with WebGL/wgpu and WebAudio.
+### M18a. Scoped Storage ROM Library Scanner (SAF Auto-Scan)
+- Use Android's Storage Access Framework (`ACTION_OPEN_DOCUMENT_TREE`) to let
+  the user pick their `ROMs/` folder once.
+- Persist folder URI permissions, automatically scan subdirectories for `.gba`,
+  `.gb`, `.gbc`, and `.nds` games, and auto-sync battery saves without manual
+  per-file imports.
+
+### M18b. Audio-driven haptic rumble & physical tilt
+- **Dynamic LRA Force Feedback:** Convert low-frequency audio energy (bass
+  impacts, explosions, boss roars) into nuanced tactile vibrations using
+  Android's `Vibrator` / `VibrationEffect` API.
+- **Authentic Gyro/Tilt:** Map the phone's physical hardware accelerometer and
+  gyroscope to cartridge tilt sensors (*WarioWare Twisted!*, *Yoshi Topsy-Turvy*).
+
+### M18c. Android TV & dedicated handheld console navigation
+- Complete D-pad and analog stick focus navigation for the game library, search
+  filters, and in-game modal menus.
+- Zero-touch operation: navigate, launch, play, and configure entirely from
+  a Bluetooth controller or built-in gamepad (Retroid Pocket, AYN Odin, Anbernic).
+- Android TV Leanback launcher banner and intent declarations.
+
+### M18d. Foldable & tablet clamshell ergonomics
+- Detect foldable posture changes (`FoldingFeature` in Jetpack WindowManager).
+- When half-folded (clamshell mode): display the game on the upright half and
+  touch controls on the flat bottom half.
+- Adaptive aspect ratio and UI scaling for large tablets (7"–13").
+
+### M18e. Per-game touch layouts & auto-switching
+- Automatically load custom touch control layouts based on the running game's
+  genre:
+  - *Pokémon / RPGs:* One-handed compact vertical thumb layout.
+  - *Mario Kart / F-Zero:* Wide thumb grips with enlarged drift triggers.
+  - *Action / Fighting:* Traditional D-pad with responsive diagonal zones.
+
+### M19. Local Link Cable & Wireless Adapter (2-Player P2P)
+- Two-player peer-to-peer serial synchronization over local Wi-Fi or Wi-Fi Direct.
+- **Zero-Config Pairing:** Host displays an on-screen QR code; client scans with
+  the phone's camera to connect instantly.
+- Enables Pokémon trading/battling, Mario Kart GP, and Zelda Four Swords.
 - **Depends on:** M2.
 
-### M20. libretro core [Catch-up]
-- Package CrabBoy as a `libretro` core for RetroArch and OS handhelds.
-- **Depends on:** M2.
-
-### M21. Super Game Boy borders & palettes [Catch-up]
-- SGB border rendering and custom color palettes for monochrome GB titles.
-
-### M22. e-Reader support [Catch-up]
-- Emulate the GBA e-Reader accessory, dot-code payload decoding, and memory
-  card transfer for E-Card minigames and Pokémon battle cards.
-
-### M23. Local Link Cable & Wireless Adapter (2-player P2P) [Catch-up]
-- Two-player peer-to-peer serial synchronization over local Wi-Fi or local IP
-  sockets (no high-latency WAN rollback needed).
-- Enables Pokémon trading/battling, Mario Kart GP multiplayer, and Zelda Four
-  Swords.
-- **Depends on:** M2.
-
-### M24. RetroAchievements integration (`rcheevos`) [Catch-up]
-- ROM hash matching, badge popups, leaderboards, and hardcore mode via the
-  official RetroAchievements community API.
+### M20. RetroAchievements integration (`rcheevos`)
+- ROM hash matching, in-game achievement toast popups, leaderboards, and
+  hardcore mode via the official RetroAchievements community API.
 - **Depends on:** M11 (memory offsets).
+
+### M21. Web (WASM) build & libretro core [Secondary targets]
+- WASM browser build and libretro core for cross-platform portability.
 
 ---
 
-## Stage 7: Nintendo DS Support [New Flagship Track]
+## Stage 7: Nintendo DS Support (Touch-Native Mobile Focus)
 
 A dual-screen expansion bringing full Nintendo DS (NDS) emulation alongside
-GBA and Game Boy. Architectural details are documented in `ds_support_plan.md`
-and implemented on `feature/nds-support`.
+GBA and Game Boy. Designed from the ground up for Android touchscreens.
+Architectural details in `ds_support_plan.md` and `feature/nds-support`.
 
-### M25. DS dual-core architecture & memory matrix
+### M22. DS dual-core architecture & memory matrix
 - ARM946E-S (67 MHz) with instruction/data TCM and caches.
 - ARM7TDMI (33 MHz) running subsystem tasks.
 - Bidirectional IPC FIFO with send/receive interrupts.
 - Programmable 9-bank VRAM matrix (Banks A–I, 656 KiB total) mapping to 2D
   backgrounds, sprites, textures, and LCD direct mode.
 
-### M26. Dual 2D graphics engine (Engine A & Engine B)
+### M23. Dual 2D graphics engine (Engine A & Engine B)
 - Engine A (top or bottom screen): Modes 0–5, text/affine/extended backgrounds,
   affine sprites, alpha blending, brightness effects, and display capture.
 - Engine B (sub-screen): Modes 0–5 text and affine layers with independent
   palettes and scroll registers.
 - Dual 256×192 native framebuffers (composited 256×384).
 
-### M27. DS peripherals, touch digitizer & SPU
+### M24. DS peripherals, touch digitizer & SPU
 - SPI bus connecting the resistive touchscreen controller, firmware NVRAM,
   and power management chip (PMIC).
+- Direct mobile touch-to-digitizer coordinate mapping (with stylus support).
 - 16-channel SPU supporting 8-bit/16-bit PCM, 4-bit IMA-ADPCM, and PSG channels,
   interfacing with CrabBoy's 48 kHz audio sink.
 - Cartridge SPI protocol with Blowfish key encryption and ROM stream DMA.
 
-### M28. 3D geometry engine & rasterizer
+### M25. 3D geometry engine & rasterizer
 - 3D Geometry Engine: fixed-point vector/matrix math coprocessor, 4×4 clip
   matrix stack, normal transformation, and vertex lighting.
-- Polygon rasterizer: scanline-based software rasterizer and hardware-accelerated
-  wgpu/OpenGL backend with texture mapping, alpha blending, edge antialiasing,
-  and toon shading.
+- Polygon rasterizer: mobile-optimized scanline software rasterizer and
+  hardware GLES / Vulkan rasterizer with texture mapping, alpha blending,
+  edge antialiasing, and toon shading.
 
-### M29. Dual-screen UX & Slot-2 crossover
-- Desktop and Android dual-screen presentations: Stacked (vertical), Side-by-Side,
-  Single Screen with swap hotkey, and Picture-in-Picture (PIP).
-- Direct touchscreen input for mobile touch and desktop mouse pointer.
+### M26. Mobile dual-screen UX & Slot-2 crossover
+- Tailored mobile layouts:
+  - *Portrait phone:* Top screen on top, Touch screen on bottom with ergonomic
+    touch buttons flanking the lower screen.
+  - *Foldable clamshell:* Top screen on the upper display, touch bottom screen
+    on the lower display like a physical Nintendo DS.
+  - *Landscape phone:* Side-by-side or Picture-in-Picture with quick-swap hotkey.
 - GBA Slot-2 cartridge pass-through for dual-slot features (Gen 4 Pokémon
   Pal Park, Dual-Slot music/items).
 
 ---
 
-## Performance Track
+## Performance Track: Mobile Thermal & Battery Optimization
 
-A staged path from the interpreter to optimal execution while guaranteeing
-bit-identical emulation (`docs/JIT.md`):
+Mobile handheld play requires ruthless optimization for low battery consumption
+and zero thermal throttling:
 
 1. **Stage 1 (Hot-path fixes) ✅**: Table CRC32, slice memory fast paths (+18% to +53%).
 2. **Stage 2 (Batch peripheral stepping) ✅**: Catch-up event horizon for PPU, timers,
    and serial (+33% to +59%).
 3. **Stage 3a (Decode tables & renderer fast paths) ✅**: ARM 4096-entry candidate
    tables, tile-by-tile text BG rendering (+18% to +36%). Total cumulative: **+110% to +144%**.
-4. **Stage 4 alternatives (High ROI per effort)**:
-   - *Idle-loop detection & skipping*: skip busy-wait cycles up to the next event
-     horizon for games that don't HALT (e.g., Pokémon Emerald). Dramatically
-     cuts CPU and battery drain on mobile.
-   - *Multithreaded scanline rendering*: decouple PPU scanline compositing from
-     the CPU loop for multi-core systems.
+4. **Stage 4a: Idle-Loop Detection & Busy-Wait Skipping [Critical for Mobile]**:
+   - Games like Pokémon Emerald busy-wait in an idle loop at 60 FPS instead of
+     sleeping (HALT).
+   - Detect idle loops and advance the CPU clock directly to the next peripheral
+     event horizon.
+   - **Benefit:** Cuts CPU utilization and power draw by **30–50% on mobile**,
+     keeping phones cool and extending battery life by hours.
+5. **Stage 4b: Zero-Copy GLES Pixel Buffer Objects (PBO)**:
+   - Stream the core's native framebuffer directly to GPU textures via PBOs,
+     eliminating CPU-side Vec allocations and memory bandwidth overhead.
+6. **Stage 4c: 59.73 Hz Variable Refresh Rate (VRR/LTPO) Frame Pacing**:
+   - Synchronize with Android's `Choreographer` on modern 90Hz/120Hz/144Hz LTPO
+     displays to eliminate judder and micro-stutter without screen tearing.
 
 ---
 
 ## Out of Scope
 
 - **Global WAN Rollback Netplay**: high-latency cross-internet rollback netplay
-  remains out of scope (local P2P link cable is covered in M23).
+  remains out of scope (local P2P link cable is covered in M19).
 - **Nintendo DSi hardware**: cameras, SD card interface, and TWL-mode enhancements
   are deferred; focus is on the standard Nintendo DS (NDS Lite/Phat) library.
 - **Native iOS App Store Release**: cancelled/deferred due to sideloading
@@ -344,10 +383,11 @@ M1 ─┬─ M2 ─┬─ M3
     │      ├─ M11 ─┬─ M12 ── M13
     │      │       ├─ M14
     │      │       ├─ M17 (also M2)
-    │      │       └─ M24
+    │      │       └─ M20 (RetroAchievements)
     │      ├─ M15
-    │      ├─ M19, M20, M23
-    │      └─ M25 ── M26 ── M27 ── M28 ── M29 (Stage 7 DS)
+    │      ├─ M18 (Android Core) ── M18a ── M18b ── M18c ── M18d ── M18e
+    │      ├─ M19 (Local P2P Link)
+    │      └─ M22 ── M23 ── M24 ── M25 ── M26 (Stage 7 NDS)
     └─ M5 ─┬─ M6 ── M8
            ├─ M7
            └─ M10
