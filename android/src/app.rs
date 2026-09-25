@@ -293,6 +293,7 @@ struct CrabBoyApp {
     filter_console: Option<&'static str>,
     confirm_delete_rom: Option<PathBuf>,
     startup_settings_open: bool,
+    menu_opened_at: Option<Instant>,
 }
 
 impl CrabBoyApp {
@@ -387,6 +388,7 @@ impl CrabBoyApp {
             filter_console: None,
             confirm_delete_rom: None,
             startup_settings_open: false,
+            menu_opened_at: None,
         };
         app.refresh_skins();
         app.refresh_library();
@@ -1517,8 +1519,25 @@ impl CrabBoyApp {
     }
 
     fn menu_ui(&mut self, ctx: &egui::Context) {
+        if self.menu_opened_at.is_none() {
+            self.menu_opened_at = Some(Instant::now());
+        }
+        let can_dismiss = self.menu_opened_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(200));
+
+        let full = ctx.screen_rect();
+        let backdrop_resp = egui::Area::new(egui::Id::new("menu_backdrop"))
+            .fixed_pos(full.min)
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                let (_, resp) = ui.allocate_exact_size(full.size(), egui::Sense::click());
+                ui.painter().rect_filled(full, 0.0, Color32::from_black_alpha(100));
+                resp
+            });
+
+        let mut clicked_outside = can_dismiss && backdrop_resp.inner.clicked();
+
         let title = self.game.as_ref().map(|g| g.title.clone()).unwrap_or_default();
-        egui::Window::new("Menu")
+        let win_resp = egui::Window::new("Menu")
             .title_bar(false)
             .collapsible(false)
             .resizable(false)
@@ -1681,6 +1700,24 @@ impl CrabBoyApp {
                     });
                 });
             });
+
+        if can_dismiss {
+            if let Some(win) = win_resp {
+                let win_rect = win.response.rect;
+                let clicked_off = ctx.input(|i| {
+                    i.pointer.any_click()
+                        && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|pos| !win_rect.contains(pos))
+                });
+                if clicked_off {
+                    clicked_outside = true;
+                }
+            }
+        }
+
+        if clicked_outside {
+            self.menu_open = false;
+            self.menu_opened_at = None;
+        }
     }
 }
 
@@ -2154,8 +2191,10 @@ impl eframe::App for CrabBoyApp {
                 self.autosave_menu = false;
                 self.skin_menu = false;
                 self.menu_open = true;
+                self.menu_opened_at = Some(Instant::now());
             } else {
                 self.menu_open = !self.menu_open;
+                self.menu_opened_at = if self.menu_open { Some(Instant::now()) } else { None };
             }
         }
 
@@ -2201,6 +2240,7 @@ impl eframe::App for CrabBoyApp {
                 }
                 if self.touch.just_pressed(Buttons::MENU) {
                     self.menu_open = true;
+                    self.menu_opened_at = Some(Instant::now());
                 }
                 if self.touch.just_pressed(Buttons::FAST) {
                     self.fast_forward = !self.fast_forward;
