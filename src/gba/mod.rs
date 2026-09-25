@@ -20,6 +20,8 @@ pub mod shader;
 pub mod state;
 pub mod timer;
 pub mod widescreen;
+pub mod idle;
+pub use idle::IdleDetector;
 
 use cheats::CheatManager;
 use cpu::{arm::step_arm, thumb::step_thumb, Arm7Tdmi, CpuMode};
@@ -75,6 +77,11 @@ pub struct Gba {
     /// for comparison. Takes effect inside `run_frame` only.
     pub batch_peripherals_enabled: bool,
     batch_peripherals: bool,
+    /// Stage 4a: Skip busy-wait polling loops up to the next peripheral event
+    /// horizon. Slashes mobile CPU load and thermal throttling while preserving
+    /// bit-identical execution.
+    pub idle_skip: bool,
+    pub idle_detector: IdleDetector,
 }
 
 impl Default for Gba {
@@ -98,6 +105,8 @@ impl Gba {
             halt_budget: 1,
             batch_peripherals_enabled: true,
             batch_peripherals: false,
+            idle_skip: true,
+            idle_detector: IdleDetector::new(),
         }
     }
 
@@ -270,6 +279,7 @@ impl Gba {
         self.diagnostics.reset();
         self.m4a.sampler.stop_all();
         self.mmu.apu.hd_sample_stream.clear();
+        self.idle_detector.reset();
     }
 
     /// Step a single instruction and advance peripherals
@@ -301,6 +311,7 @@ impl Gba {
         }
 
         // Execute instruction
+        let pc_before = self.cpu.regs[15];
         let cycles = if self.cpu.halted {
             if self.halt_skip {
                 self.cycles_to_next_event()
@@ -312,6 +323,13 @@ impl Gba {
         } else {
             step_arm(&mut self.cpu, &mut self.mmu)
         };
+        let pc_after = self.cpu.regs[15];
+
+        let extra_skip = self.check_idle_loop(pc_before, pc_after, cycles);
+        let cycles = cycles + extra_skip;
+        if extra_skip > 0 {
+            self.mmu.timing.clock.set(self.mmu.timing.clock.get() + extra_skip as u64);
+        }
 
         // DMA triggered by this instruction (or by the previous step's
         // HBlank/VBlank/FIFO events) held the CPU off the bus.
@@ -324,7 +342,7 @@ impl Gba {
         // scheduled event. Until then, keep running instructions and let
         // the cycles pile up. Anything that could observe or change the
         // hardware mid-run (IO register access, SWI, DMA) catches up first.
-        if self.batch_peripherals && self.can_defer() {
+        if extra_skip == 0 && self.batch_peripherals && self.can_defer() {
             return cycles;
         }
         let (stepped, overflows) = self.mmu.catch_up_timed(self.cpu.cycles);
@@ -370,6 +388,97 @@ impl Gba {
             let (c, ov) = self.mmu.catch_up_timed(self.cpu.cycles);
             self.mmu.catch_up_apu(c, ov);
         }
+    }
+
+    /// Stage 4a (ROADMAP M4a / docs/JIT.md): detect small, deterministic backward-branch
+    /// loops that perform no memory writes and alter no registers between iterations
+    /// (e.g. Pokémon Emerald's VBlank polling loop). Returns whole loop iteration cycles
+    /// to skip up to the next peripheral event horizon.
+    #[inline(always)]
+    fn check_idle_loop(&mut self, pc_before: u32, pc_after: u32, instr_cycles: u32) -> u32 {
+        if !self.idle_skip || self.cpu.halted {
+            return 0;
+        }
+
+        // Never skip if interrupts are pending or asserted or DMA stall is queued
+        if (self.mmu.ie & self.mmu.if_reg) != 0
+            || self.mmu.irq_assert_time.is_some()
+            || self.mmu.pending_dma_stall() != 0
+        {
+            self.idle_detector.consecutive_loops = 0;
+            return 0;
+        }
+
+        // Backward branch within a tight loop (at most 64 bytes)
+        let is_backward_branch = pc_after <= pc_before && pc_before.wrapping_sub(pc_after) <= 64;
+
+        if is_backward_branch {
+            if pc_after == self.idle_detector.loop_start_pc && pc_before == self.idle_detector.loop_branch_pc {
+                // Completed another iteration of the candidate loop!
+                let no_writes = !self.mmu.write_occurred.get();
+                let no_timer_reads = !self.mmu.timer_read_occurred.get();
+                let no_io_reads = !self.mmu.io_read_occurred.get();
+                let regs_match = self.cpu.regs == self.idle_detector.saved_regs;
+                let cpsr_match = (self.cpu.cpsr & 0xF000_0000) == (self.idle_detector.saved_cpsr & 0xF000_0000);
+
+                let now = self.cpu.cycles + instr_cycles as u64;
+                let iter_cycles = now.saturating_sub(self.idle_detector.start_cycles);
+
+                // Prepare next iteration's observation window
+                self.idle_detector.start_cycles = now;
+                self.mmu.write_occurred.set(false);
+                self.mmu.timer_read_occurred.set(false);
+                self.mmu.io_read_occurred.set(false);
+
+                if no_writes && no_timer_reads && no_io_reads && regs_match && cpsr_match && iter_cycles > 0 && iter_cycles <= 256 {
+                    self.idle_detector.consecutive_loops += 1;
+
+                    if self.idle_detector.consecutive_loops >= 2 {
+                        if self.mmu.pending_cycles != 0 {
+                            let (c, ov) = self.mmu.catch_up_timed(self.cpu.cycles);
+                            self.mmu.catch_up_apu(c, ov);
+                            if (self.mmu.ie & self.mmu.if_reg) != 0 || self.mmu.irq_assert_time.is_some() {
+                                self.idle_detector.consecutive_loops = 0;
+                                return 0;
+                            }
+                        }
+                        let to_next_event = self.cycles_to_next_event().saturating_sub(instr_cycles);
+                        let iter_c = iter_cycles as u32;
+                        if to_next_event > iter_c {
+                            let skip_iterations = to_next_event / iter_c;
+                            let skip_cycles = skip_iterations * iter_c;
+                            self.idle_detector.consecutive_loops = 0;
+                            self.idle_detector.start_cycles = now + skip_cycles as u64;
+                            return skip_cycles;
+                        }
+                    }
+                } else {
+                    self.idle_detector.consecutive_loops = 0;
+                    self.idle_detector.saved_regs = self.cpu.regs;
+                    self.idle_detector.saved_cpsr = self.cpu.cpsr;
+                }
+            } else {
+                // New candidate backward branch loop detected
+                self.idle_detector.loop_start_pc = pc_after;
+                self.idle_detector.loop_branch_pc = pc_before;
+                self.idle_detector.start_cycles = self.cpu.cycles + instr_cycles as u64;
+                self.idle_detector.saved_regs = self.cpu.regs;
+                self.idle_detector.saved_cpsr = self.cpu.cpsr;
+                self.idle_detector.consecutive_loops = 0;
+                self.mmu.write_occurred.set(false);
+                self.mmu.timer_read_occurred.set(false);
+                self.mmu.io_read_occurred.set(false);
+            }
+        } else {
+            // Not a backward branch: if PC jumped out of the loop
+            if pc_after < self.idle_detector.loop_start_pc
+                || pc_after > self.idle_detector.loop_branch_pc.wrapping_add(4)
+            {
+                self.idle_detector.consecutive_loops = 0;
+            }
+        }
+
+        0
     }
 
     /// Whether the peripherals may stay behind after this instruction:

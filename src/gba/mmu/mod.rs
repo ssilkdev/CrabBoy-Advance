@@ -89,6 +89,12 @@ pub struct Mmu {
     pub debug_port: debug_port::DebugPort,
     pub current_cycles: u64,
     pub intr_wait_mask: Option<u16>,
+    /// Stage 4a: Did any memory or IO write occur since this flag was cleared?
+    pub write_occurred: std::cell::Cell<bool>,
+    /// Stage 4a: Did any read touch a timer counter register (0x0400_0100..=0x0400_010E)?
+    pub timer_read_occurred: std::cell::Cell<bool>,
+    /// Stage 4a: Did any read touch any IO register (0x0400_0000..=0x0400_03FF)?
+    pub io_read_occurred: std::cell::Cell<bool>,
 }
 
 impl Default for Mmu {
@@ -174,6 +180,9 @@ impl Mmu {
             intr_wait_dispatched: false,
             current_cycles: 0,
             intr_wait_mask: None,
+            write_occurred: std::cell::Cell::new(false),
+            timer_read_occurred: std::cell::Cell::new(false),
+            io_read_occurred: std::cell::Cell::new(false),
         }
     }
 
@@ -220,18 +229,21 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write8(&mut self, addr: u32, val: u8) {
+        self.write_occurred.set(true);
         self.timing.access(addr, timing::Width::Byte, false);
         self.write8_raw(addr, val);
     }
 
     #[inline(always)]
     pub fn write16(&mut self, addr: u32, val: u16) {
+        self.write_occurred.set(true);
         self.timing.access(addr & !1, timing::Width::Half, false);
         self.write16_raw(addr, val);
     }
 
     #[inline(always)]
     pub fn write32(&mut self, addr: u32, val: u32) {
+        self.write_occurred.set(true);
         self.timing.access(addr & !3, timing::Width::Word, false);
         self.write32_raw(addr, val);
     }
@@ -389,6 +401,7 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write8_raw(&mut self, addr: u32, val: u8) {
+        self.write_occurred.set(true);
         match (addr >> 24) & 0xFF {
             0x02 => {
                 let off = (addr & 0x3_FFFF) as usize;
@@ -435,6 +448,7 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write16_raw(&mut self, addr: u32, val: u16) {
+        self.write_occurred.set(true);
         // 8-bit save bus: only the byte lane selected by the unaligned
         // address is written, at that address (jsmolka save tests #6/#7).
         if Self::is_save_bus(addr) {
@@ -479,6 +493,7 @@ impl Mmu {
 
     #[inline(always)]
     pub fn write32_raw(&mut self, addr: u32, val: u32) {
+        self.write_occurred.set(true);
         if Self::is_save_bus(addr) {
             self.write8_raw(addr, (val >> ((addr & 3) * 8)) as u8);
             return;
@@ -493,6 +508,7 @@ impl Mmu {
     }
 
     fn read_io8(&self, addr: u32) -> u8 {
+        self.io_read_occurred.set(true);
         let off = addr & 0x3FF;
         match off {
             // Readable sound registers; the write-only ones (0x8C-0x8F and
@@ -511,6 +527,7 @@ impl Mmu {
     }
 
     fn read_io16(&self, addr: u32) -> u16 {
+        self.io_read_occurred.set(true);
         let off = addr & 0x3FE;
         // Readback rules, verified against mGBA's "I/O read" suite
         // (ROADMAP M1):
@@ -567,13 +584,25 @@ impl Mmu {
             0x0DA => (self.dma.channels[3].dad >> 16) as u16,
             0x0DC => self.dma.channels[3].count,
             0x0DE => self.dma.channels[3].cnt_h & 0xFFE0,
-            0x100 => self.timers.read_counter(0, self.now().saturating_sub(TIMER_READ_LATENCY)),
+            0x100 => {
+                self.timer_read_occurred.set(true);
+                self.timers.read_counter(0, self.now().saturating_sub(TIMER_READ_LATENCY))
+            }
             0x102 => self.timers.timers[0].cnt_h,
-            0x104 => self.timers.read_counter(1, self.now().saturating_sub(TIMER_READ_LATENCY)),
+            0x104 => {
+                self.timer_read_occurred.set(true);
+                self.timers.read_counter(1, self.now().saturating_sub(TIMER_READ_LATENCY))
+            }
             0x106 => self.timers.timers[1].cnt_h,
-            0x108 => self.timers.read_counter(2, self.now().saturating_sub(TIMER_READ_LATENCY)),
+            0x108 => {
+                self.timer_read_occurred.set(true);
+                self.timers.read_counter(2, self.now().saturating_sub(TIMER_READ_LATENCY))
+            }
             0x10A => self.timers.timers[2].cnt_h,
-            0x10C => self.timers.read_counter(3, self.now().saturating_sub(TIMER_READ_LATENCY)),
+            0x10C => {
+                self.timer_read_occurred.set(true);
+                self.timers.read_counter(3, self.now().saturating_sub(TIMER_READ_LATENCY))
+            }
             0x10E => self.timers.timers[3].cnt_h,
             0x120..=0x12A | 0x134 | 0x140 | 0x150..=0x158 => self.sio.read_io16(addr & 0x3FE),
             0x130 => self.keypad.read_keyinput(),
@@ -1191,6 +1220,7 @@ impl Mmu {
     }
 
     pub fn handle_swi(&mut self, cpu: &mut Arm7Tdmi, comment: u32) {
+        self.write_occurred.set(true);
         // BIOS calls can read and write IO (Halt, sound, IntrWait); bring
         // the hardware up to date first (JIT stage 2).
         self.catch_up();
