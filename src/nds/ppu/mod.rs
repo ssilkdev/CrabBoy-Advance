@@ -6,6 +6,7 @@
 pub mod engine_2d;
 pub mod engine_3d;
 
+use crate::nds::bus::VramViews;
 use engine_2d::{Engine2D, SCREEN_HEIGHT, SCREEN_WIDTH};
 use engine_3d::Engine3D;
 
@@ -41,7 +42,9 @@ impl NdsPpu {
             dispstat_a: 0,
             dispstat_b: 0,
             vcount: 0,
-            powcnt1: 0x0203, // Both 2D engines powered on by default
+            // Both 2D engines on, Engine A on the upper screen (what the BIOS
+        // leaves for a direct boot).
+        powcnt1: 0x820F,
             framebuffer: vec![0xFF000000; SCREEN_WIDTH * DUAL_FRAMEBUFFER_HEIGHT],
         }
     }
@@ -80,25 +83,48 @@ impl NdsPpu {
         }
     }
 
-    /// Renders both Engine A and Engine B scanlines and stitches into unified framebuffer
-    pub fn render_scanline(
-        &mut self,
-        line: usize,
-        vram_a_bg: &[u8],
-        vram_a_obj: &[u8],
-        vram_b_bg: &[u8],
-        vram_b_obj: &[u8],
-    ) {
+    /// Renders both Engine A and Engine B scanlines and stitches into unified framebuffer.
+    ///
+    /// `lcdc` holds raw banks A-D for Engine A's VRAM display mode; `views`
+    /// holds each engine's mapped BG/OBJ VRAM.
+    pub fn render_scanline(&mut self, line: usize, lcdc: [&[u8]; 4], views: &VramViews) {
         if line >= SCREEN_HEIGHT {
             return;
         }
 
         // Render both 2D engines for this scanline
-        self.engine_a.render_scanline(line, vram_a_bg, vram_a_obj);
-        self.engine_b.render_scanline(line, vram_b_bg, vram_b_obj);
+        self.engine_a.render_scanline(line, &views.a_bg, &views.a_obj);
+        self.engine_b.render_scanline(line, &views.b_bg, &views.b_obj);
+
+        // DISPCNT bits 16-17 pick what the engine actually outputs.
+        // Engine A: 0 = display off (white), 1 = graphics, 2 = VRAM display
+        // (one 128 KiB LCDC bank as a raw 256x192 BGR555 bitmap, the mode
+        // armwrestler/rockwrestler and many homebrew use), 3 = main-memory
+        // FIFO (not emulated; shows graphics). Engine B: only 0 and 1.
+        let row = line * SCREEN_WIDTH;
+        match (self.engine_a.dispcnt >> 16) & 3 {
+            0 => self.engine_a.framebuffer[row..row + SCREEN_WIDTH].fill(0xFFFF_FFFF),
+            2 => {
+                let bank = lcdc[((self.engine_a.dispcnt >> 18) & 3) as usize];
+                let base = line * SCREEN_WIDTH * 2;
+                for x in 0..SCREEN_WIDTH {
+                    let i = base + x * 2;
+                    let c = match bank.get(i..i + 2) {
+                        Some(b) => u16::from_le_bytes([b[0], b[1]]),
+                        None => 0,
+                    };
+                    self.engine_a.framebuffer[row + x] = Engine2D::bgr555_to_rgba(c);
+                }
+            }
+            _ => {}
+        }
+        if (self.engine_b.dispcnt >> 16) & 1 == 0 {
+            self.engine_b.framebuffer[row..row + SCREEN_WIDTH].fill(0xFFFF_FFFF);
+        }
+        let vram_display = (self.engine_a.dispcnt >> 16) & 3 == 2;
 
         // If Engine A has 3D display enabled (DISPCNT bit 3), composite 3D layer into Engine A
-        if (self.engine_a.dispcnt & (1 << 3)) != 0 {
+        if !vram_display && (self.engine_a.dispcnt & (1 << 3)) != 0 {
             let offset_3d = line * SCREEN_WIDTH;
             for x in 0..SCREEN_WIDTH {
                 let pixel_3d = self.engine_3d.rasterizer.color_buffer[offset_3d + x];
@@ -108,9 +134,10 @@ impl NdsPpu {
             }
         }
 
-        // Copy scanlines into dual framebuffer based on POWCNT1 display swap
-        // Bit 15 of POWCNT1: 0 = Engine A on Top, 1 = Engine B on Top
-        let swap_screens = (self.powcnt1 & (1 << 15)) != 0;
+        // Copy scanlines into dual framebuffer based on POWCNT1 display swap.
+        // Bit 15 of POWCNT1 (GBATEK): 1 = Engine A on the upper screen,
+        // 0 = Engine A on the lower screen.
+        let swap_screens = (self.powcnt1 & (1 << 15)) == 0;
 
         let top_src = if swap_screens {
             &self.engine_b.framebuffer[line * SCREEN_WIDTH..(line + 1) * SCREEN_WIDTH]

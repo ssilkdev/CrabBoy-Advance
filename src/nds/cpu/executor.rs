@@ -120,7 +120,9 @@ fn step_arm<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
     // Software Interrupt (SWI)
     if (instr & 0x0F00_0000) == 0x0F00_0000 {
         let comment = instr & 0x00FF_FFFF;
-        handle_swi(cpu, bus, comment);
+        if !crate::nds::bios::hle_swi(cpu, bus, comment, false) {
+            cpu.trigger_swi(comment);
+        }
         return 3;
     }
 
@@ -133,7 +135,7 @@ fn step_arm<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
     }
 
     // ARMv5TE QADD / QSUB / QDADD / QDSUB
-    if cpu.is_armv5() && (instr & 0x0E90_00F0) == 0x0100_0050 {
+    if cpu.is_armv5() && (instr & 0x0F90_0FF0) == 0x0100_0050 {
         let rd = ((instr >> 12) & 0xF) as usize;
         let rn = ((instr >> 16) & 0xF) as usize;
         let rm = (instr & 0xF) as usize;
@@ -154,7 +156,7 @@ fn step_arm<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
     }
 
     // ARMv5TE DSP Multiplies (SMULxy, SMLAxy, SMULWy, SMLAWy, SMLALxy)
-    if cpu.is_armv5() && (instr & 0x0E00_0090) == 0x0100_0080 {
+    if cpu.is_armv5() && (instr & 0x0F90_0090) == 0x0100_0080 {
         let rd = ((instr >> 16) & 0xF) as usize;
         let rn = ((instr >> 12) & 0xF) as usize;
         let rs = ((instr >> 8) & 0xF) as usize;
@@ -426,7 +428,12 @@ fn step_arm<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
             } else {
                 bus.read32(target_addr & !3).rotate_right((target_addr & 3) * 8)
             };
-            cpu.set_reg(rd, val);
+            if rd == 15 {
+                let v5 = cpu.is_armv5();
+                branch_to(cpu, val, v5);
+            } else {
+                cpu.set_reg(rd, val);
+            }
         } else {
             let val = if rd == 15 { pc_val.wrapping_add(4) } else { cpu.reg(rd) };
             if b {
@@ -450,51 +457,91 @@ fn step_arm<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
     if (instr & 0x0E00_0000) == 0x0800_0000 {
         let p = (instr & (1 << 24)) != 0;
         let u = (instr & (1 << 23)) != 0;
-        let s = (instr & (1 << 22)) != 0;
+        let s_bit = (instr & (1 << 22)) != 0;
         let w = (instr & (1 << 21)) != 0;
         let l = (instr & (1 << 20)) != 0;
         let rn = ((instr >> 16) & 0xF) as usize;
         let rlist = (instr & 0xFFFF) as u16;
+        let armv5 = cpu.is_armv5();
 
-        let num_regs = rlist.count_ones();
-        let total_bytes = num_regs * 4;
+        // Empty list: ARMv4 transfers r15 only; ARMv5 transfers nothing.
+        // Both step the base by 0x40 (GBATEK "Strange effects").
+        let empty = rlist == 0;
+        let regs: u16 = if empty { if armv5 { 0 } else { 1 << 15 } } else { rlist };
+        let span = if empty { 0x40 } else { rlist.count_ones() * 4 };
         let base = cpu.reg(rn);
-
-        let mut start_addr = if u {
+        let mut addr = if u {
             if p { base.wrapping_add(4) } else { base }
         } else {
-            let low = base.wrapping_sub(total_bytes);
+            let low = base.wrapping_sub(span);
             if p { low } else { low.wrapping_add(4) }
         };
+        let new_base = if u { base.wrapping_add(span) } else { base.wrapping_sub(span) };
 
-        let writeback_val = if u { base.wrapping_add(total_bytes) } else { base.wrapping_sub(total_bytes) };
+        // S bit without r15 in an LDM (or any STM): transfer the user bank.
+        let pc_in_list = (regs & (1 << 15)) != 0;
+        let user_bank = s_bit && !(l && pc_in_list);
+        let saved_cpsr = cpu.cpsr();
+        if user_bank {
+            cpu.set_cpsr((saved_cpsr & !0x1F) | 0x1F); // System = user registers
+        }
 
         if l {
             for reg in 0..16 {
-                if (rlist & (1 << reg)) != 0 {
-                    let val = bus.read32(start_addr);
-                    cpu.set_reg(reg, val);
-                    start_addr = start_addr.wrapping_add(4);
+                if (regs & (1 << reg)) != 0 {
+                    let val = bus.read32(addr & !3);
+                    if reg == 15 {
+                        if s_bit {
+                            // LDM ..., {.., r15}^: CPSR = SPSR, then jump.
+                            let spsr = cpu.get_spsr();
+                            cpu.set_cpsr(spsr);
+                        }
+                        branch_to(cpu, val, armv5 && !s_bit);
+                    } else {
+                        cpu.set_reg(reg, val);
+                    }
+                    addr = addr.wrapping_add(4);
                 }
             }
-            if s && (rlist & (1 << 15)) != 0 {
-                let spsr = cpu.get_spsr();
-                cpu.set_cpsr(spsr);
-            }
         } else {
+            let first = regs.trailing_zeros() as usize;
             for reg in 0..16 {
-                if (rlist & (1 << reg)) != 0 {
-                    let val = if reg == 15 { pc_val } else { cpu.reg(reg) };
-                    bus.write32(start_addr, val);
-                    start_addr = start_addr.wrapping_add(4);
+                if (regs & (1 << reg)) != 0 {
+                    let val = if reg == 15 {
+                        pc_val.wrapping_add(4)
+                    } else if reg == rn && w && !armv5 && reg != first {
+                        // ARMv4 stores the updated base unless it's first.
+                        new_base
+                    } else {
+                        cpu.reg(reg)
+                    };
+                    bus.write32(addr & !3, val);
+                    addr = addr.wrapping_add(4);
                 }
             }
         }
 
-        if w && (!l || (rlist & (1 << rn)) == 0) {
-            cpu.set_reg(rn, writeback_val);
+        if user_bank {
+            cpu.set_cpsr(saved_cpsr);
         }
-        return num_regs + 1;
+
+        if w {
+            let base_in_list = (regs & (1 << rn)) != 0;
+            let writeback = if !l || !base_in_list {
+                true
+            } else if armv5 {
+                // ARMv5: write back if the base is the only register or
+                // not the last one; otherwise the loaded value stays.
+                let last = 15 - regs.leading_zeros() as usize;
+                regs.count_ones() == 1 || rn != last
+            } else {
+                false // ARMv4: the loaded value wins
+            };
+            if writeback {
+                cpu.set_reg(rn, new_base);
+            }
+        }
+        return rlist.count_ones().max(1) + 1;
     }
 
     // Data Processing (ALU)
@@ -593,8 +640,8 @@ fn step_thumb<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
     let pc_val = pc.wrapping_add(4);
     cpu.set_reg(15, pc.wrapping_add(2));
 
-    // Format 1: Move shifted register (LSL, LSR, ASR)
-    if (instr & 0xE000) == 0 {
+    // Format 1: Move shifted register (LSL, LSR, ASR). op=3 is format 2.
+    if (instr & 0xE000) == 0 && (instr & 0x1800) != 0x1800 {
         let op = (instr >> 11) & 3;
         let offset5 = (instr >> 6) & 0x1F;
         let rs = ((instr >> 3) & 7) as usize;
@@ -729,14 +776,14 @@ fn step_thumb<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
         match op {
             0 => { // ADD
                 let res = rd_val.wrapping_add(rs_val);
-                cpu.set_reg(rd, res);
+                cpu.set_reg(rd, if rd == 15 { res & !1 } else { res });
             }
             1 => { // CMP
                 let (res, c, v) = sub_with_borrow(rd_val, rs_val, true);
                 set_nzcv(cpu, res, c, v);
             }
             2 => { // MOV
-                cpu.set_reg(rd, rs_val);
+                cpu.set_reg(rd, if rd == 15 { rs_val & !1 } else { rs_val });
             }
             3 => { // BX / BLX
                 let is_blx = cpu.is_armv5() && (instr & (1 << 7)) != 0;
@@ -913,12 +960,10 @@ fn step_thumb<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
             if r {
                 let target = bus.read32(addr);
                 addr = addr.wrapping_add(4);
-                if (target & 1) != 0 {
-                    cpu.set_cpsr(cpu.cpsr() | FLAG_T);
-                    cpu.set_reg(15, target & !1);
+                if cpu.is_armv5() {
+                    branch_to(cpu, target, true);
                 } else {
-                    cpu.set_cpsr(cpu.cpsr() & !FLAG_T);
-                    cpu.set_reg(15, target & !3);
+                    cpu.set_reg(15, target & !1);
                 }
             }
             cpu.set_reg(13, addr);
@@ -971,7 +1016,9 @@ fn step_thumb<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
         if cond == 0xF {
             // Format 17: Software Interrupt (SWI)
             let comment = instr & 0xFF;
-            handle_swi(cpu, bus, comment);
+            if !crate::nds::bios::hle_swi(cpu, bus, comment, true) {
+                cpu.trigger_swi(comment);
+            }
             return 3;
         }
 
@@ -981,6 +1028,15 @@ fn step_thumb<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
             return 3;
         }
         return 1;
+    }
+
+    // Format 19 suffix, BLX label (ARMv5): 11101 offset11
+    if cpu.is_armv5() && (instr & 0xF800) == 0xE800 {
+        let lr = cpu.reg(14);
+        cpu.set_reg(14, pc.wrapping_add(2) | 1);
+        cpu.set_cpsr(cpu.cpsr() & !FLAG_T);
+        cpu.set_reg(15, lr.wrapping_add((instr & 0x7FF) << 1) & !3);
+        return 3;
     }
 
     // Format 18: Unconditional branch
@@ -1023,78 +1079,21 @@ fn step_thumb<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B) -> u32 {
 // HLE Software Interrupts & Helpers
 // =========================================================================
 
-fn handle_swi<C: CpuState, B: CpuBus>(cpu: &mut C, bus: &mut B, comment: u32) {
-    let swi_num = comment & 0x1F;
-    match swi_num {
-        0x03 => cpu.set_halted(true),     // Halt
-        0x04 | 0x05 => cpu.set_halted(true), // IntrWait / VBlankIntrWait
-        0x06 => { // Div (signed)
-            let num = cpu.reg(0) as i32;
-            let den = cpu.reg(1) as i32;
-            if den != 0 {
-                let q = num / den;
-                let r = num % den;
-                cpu.set_reg(0, q as u32);
-                cpu.set_reg(1, r as u32);
-                cpu.set_reg(3, q.unsigned_abs());
-            }
+/// Jump to `target` after a load into r15. With `interwork` (ARMv5 LDR/LDM/POP)
+/// bit 0 selects Thumb; otherwise the current state is kept.
+fn branch_to<C: CpuState>(cpu: &mut C, target: u32, interwork: bool) {
+    if interwork {
+        if (target & 1) != 0 {
+            cpu.set_cpsr(cpu.cpsr() | FLAG_T);
+            cpu.set_reg(15, target & !1);
+        } else {
+            cpu.set_cpsr(cpu.cpsr() & !FLAG_T);
+            cpu.set_reg(15, target & !3);
         }
-        0x07 => { // DivRem (unsigned)
-            let num = cpu.reg(0);
-            let den = cpu.reg(1);
-            if den != 0 {
-                cpu.set_reg(0, num / den);
-                cpu.set_reg(1, num % den);
-            }
-        }
-        0x08 => { // Sqrt
-            let val = cpu.reg(0) as u64;
-            let root = (val as f64).sqrt() as u32;
-            cpu.set_reg(0, root);
-        }
-        0x09 => cpu.set_reg(0, 0), // WaitByLoop
-        0x0B => { // CpuSet
-            let mut src = cpu.reg(0);
-            let mut dst = cpu.reg(1);
-            let cnt = cpu.reg(2);
-            let count = (cnt & 0x1F_FFFF) as usize;
-            let fixed_src = (cnt & (1 << 24)) != 0;
-            let is_32 = (cnt & (1 << 26)) != 0;
-            if is_32 {
-                for _ in 0..count {
-                    let val = bus.read32(src);
-                    bus.write32(dst, val);
-                    dst = dst.wrapping_add(4);
-                    if !fixed_src { src = src.wrapping_add(4); }
-                }
-            } else {
-                for _ in 0..count {
-                    let val = bus.read16(src);
-                    bus.write16(dst, val);
-                    dst = dst.wrapping_add(2);
-                    if !fixed_src { src = src.wrapping_add(2); }
-                }
-            }
-        }
-        0x0C => { // CpuFastSet
-            let mut src = cpu.reg(0);
-            let mut dst = cpu.reg(1);
-            let cnt = cpu.reg(2);
-            let count = (cnt & 0x1F_FFFF) as usize;
-            let fixed_src = (cnt & (1 << 24)) != 0;
-            for _ in 0..count {
-                for _ in 0..8 {
-                    let val = bus.read32(src);
-                    bus.write32(dst, val);
-                    dst = dst.wrapping_add(4);
-                    if !fixed_src { src = src.wrapping_add(4); }
-                }
-            }
-        }
-        0x0E => { // GetBiosChecksum
-            cpu.set_reg(0, if cpu.is_armv5() { 0xBA07 } else { 0x854C });
-        }
-        _ => cpu.trigger_swi(comment),
+    } else if cpu.is_thumb() {
+        cpu.set_reg(15, target & !1);
+    } else {
+        cpu.set_reg(15, target & !3);
     }
 }
 

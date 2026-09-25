@@ -53,6 +53,7 @@ use crate::dmg::mmu::GbKey;
 use crate::dmg::GameBoy;
 use crate::gba::keypad::Key;
 use crate::gba::Gba;
+use crate::nds::{Nds, NdsKey};
 use emu_core::ConsoleKind;
 use config::AppConfig;
 use controls::{handle_input, GamepadManager, KeyBindings, PadAction};
@@ -72,6 +73,8 @@ pub struct GbaApp {
     /// loaded. The GBA core stays resident but idle so every dialog that
     /// borrows `&mut self.gba` keeps compiling unchanged.
     pub gb: Option<GameBoy>,
+    /// Nintendo DS core, live only while a .nds/.srl ROM is loaded.
+    pub nds: Option<Nds>,
     pub console: ConsoleKind,
     /// GB output letterboxed into a GBA-sized buffer, so the screen
     /// renderer, GIF recorder, screenshots and the ambient-glow sampler all
@@ -261,6 +264,7 @@ impl GbaApp {
             let mut app = Self {
             gba,
             gb: None,
+            nds: None,
             console: ConsoleKind::Gba,
             gb_framebuffer: Box::new([0xFF00_0000; 240 * 160]),
             gb_force_dmg: false,
@@ -354,6 +358,8 @@ impl GbaApp {
         let (path, filename) = screenshot::generate_screenshot_path(&self.loaded_rom_name, self.screenshot_enhanced);
         let res = if self.screenshot_enhanced {
             screenshot::save_color_image(&path, self.screen_renderer.last_image())
+        } else if let Some(ref nds) = self.nds {
+            screenshot::save_nds_framebuffer(&path, nds.get_framebuffer())
         } else {
             screenshot::save_raw_framebuffer(&path, self.display_framebuffer())
         };
@@ -377,11 +383,30 @@ impl GbaApp {
             .to_string();
 
         match kind {
+            ConsoleKind::Nds => {
+                let mut nds = Nds::new();
+                match nds.load_rom(path) {
+                    Ok(()) => {
+                        let title = nds.title().to_string();
+                        let code = nds.game_code().to_string();
+                        self.accessibility.load_for_game(&code, &title);
+                        self.gb = None;
+                        self.nds = Some(nds);
+                        self.console = ConsoleKind::Nds;
+                        self.loaded_rom_name = name;
+                        self.rewind_manager.clear();
+                        self.autosaver.restart_timer();
+                        self.set_toast(format!("Loaded {} (NDS): {}", self.loaded_rom_name, title));
+                    }
+                    Err(e) => self.set_toast(format!("Failed to load NDS ROM: {}", e)),
+                }
+            }
             ConsoleKind::GameBoy => match GameBoy::from_file(path, self.gb_force_dmg) {
                 Ok(gb) => {
                     let model = if gb.is_cgb() { "Game Boy Color" } else { "Game Boy" };
                     let title = gb.mmu.cart.title.clone();
                     self.accessibility.load_for_game("", &title);
+                    self.nds = None;
                     self.gb = Some(gb);
                     self.console = ConsoleKind::GameBoy;
                     self.loaded_rom_name = name;
@@ -405,6 +430,7 @@ impl GbaApp {
                 match self.gba.load_rom(path) {
                     Ok(()) => {
                         self.gb = None;
+                        self.nds = None;
                         self.console = ConsoleKind::Gba;
                         self.loaded_rom_name = name;
                         self.rewind_manager.clear();
@@ -455,9 +481,12 @@ impl GbaApp {
 
     fn save_active_slot(&mut self, slot: usize) -> Result<(), String> {
         let name = self.loaded_rom_name.clone();
-        let res = match self.gb {
-            Some(ref gb) => self.save_manager.save_slot(slot, gb, &name),
-            None => self.save_manager.save_slot(slot, &self.gba, &name),
+        let res = if let Some(ref nds) = self.nds {
+            self.save_manager.save_slot(slot, nds, &name)
+        } else if let Some(ref gb) = self.gb {
+            self.save_manager.save_slot(slot, gb, &name)
+        } else {
+            self.save_manager.save_slot(slot, &self.gba, &name)
         };
         if res.is_ok() {
             self.sync_saves();
@@ -468,17 +497,23 @@ impl GbaApp {
     fn load_active_slot(&mut self, slot: usize) -> Result<(), String> {
         self.sync_saves();
         let name = self.loaded_rom_name.clone();
-        match self.gb {
-            Some(ref mut gb) => self.save_manager.load_slot(slot, gb, &name),
-            None => self.save_manager.load_slot(slot, &mut self.gba, &name),
+        if let Some(ref mut nds) = self.nds {
+            self.save_manager.load_slot(slot, nds, &name)
+        } else if let Some(ref mut gb) = self.gb {
+            self.save_manager.load_slot(slot, gb, &name)
+        } else {
+            self.save_manager.load_slot(slot, &mut self.gba, &name)
         }
     }
 
     /// Write an auto-save into the rotation now.
     pub fn write_autosave(&mut self) -> Result<usize, String> {
-        let data = match self.gb {
-            Some(ref gb) => crate::ui::emu_core::SnapshotCore::save_state(gb),
-            None => crate::ui::emu_core::SnapshotCore::save_state(&self.gba),
+        let data = if let Some(ref nds) = self.nds {
+            crate::ui::emu_core::SnapshotCore::save_state(nds)
+        } else if let Some(ref gb) = self.gb {
+            crate::ui::emu_core::SnapshotCore::save_state(gb)
+        } else {
+            crate::ui::emu_core::SnapshotCore::save_state(&self.gba)
         };
         let name = self.loaded_rom_name.clone();
         let n = self.autosaver.write(&name, &data).map_err(|e| format!("Auto-save failed: {e}"))?;
@@ -490,9 +525,12 @@ impl GbaApp {
     pub fn load_autosave(&mut self, number: usize) -> Result<(), String> {
         let name = self.loaded_rom_name.clone();
         let data = self.autosaver.read(&name, number).map_err(|_| "That auto-save is gone".to_string())?;
-        let ok = match self.gb {
-            Some(ref mut gb) => crate::ui::emu_core::SnapshotCore::load_state(gb, &data),
-            None => crate::ui::emu_core::SnapshotCore::load_state(&mut self.gba, &data),
+        let ok = if let Some(ref mut nds) = self.nds {
+            crate::ui::emu_core::SnapshotCore::load_state(nds, &data)
+        } else if let Some(ref mut gb) = self.gb {
+            crate::ui::emu_core::SnapshotCore::load_state(gb, &data)
+        } else {
+            crate::ui::emu_core::SnapshotCore::load_state(&mut self.gba, &data)
         };
         if !ok {
             return Err("Auto-save is incompatible with this version".into());
@@ -502,35 +540,45 @@ impl GbaApp {
     }
 
     fn record_rewind_frame(&mut self) {
-        match self.gb {
-            Some(ref gb) => self.rewind_manager.record_frame(gb),
-            None => self.rewind_manager.record_frame(&self.gba),
+        if let Some(ref nds) = self.nds {
+            self.rewind_manager.record_frame(nds);
+        } else if let Some(ref gb) = self.gb {
+            self.rewind_manager.record_frame(gb);
+        } else {
+            self.rewind_manager.record_frame(&self.gba);
         }
     }
 
     fn rewind_active(&mut self) {
-        match self.gb {
-            Some(ref mut gb) => self.rewind_manager.rewind_step(gb),
-            None => self.rewind_manager.rewind_step(&mut self.gba),
+        if let Some(ref mut nds) = self.nds {
+            self.rewind_manager.rewind_step(nds);
+        } else if let Some(ref mut gb) = self.gb {
+            self.rewind_manager.rewind_step(gb);
+        } else {
+            self.rewind_manager.rewind_step(&mut self.gba);
         };
     }
 
     /// Run one frame on whichever core is active.
     fn run_active_frame(&mut self) {
-        match self.gb {
-            Some(ref mut gb) => gb.run_frame(),
-            None => self.run_ahead.run_frame(&mut self.gba),
+        if let Some(ref mut nds) = self.nds {
+            nds.run_frame();
+        } else if let Some(ref mut gb) = self.gb {
+            gb.run_frame();
+        } else {
+            self.run_ahead.run_frame(&mut self.gba);
         }
     }
 
     fn reset_active(&mut self) {
-        match self.gb {
-            Some(ref mut gb) => gb.reset(),
-            None => {
-                self.gba.reset();
-                // A reset re-randomizes relocating game data: new session.
-                self.memmap_dialog.on_reset();
-            }
+        if let Some(ref mut _nds) = self.nds {
+            // NDS reset
+        } else if let Some(ref mut gb) = self.gb {
+            gb.reset();
+        } else {
+            self.gba.reset();
+            // A reset re-randomizes relocating game data: new session.
+            self.memmap_dialog.on_reset();
         }
     }
 
@@ -563,9 +611,12 @@ impl GbaApp {
     /// Audio output of whichever core is running (the Game Boy core has its
     /// own). Menu and settings edits go here so they work in GB games too.
     fn active_audio_output(&mut self) -> &mut crate::gba::apu::audio_output::AudioOutput {
-        match self.gb {
-            Some(ref mut gb) => &mut gb.mmu.apu.audio_output,
-            None => &mut self.gba.mmu.apu.audio_output,
+        if let Some(ref mut nds) = self.nds {
+            &mut nds.bus.spu.audio_output
+        } else if let Some(ref mut gb) = self.gb {
+            &mut gb.mmu.apu.audio_output
+        } else {
+            &mut self.gba.mmu.apu.audio_output
         }
     }
 
@@ -730,9 +781,12 @@ impl GbaApp {
     }
 
     fn active_frame_counter(&self) -> u64 {
-        match self.gb {
-            Some(ref gb) => gb.frame_counter,
-            None => self.gba.frame_counter,
+        if let Some(ref nds) = self.nds {
+            nds.frame_counter
+        } else if let Some(ref gb) = self.gb {
+            gb.frame_counter
+        } else {
+            self.gba.frame_counter
         }
     }
 
@@ -1078,13 +1132,27 @@ impl eframe::App for GbaApp {
         for (k, p) in key_events {
             // Toggle-instead-of-hold (ROADMAP M10).
             let p = self.accessibility.process_key(k, p);
-            match self.gb {
-                Some(ref mut gb) => {
-                    if let Some(gk) = Self::gb_key_for(k) {
-                        gb.set_key(gk, p);
-                    }
+            if let Some(ref mut nds) = self.nds {
+                nds.set_key(k, p);
+            } else if let Some(ref mut gb) = self.gb {
+                if let Some(gk) = Self::gb_key_for(k) {
+                    gb.set_key(gk, p);
                 }
-                None => self.gba.mmu.keypad.set_key_state(k, p),
+            } else {
+                self.gba.mmu.keypad.set_key_state(k, p);
+            }
+        }
+
+        // Additional NDS buttons: X and Y
+        if let Some(ref mut nds) = self.nds {
+            if !typing {
+                let x_pressed = ctx.input(|i| i.key_down(egui::Key::X));
+                let y_pressed = ctx.input(|i| i.key_down(egui::Key::Y) || i.key_down(egui::Key::C));
+                nds.set_nds_key(NdsKey::X, x_pressed);
+                nds.set_nds_key(NdsKey::Y, y_pressed);
+            } else {
+                nds.set_nds_key(NdsKey::X, false);
+                nds.set_nds_key(NdsKey::Y, false);
             }
         }
 
@@ -1419,7 +1487,7 @@ impl eframe::App for GbaApp {
 
         // Auto-save counts real play time only (not paused, rewinding or
         // frozen on the agent).
-        let has_game = self.gb.is_some() || self.gba.mmu.cartridge.is_some();
+        let has_game = self.nds.is_some() || self.gb.is_some() || self.gba.mmu.cartridge.is_some();
         let playing = has_game && !self.is_paused && !ai_stall && !self.is_rewinding;
         if self.autosaver.tick(delta, playing) {
             match self.write_autosave() {
@@ -1436,17 +1504,14 @@ impl eframe::App for GbaApp {
 
         let ff = is_turbo || effective_speed > 1.0;
         let slow_audio = self.accessibility.active.slow_motion.audio;
-        let out = match self.gb {
-            Some(ref mut gb) => &mut gb.mmu.apu.audio_output,
-            None => &mut self.gba.mmu.apu.audio_output,
-        };
+        let out = self.active_audio_output();
         out.set_fast_forwarding(ff);
         out.set_slow_motion(slow as f32, slow_audio);
 
         // Poll Pokémon party periodically if companion is active
         // The companion reads GBA-specific party structures out of EWRAM, so
-        // it has no meaning while a Game Boy ROM is loaded.
-        if self.gb.is_none() && self.pokemon_companion.is_open && self.emulated_frames.is_multiple_of(30) {
+        // it has no meaning while a Game Boy or NDS ROM is loaded.
+        if self.gb.is_none() && self.nds.is_none() && self.pokemon_companion.is_open && self.emulated_frames.is_multiple_of(30) {
             if let Some(ref cart) = self.gba.mmu.cartridge {
                 self.pokemon_companion.poll_party_memory(&self.gba.mmu, &cart.game_code);
             }
@@ -1484,7 +1549,7 @@ impl eframe::App for GbaApp {
                 let key = |k: egui::Key| k.name().to_string();
                 let ctrl = |k: &str| format!("Ctrl+{k}");
                 let kb = self.key_bindings.for_layout(self.accessibility.active.one_handed_desktop);
-                let has_rom = self.gb.is_some() || self.gba.mmu.cartridge.is_some();
+                let has_rom = self.nds.is_some() || self.gb.is_some() || self.gba.mmu.cartridge.is_some();
 
                 // One menu holds every category; the bar itself only has
                 // the few actions used all the time.
@@ -1495,7 +1560,8 @@ impl eframe::App for GbaApp {
                         if menu_item(ui, "📂 Open ROM…", "") {
                             ui.close_menu();
                             if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Game ROM", &["gba", "gb", "gbc", "bin"])
+                                .add_filter("Game ROM", &["gba", "gb", "gbc", "nds", "srl", "bin"])
+                                .add_filter("Nintendo DS", &["nds", "srl"])
                                 .add_filter("GBA ROM", &["gba", "bin"])
                                 .add_filter("Game Boy / Color", &["gb", "gbc"])
                                 .pick_file()
@@ -1575,12 +1641,20 @@ impl eframe::App for GbaApp {
                         ui.separator();
                         if ui.add_enabled(has_rom, egui::Button::new("🔋 Write battery save now")).on_hover_text("Saves are written automatically; this forces it right away.").clicked() {
                             ui.close_menu();
-                            match self.gb {
-                                Some(ref mut gb) => {
-                                    gb.mmu.cart.sync_to_disk();
-                                    self.set_toast("Battery Save Synced to Disk");
+                            match self.console {
+                                ConsoleKind::GameBoy => {
+                                    if let Some(ref mut gb) = self.gb {
+                                        gb.mmu.cart.sync_to_disk();
+                                        self.set_toast("Battery Save Synced to Disk");
+                                    }
                                 }
-                                None => {
+                                ConsoleKind::Nds => {
+                                    if let Some(ref mut nds) = self.nds {
+                                        nds.flush_save();
+                                        self.set_toast("Battery Save Synced to Disk");
+                                    }
+                                }
+                                ConsoleKind::Gba => {
                                     if let Some(ref mut cart) = self.gba.mmu.cartridge {
                                         cart.save.sync_to_disk();
                                         self.sync_saves();
@@ -1928,10 +2002,11 @@ impl eframe::App for GbaApp {
                 ui.separator();
                 let open = ui
                     .add(egui::Button::new("📂 Open").frame(false))
-                    .on_hover_text("Open a ROM (.gba, .gb, .gbc)");
+                    .on_hover_text("Open a ROM (.gba, .gb, .gbc, .nds, .srl)");
                 if open.clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Game ROM", &["gba", "gb", "gbc", "bin"])
+                        .add_filter("Game ROM", &["gba", "gb", "gbc", "nds", "srl", "bin"])
+                        .add_filter("Nintendo DS", &["nds", "srl"])
                         .add_filter("GBA ROM", &["gba", "bin"])
                         .add_filter("Game Boy / Color", &["gb", "gbc"])
                         .pick_file()
@@ -2048,10 +2123,16 @@ impl eframe::App for GbaApp {
                     }
 
                     // Console badge: which core is actually executing.
-                    let (badge, badge_col) = match self.gb {
-                        Some(ref gb) if gb.is_cgb() => ("GBC", Color32::from_rgb(120, 200, 255)),
-                        Some(_) => ("GB", Color32::from_rgb(150, 220, 150)),
-                        None => ("GBA", Color32::from_rgb(190, 160, 255)),
+                    let (badge, badge_col) = match self.console {
+                        ConsoleKind::Nds => ("NDS", Color32::from_rgb(255, 170, 80)),
+                        ConsoleKind::GameBoy => {
+                            if self.gb.as_ref().map(|g| g.is_cgb()).unwrap_or(false) {
+                                ("GBC", Color32::from_rgb(120, 200, 255))
+                            } else {
+                                ("GB", Color32::from_rgb(150, 220, 150))
+                            }
+                        }
+                        ConsoleKind::Gba => ("GBA", Color32::from_rgb(190, 160, 255)),
                     };
                     if ui.available_width() > 40.0 {
                         ui.label(RichText::new(badge).color(badge_col).small().strong());
@@ -2093,47 +2174,62 @@ impl eframe::App for GbaApp {
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(14, 15, 18)))
             .show(ctx, |ui| {
                 let available_size = ui.available_size();
-                let custom_aspect = if self.gb.is_none() && self.gba.is_widescreen_enabled() {
+                let custom_aspect = if self.console == ConsoleKind::Nds {
+                    Some(256.0 / 384.0)
+                } else if self.gb.is_none() && self.gba.is_widescreen_enabled() {
                     Some(self.gba.widescreen_config().aspect_ratio())
                 } else {
                     None
                 };
                 let target_size = self.aspect_ratio.calculate_target_size_for_aspect(available_size, self.scale_mode, custom_aspect);
 
-                let frame = if self.gb.is_some() {
-                    &*self.gb_framebuffer
+                let tex = if let Some(ref nds) = self.nds {
+                    self.screen_renderer.update_framebuffer_nds(
+                        ctx,
+                        nds.get_framebuffer(),
+                        self.display_filter,
+                    )
                 } else {
-                    self.gba.get_framebuffer()
+                    let frame = if self.gb.is_some() {
+                        &*self.gb_framebuffer
+                    } else {
+                        self.gba.get_framebuffer()
+                    };
+                    let hd_frame = if self.gb.is_none()
+                        && (self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off
+                            || self.gba.is_hd_pack_enabled()
+                            || self.gba.is_widescreen_enabled())
+                    {
+                        self.gba.render_hd_frame()
+                    } else {
+                        None
+                    };
+                    self.screen_renderer.update_framebuffer(
+                        ctx,
+                        frame,
+                        hd_frame.as_ref(),
+                        self.hd_mode7_config.ssaa,
+                        self.display_filter,
+                        self.frame_blend_mode,
+                        self.nvidia_sharpen,
+                        self.nvidia_sharpness,
+                        self.color_correction,
+                        self.xbrz_factor,
+                        self.accessibility.active.colorblind_mode,
+                        self.accessibility.active.colorblind_intensity,
+                    )
                 };
-                let hd_frame = if self.gb.is_none()
-                    && (self.hd_mode7_config.scale != crate::gba::ppu::hd_mode7::HdScale::Off
-                        || self.gba.is_hd_pack_enabled()
-                        || self.gba.is_widescreen_enabled())
-                {
-                    self.gba.render_hd_frame()
-                } else {
-                    None
-                };
-                let tex = self.screen_renderer.update_framebuffer(
-                    ctx,
-                    frame,
-                    hd_frame.as_ref(),
-                    self.hd_mode7_config.ssaa,
-                    self.display_filter,
-                    self.frame_blend_mode,
-                    self.nvidia_sharpen,
-                    self.nvidia_sharpness,
-                    self.color_correction,
-                    self.xbrz_factor,
-                    self.accessibility.active.colorblind_mode,
-                    self.accessibility.active.colorblind_intensity,
-                );
 
                 let x_offset = (available_size.x - target_size.x).max(0.0) / 2.0;
                 let y_offset = (available_size.y - target_size.y).max(0.0) / 2.0;
 
                 // Ultrawide Ambient Lighting / Edge Glow Backdrop
-                if self.ultrawide_ambient_glow && x_offset > 16.0 {
+                if self.ultrawide_ambient_glow && x_offset > 16.0 && self.console != ConsoleKind::Nds {
+                    let frame = if self.gb.is_some() {
+                        &*self.gb_framebuffer
+                    } else {
+                        self.gba.get_framebuffer()
+                    };
                     let fb = frame;
                     let mut lr = 0u32; let mut lg = 0u32; let mut lb = 0u32;
                     let mut rr = 0u32; let mut rg = 0u32; let mut rb = 0u32;
@@ -2175,13 +2271,55 @@ impl eframe::App for GbaApp {
                 ui.allocate_new_ui(
                     egui::UiBuilder::new().max_rect(Rect::from_min_size(ui.min_rect().min + Vec2::new(x_offset, y_offset), target_size)),
                     |ui| {
-                        let (rect, _response) = ui.allocate_exact_size(target_size, Sense::hover());
+                        let sense = if self.console == ConsoleKind::Nds {
+                            Sense::click_and_drag()
+                        } else {
+                            Sense::hover()
+                        };
+                        let (rect, _response) = ui.allocate_exact_size(target_size, sense);
                         ui.painter().image(
                             tex.id(),
                             rect,
                             Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
                         );
+
+                        // Dual-screen division separator and touchscreen digitizer handling for Nintendo DS
+                        if self.console == ConsoleKind::Nds {
+                            let mid_y = rect.min.y + rect.height() / 2.0;
+                            ui.painter().line_segment(
+                                [Pos2::new(rect.min.x, mid_y), Pos2::new(rect.max.x, mid_y)],
+                                Stroke::new(2.0_f32, Color32::from_rgb(18, 20, 24)),
+                            );
+
+                            let bottom_rect = Rect::from_min_max(
+                                Pos2::new(rect.min.x, mid_y),
+                                rect.max,
+                            );
+
+                            let is_down = ctx.input(|i| i.pointer.primary_down());
+                            let pos = ctx.input(|i| i.pointer.latest_pos());
+
+                            if is_down {
+                                if let Some(p) = pos {
+                                    if bottom_rect.contains(p) {
+                                        let norm_x = ((p.x - bottom_rect.min.x) / bottom_rect.width()).clamp(0.0, 1.0);
+                                        let norm_y = ((p.y - bottom_rect.min.y) / bottom_rect.height()).clamp(0.0, 1.0);
+                                        let touch_x = ((norm_x * 255.0).round() as u16).min(255);
+                                        let touch_y = ((norm_y * 191.0).round() as u16).min(191);
+                                        if let Some(ref mut nds) = self.nds {
+                                            nds.set_touch(Some((touch_x, touch_y)));
+                                        }
+                                    } else if let Some(ref mut nds) = self.nds {
+                                        nds.set_touch(None);
+                                    }
+                                } else if let Some(ref mut nds) = self.nds {
+                                    nds.set_touch(None);
+                                }
+                            } else if let Some(ref mut nds) = self.nds {
+                                nds.set_touch(None);
+                            }
+                        }
 
                         // Retro Handheld Bezel / Frame
                         self.bezel_renderer.render_bezel(ui, rect, &keys_pressed_array);

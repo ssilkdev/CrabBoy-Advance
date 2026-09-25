@@ -301,6 +301,29 @@ A dual-screen expansion bringing full Nintendo DS (NDS) emulation alongside
 GBA and Game Boy. Designed from the ground up for Android touchscreens.
 Architectural details in `ds_support_plan.md` and `feature/nds-support`.
 
+**Validation:** `tests/nds_test_roms.rs` drives the RockPolish/rockwrestler
+test ROM (ARMv4/v5 instructions, IPC, DIV/SQRT, WRAMCNT/VRAMCNT/TCM) and
+passes 23/23. The ROM is not vendored; put `rockwrestler.nds` in
+`~/Downloads/nds-test-roms/` or set `NDS_TEST_ROM_DIR`. No commercial ROM has
+been tested yet.
+
+Status of M22 (done unless noted):
+- ARMv5 DSP instructions (QADD/QDADD, SMULxy/SMLAxy/SMULWy/SMLAWy/SMLALxy),
+  LDM/STM edge cases (empty list, base in list, S bit), ARMv5 interworking
+  for LDR/LDM/POP into PC, and Thumb BLX label.
+- CP15 TCM regions synced to the bus: ITCM/DTCM virtual size plus mirroring,
+  movable DTCM, and TCM load mode.
+- HLE BIOS stubs: IRQ vectors dispatch to the handler pointer at
+  `0x03FF_FFFC` (ARM7) or DTCM+0x3FFC (ARM9).
+- IPCSYNC IRQs and the full IPCFIFO: send/receive IRQs, error flag, last-word
+  replay, and `0x0410_0000` receive port.
+- DIV/SQRT unit (`src/nds/math.rs`), including the hardware quirks for
+  divide-by-zero and overflow.
+- WRAMCNT shared-WRAM banking, VRAMCNT MST/OFS mapping for banks A–I (CPU and
+  PPU views), ARM7 VRAM and VRAMSTAT.
+- *Open:* caches, cycle timing, wait states, real card command protocol, and
+  BIOS SWIs beyond the HLE set.
+
 ### M22. DS dual-core architecture & memory matrix
 - ARM946E-S (67 MHz) with instruction/data TCM and caches.
 - ARM7TDMI (33 MHz) running subsystem tasks.

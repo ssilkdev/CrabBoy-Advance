@@ -3,12 +3,15 @@
 //! Orchestrates the dual ARM9/ARM7 CPUs, memory bus, IPC, 2D/3D graphics,
 //! audio, SPI (touch/firmware/PMIC), and Slot-1 game card controllers.
 
+pub mod bios;
 pub mod bus;
 pub mod card;
 pub mod cpu;
 pub mod ipc;
+pub mod math;
 pub mod ppu;
 pub mod spi;
+pub mod spu;
 
 use bus::NdsBus;
 use card::NdsCard;
@@ -143,8 +146,70 @@ impl Nds {
         // Set post-boot flags to bypass splash firmware
         self.bus.postflg_arm9 = 1;
         self.bus.postflg_arm7 = 1;
+        self.direct_boot_setup();
 
         Ok(())
+    }
+
+    /// Recreate the state the DS BIOS and firmware leave for a game (GBATEK
+    /// "DS Firmware - Boot"): cartridge header and chip IDs at the top of main
+    /// RAM, firmware user settings, shared WRAM given to the ARM7, the card
+    /// ready to serve KEY2 reads, and each CPU's stacks.
+    fn direct_boot_setup(&mut self) {
+        let b = &mut self.bus;
+        let put32 = |ram: &mut [u8], addr: u32, v: u32| {
+            let o = (addr & 0x3F_FFFF) as usize;
+            ram[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        let put16 = |ram: &mut [u8], addr: u32, v: u16| {
+            let o = (addr & 0x3F_FFFF) as usize;
+            ram[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        };
+
+        // Cartridge header copy (0x027FFE00, 0x170 bytes).
+        let hdr_len = 0x170.min(b.card.rom.len());
+        let hdr = b.card.rom[..hdr_len].to_vec();
+        let o = 0x3F_FE00;
+        b.main_ram[o..o + hdr_len].copy_from_slice(&hdr);
+
+        // Card chip IDs and boot indicators.
+        let chip = b.card.chip_id();
+        for a in [0x027F_F800, 0x027F_F804, 0x027F_FC00, 0x027F_FC04] {
+            put32(&mut b.main_ram[..], a, chip);
+        }
+        let header_crc = u16::from_le_bytes([hdr.get(0x15E).copied().unwrap_or(0), hdr.get(0x15F).copied().unwrap_or(0)]);
+        put16(&mut b.main_ram[..], 0x027F_F808, header_crc);
+        put16(&mut b.main_ram[..], 0x027F_FC08, header_crc);
+        let sec_crc = u16::from_le_bytes([hdr.get(0x6C).copied().unwrap_or(0), hdr.get(0x6D).copied().unwrap_or(0)]);
+        put16(&mut b.main_ram[..], 0x027F_F80A, sec_crc);
+        put16(&mut b.main_ram[..], 0x027F_FC0A, sec_crc);
+        put16(&mut b.main_ram[..], 0x027F_F850, 0x5835); // secure area disable pattern seen after boot
+        put16(&mut b.main_ram[..], 0x027F_FC10, 0x5835);
+        put16(&mut b.main_ram[..], 0x027F_FC30, 0xFFFF);
+        put16(&mut b.main_ram[..], 0x027F_FC40, 1); // boot indicator: normal card boot
+
+        // Firmware user settings (0x027FFC80, 0x70 bytes) from the firmware image.
+        let settings: Vec<u8> = b.spi.nvram.user_settings()[..0x70].to_vec();
+        b.main_ram[0x3F_FC80..0x3F_FC80 + 0x70].copy_from_slice(&settings);
+
+        // Memory control as left by the BIOS.
+        b.vramcnt[7] = 3; // WRAMCNT: all 32 KiB shared WRAM to the ARM7
+        b.exmemcnt = 0x6000;
+        b.card.romctrl = 0x0000_6000 | (1 << 29); // KEY2 mode ready
+
+        // Stacks (the BIOS sets these; many games only set SP_usr/sys).
+        // ARM9 IRQ/SVC stacks keep the constructor defaults; SP_sys in DTCM.
+        self.arm9.regs[13] = 0x027C_3E00; // top of DTCM, below the IRQ area
+        let a7 = &mut self.arm7;
+        a7.r13_irq = 0x0380_FF80;
+        a7.r13_svc = 0x0380_FFC0;
+        a7.regs[13] = 0x0380_FD80;
+        a7.r13_usr = 0x0380_FD80;
+        let (e9, e7) = (self.bus.card.header.arm9_entry_addr, self.bus.card.header.arm7_entry_addr);
+        self.arm9.regs[12] = e9;
+        self.arm9.regs[14] = e9;
+        self.arm7.regs[12] = e7;
+        self.arm7.regs[14] = e7;
     }
 
     /// Set standard GBA-compatible keypad button
@@ -228,8 +293,13 @@ impl Nds {
                 self.bus.if_arm7 |= 1 << 2;
             }
 
+            if line == 0 {
+                self.bus.trigger_dma(crate::nds::bus::DmaEvent::DisplayStart);
+            }
+
             // VBlank Start IRQ (Line 192)
             if line == 192 {
+                self.bus.trigger_dma(crate::nds::bus::DmaEvent::VBlank);
                 self.bus.ppu.engine_3d.on_vblank(&self.bus.vram_a[..], &self.bus.ppu.engine_a.palette);
                 if (self.bus.ppu.dispstat_a & (1 << 3)) != 0 {
                     self.bus.if_arm9 |= 1 << 0;
@@ -265,11 +335,17 @@ impl Nds {
                 self.bus.step_timers(chunk_sys, true);  // ARM9 timers
                 self.bus.step_timers(chunk_sys, false); // ARM7 timers
 
+                // Step SPU (Sound Processing Unit)
+                self.bus.step_spu(chunk_sys);
+
                 sys_cycles_done += chunk_sys;
 
                 // Check HBlank entry
                 if !entered_hblank && sys_cycles_done >= HBLANK_SYS_CYCLE {
                     entered_hblank = true;
+                    if line < SCREEN_HEIGHT {
+                        self.bus.trigger_dma(crate::nds::bus::DmaEvent::HBlank);
+                    }
                     self.bus.ppu.dispstat_a |= 1 << 1;
                     self.bus.ppu.dispstat_b |= 1 << 1;
                     if (self.bus.ppu.dispstat_a & (1 << 4)) != 0 {
@@ -302,14 +378,17 @@ impl Nds {
 
             // Render visible scanlines (lines 0..191)
             if line < SCREEN_HEIGHT {
-                let vram_a = &self.bus.vram_a[..];
-                let vram_b = &self.bus.vram_b[..];
-                let vram_c = &self.bus.vram_c[..];
-                let vram_d = &self.bus.vram_d[..];
-                self.bus.ppu.render_scanline(line, vram_a, vram_b, vram_c, vram_d);
+                if line == 0 {
+                    // Games update VRAM during VBlank; one flatten per frame.
+                    self.bus.build_vram_views();
+                }
+                let bus = &mut self.bus;
+                let lcdc = [&bus.vram_a[..], &bus.vram_b[..], &bus.vram_c[..], &bus.vram_d[..]];
+                bus.ppu.render_scanline(line, lcdc, &bus.vram_views);
             }
         }
 
+        self.bus.spu.flush_samples();
         self.frame_counter += 1;
     }
 
@@ -330,7 +409,7 @@ impl Nds {
     }
 
     pub fn flush_save(&mut self) {
-        // Save battery / flash sync to disk
+        self.bus.card.backup.flush();
     }
 
     pub fn save_state(&self) -> Vec<u8> {
@@ -466,11 +545,11 @@ mod tests {
     #[test]
     fn test_spi_nvram_firmware() {
         let mut nvram = spi::FirmwareNvram::new();
-        // Read user name at 0x3FE04
+        // Nickname at user settings + 06h (GBATEK), copy at 0x3FE00
         nvram.transfer(0x03); // READ
         nvram.transfer(0x03); // Addr MSB
         nvram.transfer(0xFE); // Addr Mid
-        nvram.transfer(0x04); // Addr LSB
+        nvram.transfer(0x06); // Addr LSB
 
         let mut name_bytes = [0u8; 14];
         for b in name_bytes.iter_mut() {
@@ -482,6 +561,23 @@ mod tests {
             .collect();
         let name = String::from_utf16(&chars).unwrap();
         assert_eq!(name, "CrabBoy");
+    }
+
+    #[test]
+    fn firmware_user_settings_have_valid_crcs() {
+        let nvram = spi::FirmwareNvram::new();
+        let m = &nvram.memory;
+        let us_off = u16::from_le_bytes([m[0x20], m[0x21]]) as usize * 8;
+        assert_eq!(us_off, m.len() - 0x200);
+        for copy in [us_off, us_off + 0x100] {
+            let us = &m[copy..copy + 0x100];
+            let crc = u16::from_le_bytes([us[0x72], us[0x73]]);
+            assert_eq!(crc, spi::crc16(0xFFFF, &us[..0x70]));
+        }
+        let len = u16::from_le_bytes([m[0x2C], m[0x2D]]) as usize;
+        assert_eq!(u16::from_le_bytes([m[0x2A], m[0x2B]]), spi::crc16(0, &m[0x2C..0x2C + len]));
+        // Newer copy (counter 1) is the one reported.
+        assert_eq!(nvram.user_settings()[0x70], 1);
     }
 
     #[test]
@@ -514,18 +610,23 @@ mod tests {
         ppu.engine_b.palette[0] = 0x00;
         ppu.engine_b.palette[1] = 0x7C;
 
+        // Display mode 1 (graphics) on both engines.
+        ppu.engine_a.dispcnt = 1 << 16;
+        ppu.engine_b.dispcnt = 1 << 16;
+        ppu.powcnt1 = 1 << 15;
+
         let dummy_vram = [0u8; 16];
-        // Render scanline 0 (normal: Engine A top, Engine B bottom)
-        ppu.render_scanline(0, &dummy_vram, &dummy_vram, &dummy_vram, &dummy_vram);
+        // Render scanline 0 (POWCNT1 bit 15 set: Engine A top, Engine B bottom)
+        ppu.render_scanline(0, [&dummy_vram; 4], &crate::nds::bus::VramViews::default());
 
         // Top screen pixel (0, 0) should be Red (0xFF0000FF)
         assert_eq!(ppu.framebuffer[0] & 0x00FFFFFF, 0x000000FF);
         // Bottom screen pixel (0, 192) should be Blue (0xFFFF0000)
         assert_eq!(ppu.framebuffer[192 * SCREEN_WIDTH] & 0x00FFFFFF, 0x00FF0000);
 
-        // Swap screens via POWCNT1 bit 15
-        ppu.powcnt1 |= 1 << 15;
-        ppu.render_scanline(0, &dummy_vram, &dummy_vram, &dummy_vram, &dummy_vram);
+        // Clear POWCNT1 bit 15: Engine A goes to the lower screen
+        ppu.powcnt1 &= !(1 << 15);
+        ppu.render_scanline(0, [&dummy_vram; 4], &crate::nds::bus::VramViews::default());
 
         // Now Top screen pixel (0, 0) should be Blue
         assert_eq!(ppu.framebuffer[0] & 0x00FFFFFF, 0x00FF0000);

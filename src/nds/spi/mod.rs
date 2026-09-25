@@ -33,13 +33,14 @@ impl SpiBus {
     }
 
     pub fn write_cnt(&mut self, val: u16) {
-        // Bit 15: Enable, Bits 8-9: Device Select, Bit 10: Hold CS, Bits 0-1: Baud
-        let prev_hold = (self.spicnt & (1 << 10)) != 0;
-        let new_hold = (val & (1 << 10)) != 0;
+        // GBATEK SPICNT: 0-1 baud, 7 busy, 8-9 device, 10 16-bit mode (unused), 11 CS hold, 14 IRQ, 15 enable
+        // Clearing the hold bit alone doesn't release chip-select: that
+        // happens after the next byte (the one transferred with hold=0).
+        // Only disabling the bus drops CS immediately.
+        let was_enabled = (self.spicnt & (1 << 15)) != 0;
         self.spicnt = val;
 
-        if prev_hold && !new_hold {
-            // Chip select was released; deselect active device
+        if was_enabled && (val & (1 << 15)) == 0 {
             self.touch.deselect();
             self.nvram.deselect();
             self.pmic.deselect();
@@ -59,7 +60,7 @@ impl SpiBus {
             _ => 0,
         };
 
-        if (self.spicnt & (1 << 10)) == 0 {
+        if (self.spicnt & (1 << 11)) == 0 {
             // Hold bit not set: chip select immediately de-asserted
             match device {
                 0 => self.pmic.deselect(),
@@ -149,6 +150,15 @@ impl Tsc2046 {
         }
     }
 
+    /// Screen pixel -> 12-bit ADC value (linear, matching the firmware calibration).
+    pub fn adc_x(x: u16) -> u16 {
+        ((x.min(255) as u32 * (3800 - 300)) / 255 + 300) as u16
+    }
+
+    pub fn adc_y(y: u16) -> u16 {
+        ((y.min(191) as u32 * (3700 - 350)) / 191 + 350) as u16
+    }
+
     pub fn set_touch(&mut self, coords: Option<(u16, u16)>) {
         self.touch_coords = coords;
     }
@@ -174,13 +184,11 @@ impl Tsc2046 {
 
         let adc_val = match self.touch_coords {
             Some((x, y)) => {
-                let x_clamped = x.min(255) as u32;
-                let y_clamped = y.min(191) as u32;
                 match channel {
                     // Y-Position
-                    0b001 => (((y_clamped * (3700 - 350)) / 191) + 350) as u16,
+                    0b001 => Self::adc_y(y),
                     // X-Position
-                    0b101 => (((x_clamped * (3800 - 300)) / 255) + 300) as u16,
+                    0b101 => Self::adc_x(x),
                     // Z1 Pressure
                     0b011 => 0x0700,
                     // Z2 Pressure
@@ -208,7 +216,10 @@ impl Tsc2046 {
     }
 }
 
-/// Firmware NVRAM Flash Memory (Device 1)
+/// Firmware FLASH (Device 1): ST M45PE20-style serial flash
+/// (GBATEK "DS Firmware Serial Flash Memory"). Replies are shifted out on
+/// the bytes that follow a command, so e.g. RDSR returns the status on the
+/// second byte and keeps repeating it while chip-select is held.
 pub struct FirmwareNvram {
     pub memory: Vec<u8>,
     cmd: u8,
@@ -221,8 +232,8 @@ pub struct FirmwareNvram {
 enum NvramState {
     Idle,
     Addr(u8),
-    Reading,
-    Writing,
+    Dummy,
+    Data,
 }
 
 impl FirmwareNvram {
@@ -241,117 +252,159 @@ impl FirmwareNvram {
         }
     }
 
-    /// Sets up authentic NDS firmware user settings block at 0x3FE00
+    /// Build a minimal firmware image in the layout GBATEK documents
+    /// ("DS Firmware Header", "DS Firmware Wifi Calibration Data",
+    /// "DS Firmware User Settings"): header with the user-settings offset,
+    /// Wi-Fi config with a valid CRC, and two CRC-checked user-settings
+    /// copies at 3FE00h/3FF00h (the one with the higher update counter wins).
     fn init_default_settings(mem: &mut [u8]) {
-        let offset = 0x3FE00;
-        if offset + 0x200 > mem.len() {
+        let size = mem.len();
+        if size < 0x2_0000 {
             return;
         }
+        let put16 = |m: &mut [u8], o: usize, v: u16| m[o..o + 2].copy_from_slice(&v.to_le_bytes());
 
-        // Header / version
-        mem[offset] = 0x05;
-        mem[offset + 1] = 0x00;
+        // --- Header (000h..029h)
+        mem[0x08..0x0C].copy_from_slice(b"MACP"); // firmware identifier
+        mem[0x1D] = 0xFF; // console type: original NDS
+        put16(mem, 0x20, ((size - 0x200) / 8) as u16); // user settings offset / 8
+        put16(mem, 0x22, 0x7EC0);
+        put16(mem, 0x24, 0x7E40);
 
-        // User Name: "CrabBoy" in UTF-16LE
-        let name = "CrabBoy";
-        let mut name_offset = offset + 0x04;
-        for c in name.encode_utf16() {
-            let bytes = c.to_le_bytes();
-            mem[name_offset] = bytes[0];
-            mem[name_offset + 1] = bytes[1];
-            name_offset += 2;
+        // --- Wi-Fi calibration/config (02Ah..1FFh)
+        let cfg_len = 0x138usize;
+        mem[0x2C..0x2C + cfg_len].fill(0);
+        put16(mem, 0x2C, cfg_len as u16);
+        mem[0x2F] = 0x00; // firmware version (original DS)
+        mem[0x36..0x3C].copy_from_slice(&[0x00, 0x09, 0xBF, 0x12, 0x34, 0x56]); // MAC
+        put16(mem, 0x3C, 0x3FFE); // channels 1..13 enabled
+        let crc = crc16(0, &mem[0x2C..0x2C + cfg_len]);
+        put16(mem, 0x2A, crc);
+
+        // --- User settings, two copies
+        let mut us = [0u8; 0x100];
+        us[0x74..].fill(0xFF);
+        put16(&mut us, 0x00, 5); // version
+        us[0x02] = 11; // favourite colour (blue-ish)
+        us[0x03] = 1; // birthday month
+        us[0x04] = 1; // birthday day
+        let name: Vec<u16> = "CrabBoy".encode_utf16().collect();
+        for (i, c) in name.iter().enumerate() {
+            put16(&mut us, 0x06 + i * 2, *c);
         }
+        put16(&mut us, 0x1A, name.len() as u16);
+        // Touch calibration from the two points Tsc2046 maps linearly.
+        let (x1, y1, x2, y2) = (32u16, 32u16, 224u16, 160u16);
+        put16(&mut us, 0x58, Tsc2046::adc_x(x1));
+        put16(&mut us, 0x5A, Tsc2046::adc_y(y1));
+        us[0x5C] = x1 as u8;
+        us[0x5D] = y1 as u8;
+        put16(&mut us, 0x5E, Tsc2046::adc_x(x2));
+        put16(&mut us, 0x60, Tsc2046::adc_y(y2));
+        us[0x62] = x2 as u8;
+        us[0x63] = y2 as u8;
+        // Language English, max backlight, "settings set" flags.
+        put16(&mut us, 0x64, 0xFC00 | 0x0030 | 1);
+        for (copy, counter) in [(size - 0x200, 0u16), (size - 0x100, 1u16)] {
+            put16(&mut us, 0x70, counter);
+            let crc = crc16(0xFFFF, &us[..0x70]);
+            put16(&mut us, 0x72, crc);
+            mem[copy..copy + 0x100].copy_from_slice(&us);
+        }
+    }
 
-        // Color (0 = Gray, 1 = Brown, ..., 5 = Blue)
-        mem[offset + 0x1A] = 5;
-
-        // Language: English (1)
-        mem[offset + 0x1C] = 1;
-
-        // Touch calibration ADC points:
-        // Point 1: (300, 350) -> screen (0, 0)
-        // Point 2: (3800, 3700) -> screen (255, 191)
-        let calib_offset = offset + 0x20;
-        mem[calib_offset..calib_offset + 2].copy_from_slice(&300u16.to_le_bytes());
-        mem[calib_offset + 2..calib_offset + 4].copy_from_slice(&350u16.to_le_bytes());
-        mem[calib_offset + 4] = 0;
-        mem[calib_offset + 5] = 0;
-
-        mem[calib_offset + 6..calib_offset + 8].copy_from_slice(&3800u16.to_le_bytes());
-        mem[calib_offset + 8..calib_offset + 10].copy_from_slice(&3700u16.to_le_bytes());
-        mem[calib_offset + 10] = 255;
-        mem[calib_offset + 11] = 191;
+    /// Latest valid user-settings copy (for the RAM copy at 027FFC80h).
+    pub fn user_settings(&self) -> &[u8] {
+        let size = self.memory.len();
+        let a = &self.memory[size - 0x200..size - 0x100];
+        let b = &self.memory[size - 0x100..];
+        let counter = |m: &[u8]| u16::from_le_bytes([m[0x70], m[0x71]]) & 0x7F;
+        if (counter(b).wrapping_sub(counter(a)) & 0x7F) == 1 { b } else { a }
     }
 
     pub fn deselect(&mut self) {
+        // Write/erase commands complete (and clear WEL) when CS goes high.
+        if self.state != NvramState::Idle && matches!(self.cmd, 0x02 | 0x0A | 0xDB | 0xD8) {
+            self.write_enabled = false;
+        }
         self.state = NvramState::Idle;
     }
 
     pub fn transfer(&mut self, byte: u8) -> u8 {
+        let size = self.memory.len() as u32;
         match self.state {
             NvramState::Idle => {
                 self.cmd = byte;
+                self.addr = 0;
                 match byte {
-                    0x06 => {
-                        // WREN
-                        self.write_enabled = true;
-                        0
-                    }
-                    0x04 => {
-                        // WRDI
-                        self.write_enabled = false;
-                        0
-                    }
-                    0x05 => {
-                        // RDSR: Bit 1 is WEL (Write Enable Latch)
-                        if self.write_enabled { 0x02 } else { 0x00 }
-                    }
-                    0x03 => {
-                        // READ
-                        self.addr = 0;
-                        self.state = NvramState::Addr(3);
-                        0
-                    }
-                    0x02 => {
-                        // WRITE
-                        self.addr = 0;
-                        self.state = NvramState::Addr(3);
-                        0
-                    }
-                    _ => 0,
+                    0x06 => self.write_enabled = true,
+                    0x04 => self.write_enabled = false,
+                    0x03 | 0x0B | 0x02 | 0x0A | 0xDB | 0xD8 => self.state = NvramState::Addr(3),
+                    0x05 | 0x9F => self.state = NvramState::Data,
+                    _ => {}
                 }
+                0xFF
             }
-            NvramState::Addr(bytes_left) => {
-                self.addr = (self.addr << 8) | (byte as u32);
-                if bytes_left == 1 {
-                    if self.cmd == 0x03 {
-                        self.state = NvramState::Reading;
-                    } else if self.cmd == 0x02 {
-                        self.state = NvramState::Writing;
-                    } else {
-                        self.state = NvramState::Idle;
-                    }
-                } else {
-                    self.state = NvramState::Addr(bytes_left - 1);
+            NvramState::Addr(left) => {
+                self.addr = (self.addr << 8) | byte as u32;
+                if left > 1 {
+                    self.state = NvramState::Addr(left - 1);
+                    return 0xFF;
                 }
-                0
+                self.addr %= size;
+                self.state = if self.cmd == 0x0B { NvramState::Dummy } else { NvramState::Data };
+                if self.write_enabled {
+                    let a = self.addr as usize;
+                    match self.cmd {
+                        0xDB => self.memory[a & !0xFF..(a & !0xFF) + 0x100].fill(0xFF),
+                        0xD8 => {
+                            let s = a & !0xFFFF;
+                            let e = (s + 0x1_0000).min(self.memory.len());
+                            self.memory[s..e].fill(0xFF);
+                        }
+                        _ => {}
+                    }
+                }
+                0xFF
             }
-            NvramState::Reading => {
-                let val = if (self.addr as usize) < self.memory.len() {
-                    self.memory[self.addr as usize]
-                } else {
+            NvramState::Dummy => {
+                self.state = NvramState::Data;
+                0xFF
+            }
+            NvramState::Data => match self.cmd {
+                0x05 => (self.write_enabled as u8) << 1, // WIP=0, WEL
+                0x9F => {
+                    let id = [0x20u8, 0x40, 0x12]; // ST M45PE20
+                    let v = id.get(self.addr as usize).copied().unwrap_or(0xFF);
+                    self.addr += 1;
+                    v
+                }
+                0x03 | 0x0B => {
+                    let v = self.memory[self.addr as usize];
+                    self.addr = (self.addr + 1) % size;
+                    v
+                }
+                0x02 | 0x0A if self.write_enabled => {
+                    let a = self.addr as usize;
+                    // 0Ah page write replaces, 02h page program only clears bits.
+                    self.memory[a] = if self.cmd == 0x02 { self.memory[a] & byte } else { byte };
+                    self.addr = (self.addr & !0xFF) | ((self.addr + 1) & 0xFF);
                     0xFF
-                };
-                self.addr = (self.addr + 1) & (Self::SIZE as u32 - 1);
-                val
-            }
-            NvramState::Writing => {
-                if self.write_enabled && (self.addr as usize) < self.memory.len() {
-                    self.memory[self.addr as usize] = byte;
                 }
-                self.addr = (self.addr + 1) & (Self::SIZE as u32 - 1);
-                0
-            }
+                _ => 0xFF,
+            },
         }
     }
+}
+
+/// CRC-16 as used by the DS firmware (reflected polynomial A001h).
+pub fn crc16(init: u16, data: &[u8]) -> u16 {
+    let mut crc = init;
+    for &b in data {
+        crc ^= b as u16;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xA001 } else { crc >> 1 };
+        }
+    }
+    crc
 }

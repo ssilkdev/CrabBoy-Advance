@@ -86,3 +86,15 @@ pub fn save_color_image(path: &Path, image: &ColorImage) -> std::io::Result<()> 
     }
     save_bmp(path, width, height, &rgba)
 }
+
+/// Captures a raw 256x384 NDS dual-screen framebuffer.
+pub fn save_nds_framebuffer(path: &Path, raw_fb: &[u32]) -> std::io::Result<()> {
+    let mut rgba = Vec::with_capacity(256 * 384 * 4);
+    for &p in raw_fb {
+        rgba.push((p & 0xFF) as u8);
+        rgba.push(((p >> 8) & 0xFF) as u8);
+        rgba.push(((p >> 16) & 0xFF) as u8);
+        rgba.push(0xFF);
+    }
+    save_bmp(path, 256, 384, &rgba)
+}

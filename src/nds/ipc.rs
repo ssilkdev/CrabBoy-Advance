@@ -59,23 +59,32 @@ impl IpcSync {
     }
 }
 
+/// IRQ bit raised when a CPU's send FIFO becomes empty.
+pub const IRQ_IPC_SEND_EMPTY: u32 = 1 << 17;
+/// IRQ bit raised when a CPU's receive FIFO becomes not-empty.
+pub const IRQ_IPC_RECV_NOT_EMPTY: u32 = 1 << 18;
+
+/// One direction-pair of IPCFIFOCNT state, as seen by one CPU.
+#[derive(Debug, Clone, Default)]
+pub struct FifoSide {
+    pub send_empty_irq: bool,
+    pub recv_not_empty_irq: bool,
+    pub error: bool,
+    pub enable: bool,
+    /// Last word successfully read (returned again on underflow).
+    pub last_read: u32,
+}
+
+/// The two 16-word IPC FIFOs (GBATEK "DS Inter Process Communication").
+/// `pending_arm9`/`pending_arm7` collect IF bits for the bus to raise.
 #[derive(Debug, Clone)]
 pub struct IpcFifo {
     pub queue_9_to_7: VecDeque<u32>,
     pub queue_7_to_9: VecDeque<u32>,
-
-    pub arm9_send_empty_irq: bool,
-    pub arm9_recv_not_empty_irq: bool,
-    pub arm9_error: bool,
-    pub arm9_enable: bool,
-
-    pub arm7_send_empty_irq: bool,
-    pub arm7_recv_not_empty_irq: bool,
-    pub arm7_error: bool,
-    pub arm7_enable: bool,
-
-    pub irq_to_arm9: bool,
-    pub irq_to_arm7: bool,
+    pub arm9: FifoSide,
+    pub arm7: FifoSide,
+    pub pending_arm9: u32,
+    pub pending_arm7: u32,
 }
 
 impl Default for IpcFifo {
@@ -83,158 +92,142 @@ impl Default for IpcFifo {
         Self {
             queue_9_to_7: VecDeque::with_capacity(FIFO_CAPACITY),
             queue_7_to_9: VecDeque::with_capacity(FIFO_CAPACITY),
-            arm9_send_empty_irq: false,
-            arm9_recv_not_empty_irq: false,
-            arm9_error: false,
-            arm9_enable: false,
-            arm7_send_empty_irq: false,
-            arm7_recv_not_empty_irq: false,
-            arm7_error: false,
-            arm7_enable: false,
-            irq_to_arm9: false,
-            irq_to_arm7: false,
+            arm9: FifoSide::default(),
+            arm7: FifoSide::default(),
+            pending_arm9: 0,
+            pending_arm7: 0,
         }
     }
 }
 
+fn cnt_value(side: &FifoSide, send: &VecDeque<u32>, recv: &VecDeque<u32>) -> u16 {
+    let mut val = 0u16;
+    if send.is_empty() { val |= 1 << 0; }
+    if send.len() >= FIFO_CAPACITY { val |= 1 << 1; }
+    if side.send_empty_irq { val |= 1 << 2; }
+    if recv.is_empty() { val |= 1 << 8; }
+    if recv.len() >= FIFO_CAPACITY { val |= 1 << 9; }
+    if side.recv_not_empty_irq { val |= 1 << 10; }
+    if side.error { val |= 1 << 14; }
+    if side.enable { val |= 1 << 15; }
+    val
+}
+
+/// Apply an IPCFIFOCNT write; returns IF bits for the writing CPU.
+fn cnt_write(side: &mut FifoSide, send: &mut VecDeque<u32>, recv: &VecDeque<u32>, val: u16) -> u32 {
+    let mut irq = 0;
+    let send_irq = (val & (1 << 2)) != 0;
+    let recv_irq = (val & (1 << 10)) != 0;
+    if (val & (1 << 3)) != 0 {
+        send.clear();
+    }
+    // Enabling an IRQ while its condition already holds fires it.
+    if send_irq && !side.send_empty_irq && send.is_empty() {
+        irq |= IRQ_IPC_SEND_EMPTY;
+    }
+    if recv_irq && !side.recv_not_empty_irq && !recv.is_empty() {
+        irq |= IRQ_IPC_RECV_NOT_EMPTY;
+    }
+    side.send_empty_irq = send_irq;
+    side.recv_not_empty_irq = recv_irq;
+    if (val & (1 << 14)) != 0 {
+        side.error = false; // acknowledge by writing 1
+    }
+    side.enable = (val & (1 << 15)) != 0;
+    irq
+}
+
 impl IpcFifo {
     pub fn read_cnt_arm9(&self) -> u16 {
-        let mut val = 0u16;
-        if self.queue_9_to_7.is_empty() {
-            val |= 1 << 0;
-        }
-        if self.queue_9_to_7.len() >= FIFO_CAPACITY {
-            val |= 1 << 1;
-        }
-        if self.arm9_send_empty_irq {
-            val |= 1 << 2;
-        }
-        if self.queue_7_to_9.is_empty() {
-            val |= 1 << 8;
-        }
-        if self.queue_7_to_9.len() >= FIFO_CAPACITY {
-            val |= 1 << 9;
-        }
-        if self.arm9_recv_not_empty_irq {
-            val |= 1 << 10;
-        }
-        if self.arm9_error {
-            val |= 1 << 14;
-        }
-        if self.arm9_enable {
-            val |= 1 << 15;
-        }
-        val
+        cnt_value(&self.arm9, &self.queue_9_to_7, &self.queue_7_to_9)
+    }
+
+    pub fn read_cnt_arm7(&self) -> u16 {
+        cnt_value(&self.arm7, &self.queue_7_to_9, &self.queue_9_to_7)
     }
 
     pub fn write_cnt_arm9(&mut self, val: u16) {
-        self.arm9_send_empty_irq = (val & (1 << 2)) != 0;
-        if (val & (1 << 3)) != 0 {
-            self.queue_9_to_7.clear();
+        let was_empty = self.queue_9_to_7.is_empty();
+        self.pending_arm9 |= cnt_write(&mut self.arm9, &mut self.queue_9_to_7, &self.queue_7_to_9, val);
+        if !was_empty && self.queue_9_to_7.is_empty() && self.arm9.send_empty_irq {
+            self.pending_arm9 |= IRQ_IPC_SEND_EMPTY;
         }
-        self.arm9_recv_not_empty_irq = (val & (1 << 10)) != 0;
-        if (val & (1 << 14)) != 0 {
-            self.arm9_error = false;
+    }
+
+    pub fn write_cnt_arm7(&mut self, val: u16) {
+        let was_empty = self.queue_7_to_9.is_empty();
+        self.pending_arm7 |= cnt_write(&mut self.arm7, &mut self.queue_7_to_9, &self.queue_9_to_7, val);
+        if !was_empty && self.queue_7_to_9.is_empty() && self.arm7.send_empty_irq {
+            self.pending_arm7 |= IRQ_IPC_SEND_EMPTY;
         }
-        self.arm9_enable = (val & (1 << 15)) != 0;
     }
 
     pub fn write_data_arm9(&mut self, data: u32) {
-        if !self.arm9_enable {
+        if !self.arm9.enable {
             return;
         }
         if self.queue_9_to_7.len() < FIFO_CAPACITY {
+            let was_empty = self.queue_9_to_7.is_empty();
             self.queue_9_to_7.push_back(data);
-            if self.arm7_recv_not_empty_irq {
-                self.irq_to_arm7 = true;
+            if was_empty && self.arm7.recv_not_empty_irq {
+                self.pending_arm7 |= IRQ_IPC_RECV_NOT_EMPTY;
             }
         } else {
-            self.arm9_error = true;
+            self.arm9.error = true;
+        }
+    }
+
+    pub fn write_data_arm7(&mut self, data: u32) {
+        if !self.arm7.enable {
+            return;
+        }
+        if self.queue_7_to_9.len() < FIFO_CAPACITY {
+            let was_empty = self.queue_7_to_9.is_empty();
+            self.queue_7_to_9.push_back(data);
+            if was_empty && self.arm9.recv_not_empty_irq {
+                self.pending_arm9 |= IRQ_IPC_RECV_NOT_EMPTY;
+            }
+        } else {
+            self.arm7.error = true;
         }
     }
 
     pub fn read_data_arm9(&mut self) -> u32 {
-        if !self.arm9_enable {
-            return 0;
+        if !self.arm9.enable {
+            // Disabled: peek the oldest word without removing it.
+            return self.queue_7_to_9.front().copied().unwrap_or(self.arm9.last_read);
         }
-        if let Some(val) = self.queue_7_to_9.pop_front() {
-            if self.queue_7_to_9.is_empty() && self.arm7_send_empty_irq {
-                self.irq_to_arm7 = true;
+        match self.queue_7_to_9.pop_front() {
+            Some(val) => {
+                self.arm9.last_read = val;
+                if self.queue_7_to_9.is_empty() && self.arm7.send_empty_irq {
+                    self.pending_arm7 |= IRQ_IPC_SEND_EMPTY;
+                }
+                val
             }
-            val
-        } else {
-            self.arm9_error = true;
-            0
-        }
-    }
-
-    pub fn read_cnt_arm7(&self) -> u16 {
-        let mut val = 0u16;
-        if self.queue_7_to_9.is_empty() {
-            val |= 1 << 0;
-        }
-        if self.queue_7_to_9.len() >= FIFO_CAPACITY {
-            val |= 1 << 1;
-        }
-        if self.arm7_send_empty_irq {
-            val |= 1 << 2;
-        }
-        if self.queue_9_to_7.is_empty() {
-            val |= 1 << 8;
-        }
-        if self.queue_9_to_7.len() >= FIFO_CAPACITY {
-            val |= 1 << 9;
-        }
-        if self.arm7_recv_not_empty_irq {
-            val |= 1 << 10;
-        }
-        if self.arm7_error {
-            val |= 1 << 14;
-        }
-        if self.arm7_enable {
-            val |= 1 << 15;
-        }
-        val
-    }
-
-    pub fn write_cnt_arm7(&mut self, val: u16) {
-        self.arm7_send_empty_irq = (val & (1 << 2)) != 0;
-        if (val & (1 << 3)) != 0 {
-            self.queue_7_to_9.clear();
-        }
-        self.arm7_recv_not_empty_irq = (val & (1 << 10)) != 0;
-        if (val & (1 << 14)) != 0 {
-            self.arm7_error = false;
-        }
-        self.arm7_enable = (val & (1 << 15)) != 0;
-    }
-
-    pub fn write_data_arm7(&mut self, data: u32) {
-        if !self.arm7_enable {
-            return;
-        }
-        if self.queue_7_to_9.len() < FIFO_CAPACITY {
-            self.queue_7_to_9.push_back(data);
-            if self.arm9_recv_not_empty_irq {
-                self.irq_to_arm9 = true;
+            None => {
+                self.arm9.error = true;
+                self.arm9.last_read
             }
-        } else {
-            self.arm7_error = true;
         }
     }
 
     pub fn read_data_arm7(&mut self) -> u32 {
-        if !self.arm7_enable {
-            return 0;
+        if !self.arm7.enable {
+            return self.queue_9_to_7.front().copied().unwrap_or(self.arm7.last_read);
         }
-        if let Some(val) = self.queue_9_to_7.pop_front() {
-            if self.queue_9_to_7.is_empty() && self.arm9_send_empty_irq {
-                self.irq_to_arm9 = true;
+        match self.queue_9_to_7.pop_front() {
+            Some(val) => {
+                self.arm7.last_read = val;
+                if self.queue_9_to_7.is_empty() && self.arm9.send_empty_irq {
+                    self.pending_arm9 |= IRQ_IPC_SEND_EMPTY;
+                }
+                val
             }
-            val
-        } else {
-            self.arm7_error = true;
-            0
+            None => {
+                self.arm7.error = true;
+                self.arm7.last_read
+            }
         }
     }
 }

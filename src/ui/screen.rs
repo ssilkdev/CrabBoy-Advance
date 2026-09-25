@@ -148,8 +148,15 @@ impl AspectRatio {
     /// Calculates the target viewport size in points given the available area, scale mode,
     /// and an optional custom aspect ratio (used by widescreen frames).
     pub fn calculate_target_size_for_aspect(&self, available_size: Vec2, scale_mode: ScaleMode, custom_aspect: Option<f32>) -> Vec2 {
-        let native_w = SCREEN_WIDTH as f32;
-        let native_h = SCREEN_HEIGHT as f32;
+        let (native_w, native_h) = if let Some(asp) = custom_aspect {
+            if (asp - (256.0 / 384.0)).abs() < 0.01 {
+                (256.0, 384.0)
+            } else {
+                (SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)
+            }
+        } else {
+            (SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)
+        };
         let effective_aspect = match self {
             Self::Native => custom_aspect.unwrap_or(native_w / native_h),
             _ => self.ratio().or(custom_aspect).unwrap_or(native_w / native_h),
@@ -412,6 +419,38 @@ impl ScreenRenderer {
 
         if should_sharpen {
             apply_nvidia_adaptive_sharpening_image(&mut self.image_buffer, nvidia_sharpness);
+        }
+
+        let tex_options = match filter {
+            DisplayFilter::Linear => TextureOptions::LINEAR,
+            _ => TextureOptions::NEAREST,
+        };
+
+        let tex = self.texture.get_or_insert_with(|| {
+            ctx.load_texture("gba_screen", self.image_buffer.clone(), tex_options)
+        });
+
+        tex.set(self.image_buffer.clone(), tex_options);
+        tex
+    }
+
+    pub fn update_framebuffer_nds(
+        &mut self,
+        ctx: &egui::Context,
+        raw_fb: &[u32],
+        filter: DisplayFilter,
+    ) -> &TextureHandle {
+        let target_w = 256;
+        let target_h = 384;
+        if self.image_buffer.size != [target_w, target_h] {
+            self.image_buffer = ColorImage::new([target_w, target_h], Color32::BLACK);
+        }
+
+        for (dst, &pixel) in self.image_buffer.pixels.iter_mut().zip(raw_fb.iter()) {
+            let r = (pixel & 0xFF) as u8;
+            let g = ((pixel >> 8) & 0xFF) as u8;
+            let b = ((pixel >> 16) & 0xFF) as u8;
+            *dst = Color32::from_rgb(r, g, b);
         }
 
         let tex_options = match filter {

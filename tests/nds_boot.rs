@@ -54,22 +54,26 @@ fn build_nds_test_rom() -> Vec<u8> {
 
     // ARM7 Code at 0x5000:
     // 1. Enable FIFO
-    // 2. Read from IPCFIFODATA (0x04000188)
-    // 3. Write response 0x4E445337 to IPCFIFODATA (0x04000188)
-    // 4. B .
-    let arm7_words: [u32; 12] = [
-        0xE59F0018, // LDR R0, [PC, #24] -> loads 0x04000184 (index 8 at 0x20; PC is 0x08)
-        0xE59F1018, // LDR R1, [PC, #24] -> loads 0x8000 (index 9 at 0x24; PC is 0x0C)
-        0xE1C010B0, // STRH R1, [R0]
-        0xE5902004, // LDR R2, [R0, #4]  -> reads from 0x04000188
-        0xE59F3010, // LDR R3, [PC, #16] -> loads 0x4E445337 ("NDS7", index 10 at 0x28; PC is 0x18)
-        0xE5803004, // STR R3, [R0, #4]  -> writes response to 0x04000188
-        0xEAFFFFFE, // B .
-        0x00000000,
-        0x04000184, // Literal: IPCFIFOCNT
-        0x00008000, // Literal: Enable flag
-        0x4E445337, // Literal: "NDS7" token
-        0x00000000,
+    // 2. Wait until the receive FIFO is non-empty (IPCFIFOCNT bit 8 clear)
+    // 3. Read IPCFIFORECV (0x04100000) — GBATEK: 0x04000188 is send-only
+    // 4. Write response 0x4E445337 to IPCFIFOSEND (0x04000188)
+    // 5. B .
+    let arm7_words: [u32; 15] = [
+        0xE59F0024, // 00 LDR R0, [PC, #36] -> 0x04000184 (0x2C)
+        0xE59F1024, // 04 LDR R1, [PC, #36] -> 0x8000     (0x30)
+        0xE1C010B0, // 08 STRH R1, [R0]
+        0xE1D040B0, // 0C wait: LDRH R4, [R0]
+        0xE3140C01, // 10 TST R4, #0x100 (receive empty)
+        0x1AFFFFFC, // 14 BNE wait
+        0xE59F5018, // 18 LDR R5, [PC, #24] -> 0x04100000 (0x38)
+        0xE5952000, // 1C LDR R2, [R5]
+        0xE59F300C, // 20 LDR R3, [PC, #12] -> "NDS7"     (0x34)
+        0xE5803004, // 24 STR R3, [R0, #4]  -> IPCFIFOSEND
+        0xEAFFFFFE, // 28 B .
+        0x04000184, // 2C Literal: IPCFIFOCNT
+        0x00008000, // 30 Literal: Enable flag
+        0x4E445337, // 34 Literal: "NDS7" token
+        0x04100000, // 38 Literal: IPCFIFORECV
     ];
 
     for (i, &w) in arm7_words.iter().enumerate() {

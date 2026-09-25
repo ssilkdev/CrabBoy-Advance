@@ -6,6 +6,7 @@ pub mod dmg;
 pub mod frame_pacing;
 pub mod fs_util;
 pub mod gba;
+pub mod nds;
 pub mod ui;
 
 use dmg::GameBoy;
@@ -39,7 +40,7 @@ fn print_help() {
         r#"🦀 CrabBoy Advance - Next-Generation Game Boy Advance Emulator
 
 USAGE:
-    crabboy-advance [ROM_PATH]                                  Launch GUI emulator (.gba, .gb, .gbc)
+    crabboy-advance [ROM_PATH]                                  Launch GUI emulator (.gba, .gb, .gbc, .nds, .srl)
     crabboy-advance <ROM> --ai-play [--ai-endpoint URL]         Launch GUI with the AI Agent already playing
     crabboy-advance <ROM> --hd-audio                            Launch GUI with HD music re-synthesis enabled
     crabboy-advance <ROM> --hardware-audio                      Launch GUI with native hardware audio only
@@ -55,6 +56,9 @@ USAGE:
     crabboy-advance --audit-audio <ROM> [--frames N]            Run headless audio health audit
     crabboy-advance --gb-serial <GB_ROM> [--frames N]           Run a Game Boy ROM headless and print its link-port output
     crabboy-advance --help                                      Show this help message
+
+NINTENDO DS:
+    .nds and .srl ROMs are detected by extension and run on the ARM9+ARM7 dual-core engine.
 
 GAME BOY / GAME BOY COLOR:
     .gb and .gbc ROMs are detected by extension and run on the SM83 core.
@@ -177,6 +181,35 @@ fn handle_headless_cli(args: &[String]) {
         let output_path = get_arg_val(args, "--output")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("frame_{}.png", target_frame)));
+
+        // A .nds/.srl ROM dumps a native 256x384 PNG from the dual-screen NDS core.
+        if ConsoleKind::from_extension(&rom_path) == ConsoleKind::Nds {
+            let mut nds = nds::Nds::new();
+            if let Err(e) = nds.load_rom(&rom_path) {
+                eprintln!("Failed to load NDS ROM '{}': {}", rom_path.display(), e);
+                std::process::exit(1);
+            }
+            println!(
+                "Stepping to frame {} on '{}' (Nintendo DS: {})...",
+                target_frame,
+                rom_path.display(),
+                nds.title()
+            );
+            for _ in 0..target_frame {
+                nds.run_frame();
+            }
+            let fb = nds.get_framebuffer();
+            let bytes: Vec<u8> = fb.iter().flat_map(|p| {
+                let [r, g, b, _] = p.to_le_bytes();
+                [r, g, b, 0xFF]
+            }).collect();
+            if let Err(e) = image::save_buffer(&output_path, &bytes, 256, 384, image::ExtendedColorType::Rgba8) {
+                eprintln!("Failed to save frame PNG: {}", e);
+                std::process::exit(1);
+            }
+            println!("Saved frame {} to '{}'.", target_frame, output_path.display());
+            std::process::exit(0);
+        }
 
         // A .gb/.gbc ROM dumps a native 160x144 PNG from the SM83 core.
         if ConsoleKind::from_extension(&rom_path) == ConsoleKind::GameBoy {

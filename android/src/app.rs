@@ -225,7 +225,7 @@ impl Core {
         match self {
             Core::Gba(g) => g.mmu.apu.audio_output.set_stream_active(active),
             Core::GameBoy(g) => g.mmu.apu.audio_output.set_stream_active(active),
-            Core::Nds(_) => {}
+            Core::Nds(n) => n.bus.spu.audio_output.set_stream_active(active),
         }
     }
 
@@ -245,7 +245,7 @@ impl Core {
         let out = match self {
             Core::Gba(g) => &mut g.mmu.apu.audio_output,
             Core::GameBoy(g) => &mut g.mmu.apu.audio_output,
-            Core::Nds(_) => return,
+            Core::Nds(n) => &mut n.bus.spu.audio_output,
         };
         out.muted = muted;
         out.set_fast_forwarding(fast_forward);
@@ -1795,7 +1795,15 @@ impl CrabBoyApp {
                                         gb.mmu.apu.audio_output.set_surround_mode(next);
                                     }
                                 }
-                                Core::Nds(_) => {}
+                                Core::Nds(n) => {
+                                    let next = match n.bus.spu.audio_output.surround_mode() {
+                                        gba_simulator::gba::apu::SurroundMode::Stereo => gba_simulator::gba::apu::SurroundMode::Headphone3D,
+                                        gba_simulator::gba::apu::SurroundMode::Headphone3D => gba_simulator::gba::apu::SurroundMode::Surround51,
+                                        gba_simulator::gba::apu::SurroundMode::Surround51 => gba_simulator::gba::apu::SurroundMode::Stereo,
+                                        _ => gba_simulator::gba::apu::SurroundMode::Stereo,
+                                    };
+                                    n.bus.spu.audio_output.set_surround_mode(next);
+                                }
                             }
                         }
                         let blend_label = match self.blend_mode {

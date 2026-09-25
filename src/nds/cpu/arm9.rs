@@ -38,6 +38,8 @@ pub struct Arm946eS {
     pub dtcm_control: u32,
 
     pub halted: bool,
+    /// Cache/write-buffer/protection-unit registers (stored, not enforced).
+    pub cp15_regs: std::collections::HashMap<(u32, u32, u32), u32>,
 }
 
 impl Default for Arm946eS {
@@ -71,10 +73,11 @@ impl Arm946eS {
             r14_und: 0,
             spsr_und: 0,
 
-            cp15_control: 0x00050078, // Default DTCM/ITCM enabled
-            itcm_control: 0x00000038, // 32KB at 0x00000000
-            dtcm_control: 0x027C0030, // 16KB at 0x027C0000
+            cp15_control: 0x00052078, // DTCM/ITCM on, high vectors (post-BIOS state)
+            itcm_control: 0x0000_0020, // base 0, 32 MiB virtual (32 KiB mirrored)
+            dtcm_control: 0x027C_000A, // 16 KiB at 0x027C_0000
             halted: false,
+            cp15_regs: std::collections::HashMap::new(),
         }
     }
 
@@ -207,9 +210,14 @@ impl Arm946eS {
 
     pub fn mcr(&mut self, crn: u32, crm: u32, op1: u32, op2: u32, val: u32) {
         match (crn, crm, op1, op2) {
-            (1, 0, 0, 0) => self.cp15_control = val,
+            (1, 0, 0, 0) => self.cp15_control = (val & 0x000F_F085) | 0x78,
             (9, 1, 0, 0) => self.dtcm_control = val,
             (9, 1, 0, 1) => self.itcm_control = val,
+            // Wait For Interrupt (both encodings used by the SDK).
+            (7, 0, 0, 4) | (7, 8, 0, 2) => self.halted = true,
+            (2, 0, 0, _) | (3, 0, 0, 0) | (5, 0, 0, _) | (6, _, 0, _) => {
+                self.cp15_regs.insert((crn, crm, op2), val);
+            }
             _ => log::trace!("CP15 MCR write crn={crn} crm={crm} op1={op1} op2={op2} val={val:08X}"),
         }
     }
@@ -221,6 +229,9 @@ impl Arm946eS {
             (1, 0, 0, 0) => self.cp15_control,
             (9, 1, 0, 0) => self.dtcm_control,
             (9, 1, 0, 1) => self.itcm_control,
+            (2, 0, 0, _) | (3, 0, 0, 0) | (5, 0, 0, _) | (6, _, 0, _) => {
+                *self.cp15_regs.get(&(crn, crm, op2)).unwrap_or(&0)
+            }
             _ => 0,
         }
     }
@@ -437,5 +448,10 @@ impl CpuState for Arm946eS {
 /// Execute one ARM9 instruction through memory and CP15 TCMs
 pub fn step_arm9(cpu: &mut Arm946eS, bus: &mut NdsBus) -> u32 {
     let mut arm9_bus = Arm9Bus { bus };
-    step_instruction(cpu, &mut arm9_bus)
+    let cycles = step_instruction(cpu, &mut arm9_bus);
+    // The bus maps TCM from its own copy of the CP15 registers.
+    bus.cp15_control = cpu.cp15_control;
+    bus.itcm_control = cpu.itcm_control;
+    bus.dtcm_control = cpu.dtcm_control;
+    cycles
 }

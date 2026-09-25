@@ -4,6 +4,7 @@
 
 use crate::dmg::GameBoy;
 use crate::gba::Gba;
+use crate::nds::Nds;
 
 /// The minimum a core must provide to participate in save states and rewind.
 pub trait SnapshotCore {
@@ -29,14 +30,23 @@ impl SnapshotCore for GameBoy {
     }
 }
 
+impl SnapshotCore for Nds {
+    fn save_state(&self) -> Vec<u8> {
+        self.save_state()
+    }
+    fn load_state(&mut self, data: &[u8]) -> bool {
+        self.load_state(data)
+    }
+}
+
 /// Which console the currently-loaded ROM runs on. Chosen from the file
 /// extension at load time, which is the only reliable signal: a `.gb`/`.gbc`
-/// header is laid out completely differently from a `.gba` one, so sniffing
-/// content would mean guessing.
+/// header is laid out completely differently from a `.gba` or `.nds` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleKind {
     Gba,
     GameBoy,
+    Nds,
 }
 
 impl ConsoleKind {
@@ -48,6 +58,7 @@ impl ConsoleKind {
             .as_deref()
         {
             Some("gb") | Some("gbc") | Some("sgb") | Some("cgb") => ConsoleKind::GameBoy,
+            Some("nds") | Some("srl") => ConsoleKind::Nds,
             _ => ConsoleKind::Gba,
         }
     }
@@ -56,6 +67,7 @@ impl ConsoleKind {
         match self {
             ConsoleKind::Gba => "GBA",
             ConsoleKind::GameBoy => "GB/GBC",
+            ConsoleKind::Nds => "NDS",
         }
     }
 }
@@ -71,5 +83,7 @@ mod tests {
         assert_eq!(ConsoleKind::from_extension(Path::new("x.GBC")), ConsoleKind::GameBoy);
         assert_eq!(ConsoleKind::from_extension(Path::new("x.gba")), ConsoleKind::Gba);
         assert_eq!(ConsoleKind::from_extension(Path::new("x.bin")), ConsoleKind::Gba);
+        assert_eq!(ConsoleKind::from_extension(Path::new("x.nds")), ConsoleKind::Nds);
+        assert_eq!(ConsoleKind::from_extension(Path::new("x.SRL")), ConsoleKind::Nds);
     }
 }
