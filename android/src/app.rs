@@ -18,6 +18,7 @@ use gba_simulator::gba::keypad::Key;
 use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
 use gba_simulator::gba::shader::{apply_shader, ShaderPreset};
 use gba_simulator::gba::Gba;
+#[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
 use touch::{Buttons, TouchPad};
@@ -31,6 +32,7 @@ const IDLE_TICK: Duration = Duration::from_millis(500);
 const FAST_FORWARD_SPEED: u32 = 3;
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon_256.png");
 
+#[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
@@ -68,6 +70,30 @@ fn android_main(app: AndroidApp) {
         Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, files_dir)))),
     ) {
         log::error!("eframe exited with error: {e}");
+    }
+}
+
+/// iOS / iPadOS entry point (called from the `crabboy-ios` binary's `main`).
+/// App data (ROMs, saves, settings) lives in the app's `Documents` folder,
+/// which the Files app shows under "On My iPad › CrabBoy Advance".
+#[cfg(target_os = "ios")]
+pub fn ios_main() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("CrabBoy panic: {info}\n{}", std::backtrace::Backtrace::force_capture());
+    }));
+    gamepad::install();
+    let files_dir = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Documents"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/crabboy"));
+    platform::init(&files_dir);
+
+    let options = eframe::NativeOptions { vsync: true, ..Default::default() };
+    if let Err(e) = eframe::run_native(
+        "CrabBoy Advance",
+        options,
+        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, files_dir)))),
+    ) {
+        eprintln!("eframe exited with error: {e}");
     }
 }
 
@@ -697,7 +723,10 @@ impl CrabBoyApp {
         }
         if let Some(path) = platform::take_imported_rom() {
             self.refresh_library();
-            self.start_game(PathBuf::from(path));
+            // iOS reports a multi-file import as "" (refresh, don't start).
+            if !path.is_empty() {
+                self.start_game(PathBuf::from(path));
+            }
         }
     }
 
@@ -1585,32 +1614,19 @@ impl CrabBoyApp {
         }
         let can_dismiss = self.menu_opened_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(200));
 
-        let full = ctx.screen_rect();
-        let backdrop_resp = egui::Area::new(egui::Id::new("menu_backdrop"))
-            .fixed_pos(full.min)
-            .order(egui::Order::Middle)
-            .show(ctx, |ui| {
-                let (_, resp) = ui.allocate_exact_size(full.size(), egui::Sense::click());
-                ui.painter().rect_filled(full, 0.0, Color32::from_black_alpha(100));
-                resp
-            });
-
-        let mut clicked_outside = can_dismiss && backdrop_resp.inner.clicked();
-
         let title = self.game.as_ref().map(|g| g.title.clone()).unwrap_or_default();
-        let win_resp = egui::Window::new("Menu")
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.set_min_width(260.0);
-                // Taller than a landscape phone: scroll rather than clip.
-                let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
-                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-                    ui.vertical_centered_justified(|ui| {
-                        ui.label(RichText::new(title).strong());
-                        ui.separator();
+        let modal = egui::Modal::new(egui::Id::new("in_game_menu"))
+            .backdrop_color(Color32::from_black_alpha(120))
+            .frame(egui::Frame::window(&ctx.style()));
+
+        let modal_resp = modal.show(ctx, |ui| {
+            ui.set_min_width(260.0);
+            // Taller than a landscape phone: scroll rather than clip.
+            let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                ui.vertical_centered_justified(|ui| {
+                    ui.label(RichText::new(&title).strong());
+                    ui.separator();
                         if ui.button("Resume").clicked() {
                             self.menu_open = false;
                         }
@@ -1762,20 +1778,7 @@ impl CrabBoyApp {
                 });
             });
 
-        if can_dismiss {
-            if let Some(win) = win_resp {
-                let win_rect = win.response.rect;
-                let clicked_off = ctx.input(|i| {
-                    i.pointer.any_click()
-                        && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|pos| !win_rect.contains(pos))
-                });
-                if clicked_off {
-                    clicked_outside = true;
-                }
-            }
-        }
-
-        if clicked_outside {
+        if can_dismiss && modal_resp.should_close() {
             self.menu_open = false;
             self.menu_opened_at = None;
         }
@@ -2408,7 +2411,16 @@ impl eframe::App for CrabBoyApp {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(g) = self.game.as_mut() {
+            g.core.flush_save();
+        }
+    }
+
+    /// The iOS build renders with wgpu, whose `on_exit` takes no GL context.
+    #[cfg(target_os = "ios")]
+    fn on_exit(&mut self) {
         if let Some(g) = self.game.as_mut() {
             g.core.flush_save();
         }
