@@ -19,6 +19,9 @@ impl Buttons {
     pub const DOWN: u16 = 1 << 7;
     pub const R: u16 = 1 << 8;
     pub const L: u16 = 1 << 9;
+    /// NDS face buttons
+    pub const X: u16 = 1 << 10;
+    pub const Y: u16 = 1 << 11;
     /// Front-end only: quick save.
     pub const QUICK_SAVE: u16 = 1 << 12;
     /// Front-end only: quick load.
@@ -393,6 +396,11 @@ impl TouchPad {
 
     pub fn just_pressed(&self, bit: u16) -> bool {
         self.held & bit != 0 && self.prev & bit == 0
+    }
+
+    /// Iterate over current touch contact points in screen space
+    pub fn active_positions(&self) -> impl Iterator<Item = Pos2> + '_ {
+        self.fingers.values().copied()
     }
 }
 

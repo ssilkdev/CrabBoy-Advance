@@ -12,13 +12,20 @@ pub mod spi;
 
 use bus::NdsBus;
 use card::NdsCard;
-use cpu::{Arm7Tdmi, Arm946eS};
+use cpu::{step_arm7, step_arm9, Arm7Tdmi, Arm946eS};
 use ipc::Ipc;
 use std::path::Path;
 
 pub const SCREEN_WIDTH: usize = 256;
 pub const SCREEN_HEIGHT: usize = 192;
 pub const DUAL_SCREEN_HEIGHT: usize = SCREEN_HEIGHT * 2; // 384
+pub const TOTAL_SCANLINES: usize = 263;
+
+// Clock frequencies and per-line cycle budgets
+pub const ARM9_CYCLES_PER_LINE: u32 = 4260; // 67.028 MHz
+pub const ARM7_CYCLES_PER_LINE: u32 = 2130; // 33.514 MHz
+pub const SYS_CYCLES_PER_LINE: u32 = 2130;
+pub const HBLANK_SYS_CYCLE: u32 = 1680;     // ~pixel 256
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NdsKey {
@@ -40,8 +47,6 @@ pub struct Nds {
     pub arm9: Arm946eS,
     pub arm7: Arm7Tdmi,
     pub bus: NdsBus,
-    pub ipc: Ipc,
-    pub card: NdsCard,
     pub frame_counter: u64,
     pub is_running: bool,
 }
@@ -58,44 +63,84 @@ impl Nds {
             arm9: Arm946eS::new(),
             arm7: Arm7Tdmi::new(),
             bus: NdsBus::new(),
-            ipc: Ipc::default(),
-            card: NdsCard::new(),
             frame_counter: 0,
             is_running: true,
         }
     }
 
-    pub fn load_rom(&mut self, path: &Path) -> Result<(), String> {
-        self.card.load_from_file(path)?;
-        let h = &self.card.header;
+    #[inline]
+    pub fn card(&self) -> &NdsCard {
+        &self.bus.card
+    }
 
-        // Copy ARM9 executable into Main RAM
+    #[inline]
+    pub fn card_mut(&mut self) -> &mut NdsCard {
+        &mut self.bus.card
+    }
+
+    #[inline]
+    pub fn ipc(&self) -> &Ipc {
+        &self.bus.ipc
+    }
+
+    #[inline]
+    pub fn ipc_mut(&mut self) -> &mut Ipc {
+        &mut self.bus.ipc
+    }
+
+    pub fn load_rom(&mut self, path: &Path) -> Result<(), String> {
+        self.bus.card.load_from_file(path)?;
+        let h = self.bus.card.header.clone();
+
+        // Copy ARM9 executable into Main RAM or ITCM
         let arm9_rom_start = h.arm9_rom_offset as usize;
         let arm9_rom_end = arm9_rom_start + (h.arm9_size as usize);
-        if arm9_rom_end <= self.card.rom.len() {
-            let arm9_slice = &self.card.rom[arm9_rom_start..arm9_rom_end];
-            let ram_offset = (h.arm9_ram_addr.wrapping_sub(0x0200_0000) & 0x3F_FFFF) as usize;
-            if ram_offset + arm9_slice.len() <= self.bus.main_ram.len() {
-                self.bus.main_ram[ram_offset..ram_offset + arm9_slice.len()].copy_from_slice(arm9_slice);
-                log::info!("Loaded ARM9 payload ({} bytes) to RAM offset 0x{:06X}", arm9_slice.len(), ram_offset);
+        if arm9_rom_end <= self.bus.card.rom.len() {
+            let arm9_slice = &self.bus.card.rom[arm9_rom_start..arm9_rom_end];
+            if (0x0200_0000..0x0240_0000).contains(&h.arm9_ram_addr) {
+                let ram_offset = (h.arm9_ram_addr - 0x0200_0000) as usize;
+                if ram_offset + arm9_slice.len() <= self.bus.main_ram.len() {
+                    self.bus.main_ram[ram_offset..ram_offset + arm9_slice.len()].copy_from_slice(arm9_slice);
+                    log::info!("Loaded ARM9 payload ({} bytes) to Main RAM offset 0x{:06X}", arm9_slice.len(), ram_offset);
+                }
+            } else if (0x0000_0000..0x0000_8000).contains(&h.arm9_ram_addr) {
+                let itcm_offset = h.arm9_ram_addr as usize;
+                if itcm_offset + arm9_slice.len() <= self.bus.itcm.len() {
+                    self.bus.itcm[itcm_offset..itcm_offset + arm9_slice.len()].copy_from_slice(arm9_slice);
+                    log::info!("Loaded ARM9 payload ({} bytes) to ITCM offset 0x{:06X}", arm9_slice.len(), itcm_offset);
+                }
             }
         }
         self.arm9.regs[15] = h.arm9_entry_addr;
 
-        // Copy ARM7 executable into Main RAM / WRAM
+        // Copy ARM7 executable into Main RAM, WRAM, or ARM7 WRAM
         let arm7_rom_start = h.arm7_rom_offset as usize;
         let arm7_rom_end = arm7_rom_start + (h.arm7_size as usize);
-        if arm7_rom_end <= self.card.rom.len() {
-            let arm7_slice = &self.card.rom[arm7_rom_start..arm7_rom_end];
-            let ram_offset = (h.arm7_ram_addr.wrapping_sub(0x0200_0000) & 0x3F_FFFF) as usize;
-            if ram_offset + arm7_slice.len() <= self.bus.main_ram.len() {
-                self.bus.main_ram[ram_offset..ram_offset + arm7_slice.len()].copy_from_slice(arm7_slice);
-                log::info!("Loaded ARM7 payload ({} bytes) to RAM offset 0x{:06X}", arm7_slice.len(), ram_offset);
+        if arm7_rom_end <= self.bus.card.rom.len() {
+            let arm7_slice = &self.bus.card.rom[arm7_rom_start..arm7_rom_end];
+            if (0x0200_0000..0x0240_0000).contains(&h.arm7_ram_addr) {
+                let ram_offset = (h.arm7_ram_addr - 0x0200_0000) as usize;
+                if ram_offset + arm7_slice.len() <= self.bus.main_ram.len() {
+                    self.bus.main_ram[ram_offset..ram_offset + arm7_slice.len()].copy_from_slice(arm7_slice);
+                    log::info!("Loaded ARM7 payload ({} bytes) to Main RAM offset 0x{:06X}", arm7_slice.len(), ram_offset);
+                }
+            } else if (0x0380_0000..0x0381_0000).contains(&h.arm7_ram_addr) {
+                let wram_offset = (h.arm7_ram_addr - 0x0380_0000) as usize;
+                if wram_offset + arm7_slice.len() <= self.bus.arm7_wram.len() {
+                    self.bus.arm7_wram[wram_offset..wram_offset + arm7_slice.len()].copy_from_slice(arm7_slice);
+                    log::info!("Loaded ARM7 payload ({} bytes) to ARM7 WRAM offset 0x{:06X}", arm7_slice.len(), wram_offset);
+                }
+            } else if (0x037F_8000..0x0380_0000).contains(&h.arm7_ram_addr) {
+                let wram_offset = (h.arm7_ram_addr - 0x037F_8000) as usize;
+                if wram_offset + arm7_slice.len() <= self.bus.shared_wram.len() {
+                    self.bus.shared_wram[wram_offset..wram_offset + arm7_slice.len()].copy_from_slice(arm7_slice);
+                    log::info!("Loaded ARM7 payload ({} bytes) to Shared WRAM offset 0x{:06X}", arm7_slice.len(), wram_offset);
+                }
             }
         }
         self.arm7.regs[15] = h.arm7_entry_addr;
 
-        // Set post-boot flags to skip splash screen directly into game
+        // Set post-boot flags to bypass splash firmware
         self.bus.postflg_arm9 = 1;
         self.bus.postflg_arm7 = 1;
 
@@ -166,15 +211,97 @@ impl Nds {
         }
     }
 
+    /// Runs one complete frame (263 scanlines, ~59.83 Hz) with interleaved dual-CPU execution
     pub fn run_frame(&mut self) {
         if !self.is_running {
             return;
         }
 
-        // Each NDS frame comprises 263 scanlines (~59.83 Hz).
-        for line in 0..263 {
+        for line in 0..TOTAL_SCANLINES {
             self.bus.ppu.set_scanline(line as u16);
-            if line < 192 {
+
+            // V-Counter Match IRQ
+            if (self.bus.ppu.dispstat_a & (1 << 2)) != 0 && (self.bus.ppu.dispstat_a & (1 << 5)) != 0 {
+                self.bus.if_arm9 |= 1 << 2;
+            }
+            if (self.bus.ppu.dispstat_b & (1 << 2)) != 0 && (self.bus.ppu.dispstat_b & (1 << 5)) != 0 {
+                self.bus.if_arm7 |= 1 << 2;
+            }
+
+            // VBlank Start IRQ (Line 192)
+            if line == 192 {
+                self.bus.ppu.engine_3d.on_vblank(&self.bus.vram_a[..], &self.bus.ppu.engine_a.palette);
+                if (self.bus.ppu.dispstat_a & (1 << 3)) != 0 {
+                    self.bus.if_arm9 |= 1 << 0;
+                }
+                if (self.bus.ppu.dispstat_b & (1 << 3)) != 0 {
+                    self.bus.if_arm7 |= 1 << 0;
+                }
+            }
+
+            // Stepping loop across the scanline (2130 sys cycles, 4260 ARM9 cycles, 2130 ARM7 cycles)
+            let mut sys_cycles_done = 0;
+            let mut entered_hblank = false;
+
+            while sys_cycles_done < SYS_CYCLES_PER_LINE {
+                let chunk_sys = 32.min(SYS_CYCLES_PER_LINE - sys_cycles_done);
+                let chunk_arm9 = chunk_sys * 2;
+
+                // Step ARM9 core for chunk_arm9 cycles
+                let mut a9_cycles = 0;
+                while a9_cycles < chunk_arm9 {
+                    let c = step_arm9(&mut self.arm9, &mut self.bus);
+                    a9_cycles += c;
+                }
+
+                // Step ARM7 core for chunk_sys cycles
+                let mut a7_cycles = 0;
+                while a7_cycles < chunk_sys {
+                    let c = step_arm7(&mut self.arm7, &mut self.bus);
+                    a7_cycles += c;
+                }
+
+                // Tick timers
+                self.bus.step_timers(chunk_sys, true);  // ARM9 timers
+                self.bus.step_timers(chunk_sys, false); // ARM7 timers
+
+                sys_cycles_done += chunk_sys;
+
+                // Check HBlank entry
+                if !entered_hblank && sys_cycles_done >= HBLANK_SYS_CYCLE {
+                    entered_hblank = true;
+                    self.bus.ppu.dispstat_a |= 1 << 1;
+                    self.bus.ppu.dispstat_b |= 1 << 1;
+                    if (self.bus.ppu.dispstat_a & (1 << 4)) != 0 {
+                        self.bus.if_arm9 |= 1 << 1;
+                    }
+                    if (self.bus.ppu.dispstat_b & (1 << 4)) != 0 {
+                        self.bus.if_arm7 |= 1 << 1;
+                    }
+                }
+
+                // Wake halted CPUs on pending interrupts & dispatch IRQ if enabled
+                if (self.bus.if_arm9 & self.bus.ie_arm9) != 0 {
+                    self.arm9.halted = false;
+                    if self.bus.ime_arm9 && (self.arm9.cpsr & crate::gba::cpu::FLAG_I) == 0 {
+                        self.arm9.trigger_irq();
+                    }
+                }
+
+                if (self.bus.if_arm7 & self.bus.ie_arm7) != 0 {
+                    self.arm7.halted = false;
+                    if self.bus.ime_arm7 && (self.arm7.cpsr & crate::gba::cpu::FLAG_I) == 0 {
+                        self.arm7.trigger_irq();
+                    }
+                }
+            }
+
+            // Clear HBlank at end of scanline
+            self.bus.ppu.dispstat_a &= !(1 << 1);
+            self.bus.ppu.dispstat_b &= !(1 << 1);
+
+            // Render visible scanlines (lines 0..191)
+            if line < SCREEN_HEIGHT {
                 let vram_a = &self.bus.vram_a[..];
                 let vram_b = &self.bus.vram_b[..];
                 let vram_c = &self.bus.vram_c[..];
@@ -191,15 +318,15 @@ impl Nds {
     }
 
     pub fn title(&self) -> &str {
-        if self.card.header.title.is_empty() {
+        if self.bus.card.header.title.is_empty() {
             "Nintendo DS Game"
         } else {
-            &self.card.header.title
+            &self.bus.card.header.title
         }
     }
 
     pub fn game_code(&self) -> &str {
-        &self.card.header.game_code
+        &self.bus.card.header.game_code
     }
 
     pub fn flush_save(&mut self) {
@@ -302,7 +429,7 @@ mod tests {
         arm9.regs[2] = 0x0000_0001;
         arm9.op_qadd(0, 1, 2);
         assert_eq!(arm9.regs[0], 0x7FFF_FFFF); // saturated
-        assert_ne!(arm9.cpsr & cpu::arm9::FLAG_Q, 0);
+        assert_ne!(arm9.cpsr & cpu::executor::FLAG_Q, 0);
 
         // SMULxy signed halfword multiply test
         arm9.regs[1] = 0x0003_0005; // top=3, bottom=5
@@ -404,5 +531,228 @@ mod tests {
         assert_eq!(ppu.framebuffer[0] & 0x00FFFFFF, 0x00FF0000);
         // Bottom screen pixel (0, 192) should be Red
         assert_eq!(ppu.framebuffer[192 * SCREEN_WIDTH] & 0x00FFFFFF, 0x000000FF);
+    }
+
+    #[test]
+    fn test_nds_arm9_execution() {
+        let mut nds = Nds::new();
+        // Place instructions in Main RAM at 0x0200_0000:
+        // 1. MOV R1, #42        (0xE3A0102A)
+        // 2. ADD R2, R1, #10    (0xE281200A)
+        // 3. STR R2, [R0]       (0xE5802000) -> stores 52 at [R0]
+        let ram_base = 0x0200_0000;
+        let target_addr = ram_base + 0x100;
+        nds.arm9.regs[0] = target_addr;
+
+        nds.bus.write_arm9_u32(ram_base, 0xE3A0102A);
+        nds.bus.write_arm9_u32(ram_base + 4, 0xE281200A);
+        nds.bus.write_arm9_u32(ram_base + 8, 0xE5802000);
+
+        nds.arm9.regs[15] = ram_base;
+
+        // Step 1: MOV R1, #42
+        step_arm9(&mut nds.arm9, &mut nds.bus);
+        assert_eq!(nds.arm9.regs[1], 42);
+
+        // Step 2: ADD R2, R1, #10
+        step_arm9(&mut nds.arm9, &mut nds.bus);
+        assert_eq!(nds.arm9.regs[2], 52);
+
+        // Step 3: STR R2, [R0]
+        step_arm9(&mut nds.arm9, &mut nds.bus);
+        assert_eq!(nds.bus.read_arm9_u32(target_addr), 52);
+    }
+
+    #[test]
+    fn test_nds_arm7_execution() {
+        let mut nds = Nds::new();
+        // Place instructions in ARM7 dedicated WRAM at 0x0380_0000:
+        // 1. MOV R0, #100      (0xE3A00064)
+        // 2. SUB R1, R0, #25   (0xE2401019)
+        let wram_base = 0x0380_0000;
+        nds.bus.write_arm7_u32(wram_base, 0xE3A00064);
+        nds.bus.write_arm7_u32(wram_base + 4, 0xE2401019);
+
+        nds.arm7.regs[15] = wram_base;
+
+        step_arm7(&mut nds.arm7, &mut nds.bus);
+        assert_eq!(nds.arm7.regs[0], 100);
+
+        step_arm7(&mut nds.arm7, &mut nds.bus);
+        assert_eq!(nds.arm7.regs[1], 75);
+    }
+
+    #[test]
+    fn test_nds_timer_cascade_and_irq() {
+        let mut bus = NdsBus::new();
+        // Timer 0: prescaler 0 (1 tick per cycle), reload 0xFFFE, enable, IRQ enable
+        bus.timers_arm9[0].reload = 0xFFFE;
+        bus.timers_arm9[0].counter = 0xFFFE;
+        bus.timers_arm9[0].write_control(0x00C0); // bits 6, 7 set
+
+        // Timer 1: count-up (cascade), reload 0x0000, enable
+        bus.timers_arm9[1].reload = 0x0000;
+        bus.timers_arm9[1].counter = 0x0000;
+        bus.timers_arm9[1].write_control(0x0084); // bits 2, 7 set
+
+        // Step 2 sys cycles -> Timer 0 should overflow
+        bus.step_timers(2, true);
+
+        // Timer 0 should have reloaded to 0xFFFE
+        assert_eq!(bus.timers_arm9[0].counter, 0xFFFE);
+        // Timer 1 should have cascaded and incremented to 1
+        assert_eq!(bus.timers_arm9[1].counter, 1);
+        // Timer 0 IRQ bit (bit 3) should be set in if_arm9
+        assert_ne!(bus.if_arm9 & (1 << 3), 0);
+    }
+
+    #[test]
+    fn test_nds_dma_immediate_transfer() {
+        let mut bus = NdsBus::new();
+        // Fill 4 words in source at 0x0200_1000
+        for i in 0..4 {
+            bus.write_arm9_u32(0x0200_1000 + (i * 4), 0x1111_1111 * (i + 1));
+        }
+
+        // Configure DMA0: 4 words, 32-bit, immediate start, IRQ enable
+        // Bit 31: enable, Bit 30: IRQ, Bit 26: 32-bit, count = 4
+        bus.dma_arm9[0].sad = 0x0200_1000;
+        bus.dma_arm9[0].dad = 0x0200_2000;
+        bus.write_arm9_u32(0x0400_00B8, 0xC400_0004);
+
+        // Destination should contain transferred words
+        for i in 0..4 {
+            assert_eq!(bus.read_arm9_u32(0x0200_2000 + (i * 4)), 0x1111_1111 * (i + 1));
+        }
+        // DMA 0 IRQ bit (bit 8) should be set
+        assert_ne!(bus.if_arm9 & (1 << 8), 0);
+    }
+
+    #[test]
+    fn test_nds_full_frame_execution() {
+        let mut nds = Nds::new();
+        // Set ARM9 and ARM7 to execute an infinite loop: B . (0xEAFFFFFE)
+        let ram_base = 0x0200_0000;
+        nds.bus.write_arm9_u32(ram_base, 0xEAFFFFFE);
+        nds.arm9.regs[15] = ram_base;
+
+        let wram_base = 0x0380_0000;
+        nds.bus.write_arm7_u32(wram_base, 0xEAFFFFFE);
+        nds.arm7.regs[15] = wram_base;
+
+        // Enable VBlank IRQ on Engine A DISPSTAT
+        nds.bus.ppu.dispstat_a |= 1 << 3;
+        nds.bus.ie_arm9 |= 1 << 0;
+        nds.bus.ime_arm9 = true;
+
+        assert_eq!(nds.frame_counter, 0);
+        nds.run_frame();
+
+        assert_eq!(nds.frame_counter, 1);
+        // VBlank IRQ bit (bit 0) should have fired during the frame
+        assert_ne!(nds.bus.if_arm9 & (1 << 0), 0);
+    }
+
+    #[test]
+    fn test_nds_3d_matrix_stack_and_transformations() {
+        let mut bus = NdsBus::new();
+
+        // 1. Set Matrix Mode to 2 (Position & Vector Simultaneous) via port 0x0400_0440
+        bus.write_arm9_u32(0x0400_0440, 2);
+        assert_eq!(bus.read_arm9_u32(0x0400_0600) & (3 << 25), 2 << 25);
+
+        // 2. Load Identity Matrix (Cmd 0x15 via port 0x0400_0454)
+        bus.write_arm9_u32(0x0400_0454, 0);
+
+        // 3. Push to Stack (Cmd 0x11 via port 0x0400_0444)
+        bus.write_arm9_u32(0x0400_0444, 0);
+        // pos_sp should now be 1 (bits 28..31 of GXSTAT)
+        assert_eq!((bus.read_arm9_u32(0x0400_0600) >> 28) & 0x1F, 1);
+
+        // 4. Scale position: Scale(2.0, 3.0, 4.0) (Cmd 0x1B via port 0x0400_046C)
+        // 2.0 = 8192, 3.0 = 12288, 4.0 = 16384 in 12-bit fixed point
+        bus.write_arm9_u32(0x0400_046C, 8192);
+        bus.write_arm9_u32(0x0400_046C, 12288);
+        bus.write_arm9_u32(0x0400_046C, 16384);
+
+        // Verify Position matrix has scale applied, but Vector matrix remains Identity!
+        assert_eq!(bus.ppu.engine_3d.geom.pos_mtx.m[0], 8192);
+        assert_eq!(bus.ppu.engine_3d.geom.pos_mtx.m[5], 12288);
+        assert_eq!(bus.ppu.engine_3d.geom.pos_mtx.m[10], 16384);
+        assert_eq!(bus.ppu.engine_3d.geom.vec_mtx.m[0], 4096);
+        assert_eq!(bus.ppu.engine_3d.geom.vec_mtx.m[5], 4096);
+
+        // 5. Pop from Stack (Cmd 0x12 via port 0x0400_0448)
+        bus.write_arm9_u32(0x0400_0448, 1);
+        assert_eq!((bus.read_arm9_u32(0x0400_0600) >> 28) & 0x1F, 0);
+        // Position matrix should be restored to Identity
+        assert_eq!(bus.ppu.engine_3d.geom.pos_mtx.m[0], 4096);
+    }
+
+    #[test]
+    fn test_nds_3d_geometry_commands_and_rasterizer() {
+        let mut bus = NdsBus::new();
+
+        // 1. Set Viewport: (0, 0) to (255, 191) via port 0x0400_0580
+        // Viewport: X0=0, Y0=0, X1=255, Y1=191 -> 0xBF_FF_00_00
+        bus.write_arm9_u32(0x0400_0580, 0xBFFF0000);
+
+        // 2. Set Matrix Mode to 0 (Projection) and set Identity
+        bus.write_arm9_u32(0x0400_0440, 0);
+        bus.write_arm9_u32(0x0400_0454, 0);
+
+        // 3. Set Matrix Mode to 1 (Position) and set Identity
+        bus.write_arm9_u32(0x0400_0440, 1);
+        bus.write_arm9_u32(0x0400_0454, 0);
+
+        // 4. Set Polygon Attributes (Cmd 0x29 via port 0x0400_04A4)
+        // Culling: None (bits 6..7 = 0)
+        bus.write_arm9_u32(0x0400_04A4, 0x0000_0000);
+
+        // 5. Begin Triangles (Cmd 0x40 via port 0x0400_0500)
+        bus.write_arm9_u32(0x0400_0500, 0); // 0 = Triangles
+
+        // Vertex 0: Top Center (0.0, 0.5, 0.0), Color: Red (RGB555 0x001F)
+        bus.write_arm9_u32(0x0400_0480, 0x001F);
+        // VTX_16: X=0, Y=2048 (0.5), Z=0
+        bus.write_arm9_u32(0x0400_048C, (2048 << 16) | 0);
+        bus.write_arm9_u32(0x0400_048C, 0);
+
+        // Vertex 1: Bottom Left (-0.5, -0.5, 0.0), Color: Green (RGB555 0x03E0)
+        bus.write_arm9_u32(0x0400_0480, 0x03E0);
+        // VTX_16: X=-2048 as u16, Y=-2048 as u16, Z=0
+        let neg_half = (-2048i16) as u16 as u32;
+        bus.write_arm9_u32(0x0400_048C, (neg_half << 16) | neg_half);
+        bus.write_arm9_u32(0x0400_048C, 0);
+
+        // Vertex 2: Bottom Right (0.5, -0.5, 0.0), Color: Blue (RGB555 0x7C00)
+        bus.write_arm9_u32(0x0400_0480, 0x7C00);
+        // VTX_16: X=2048, Y=-2048, Z=0
+        bus.write_arm9_u32(0x0400_048C, (neg_half << 16) | 2048);
+        bus.write_arm9_u32(0x0400_048C, 0);
+
+        // End Primitive (Cmd 0x41 via port 0x0400_0504)
+        bus.write_arm9_u32(0x0400_0504, 0);
+
+        // Verify polygon was assembled in back buffer
+        assert_eq!(bus.ppu.engine_3d.geom.polygons_back.len(), 1);
+
+        // 6. Request Swap Buffers (Cmd 0x50 via port 0x0400_0540)
+        bus.write_arm9_u32(0x0400_0540, 0);
+        assert!(bus.ppu.engine_3d.geom.swap_buffers_requested);
+
+        // 7. Trigger VBlank processing
+        bus.ppu.engine_3d.on_vblank(&bus.vram_a[..], &bus.ppu.engine_a.palette);
+
+        // Buffers should have swapped: back buffer empty, front buffer has the polygon
+        assert_eq!(bus.ppu.engine_3d.geom.polygons_back.len(), 0);
+        assert_eq!(bus.ppu.engine_3d.geom.polygons_front.len(), 1);
+
+        // The rasterizer should have drawn pixels into color_buffer!
+        // Check center of the screen (approx x: 128, y: 96)
+        let center_pixel = bus.ppu.engine_3d.rasterizer.color_buffer[96 * 256 + 128];
+        // Center pixel should be non-black (non-cleared) and opaque (alpha 0xFF)
+        assert_eq!(center_pixel & 0xFF00_0000, 0xFF00_0000);
+        assert_ne!(center_pixel & 0x00FF_FFFF, 0); // has color
     }
 }

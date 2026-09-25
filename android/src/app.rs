@@ -155,6 +155,10 @@ impl Core {
                 Core::Nds(n) => n.set_key(key, pressed),
             }
         }
+        if let Core::Nds(n) = self {
+            n.set_nds_key(gba_simulator::nds::NdsKey::X, (b.0 & Buttons::X) != 0);
+            n.set_nds_key(gba_simulator::nds::NdsKey::Y, (b.0 & Buttons::Y) != 0);
+        }
     }
 
     /// The displayed frame (0xAABBGGRR words, i.e. RGBA bytes in
@@ -2430,6 +2434,22 @@ impl eframe::App for CrabBoyApp {
                 let sm = self.accessibility.active.slow_motion;
                 if let Some(g) = self.game.as_mut() {
                     g.core.set_audio(muted, ff, sm.effective_multiplier(), sm.audio);
+                    if let Core::Nds(ref mut nds) = g.core {
+                        let top = layout.screen.top();
+                        let h = layout.screen.height();
+                        let bot_screen_rect = egui::Rect::from_min_max(
+                            egui::pos2(layout.screen.left(), top + h / 2.0),
+                            layout.screen.max,
+                        );
+                        let touch_coord = self.touch.active_positions().find(|&p| bot_screen_rect.contains(p)).map(|p| {
+                            let norm_x = ((p.x - bot_screen_rect.left()) / bot_screen_rect.width()).clamp(0.0, 1.0);
+                            let norm_y = ((p.y - bot_screen_rect.top()) / bot_screen_rect.height()).clamp(0.0, 1.0);
+                            let x = (norm_x * 255.0) as u16;
+                            let y = (norm_y * 191.0) as u16;
+                            (x, y)
+                        });
+                        nds.set_touch(touch_coord);
+                    }
                 }
                 self.step_emulation(buttons);
                 let t = Instant::now();
