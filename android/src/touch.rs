@@ -19,6 +19,10 @@ impl Buttons {
     pub const DOWN: u16 = 1 << 7;
     pub const R: u16 = 1 << 8;
     pub const L: u16 = 1 << 9;
+    /// Front-end only: quick save.
+    pub const QUICK_SAVE: u16 = 1 << 12;
+    /// Front-end only: quick load.
+    pub const QUICK_LOAD: u16 = 1 << 13;
     /// Front-end only: open the menu.
     pub const MENU: u16 = 1 << 14;
     /// Front-end only: toggle fast-forward.
@@ -50,6 +54,8 @@ pub struct Layout {
     pub select: Rect,
     pub menu: Rect,
     pub fast: Rect,
+    pub quick_save: Rect,
+    pub quick_load: Rect,
 }
 
 impl Layout {
@@ -111,7 +117,11 @@ impl Layout {
         let menu = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, shoulder_y), small);
         let fast = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, shoulder_y), small);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
+        let util_y = shoulder_y + small.y + unit * 0.35;
+        let quick_save = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, util_y), small);
+        let quick_load = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, util_y), small);
+
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load }
     }
 
     fn landscape(safe: Rect, aspect: f32, unit: f32) -> Self {
@@ -135,17 +145,21 @@ impl Layout {
         let r = Rect::from_min_size(Pos2::new(right_x - shoulder.x, top_y - shoulder.y / 2.0), shoulder);
         let fast = Rect::from_center_size(Pos2::new(r.left() - margin - small.x / 2.0, top_y), small);
 
+        let util_y = top_y + small.y + unit * 0.35;
+        let quick_save = Rect::from_center_size(Pos2::new(menu.center().x, util_y), small);
+        let quick_load = Rect::from_center_size(Pos2::new(fast.center().x, util_y), small);
+
         // Bottom of each column: Select under the D-pad, Start under A/B.
         let bottom_y = safe.bottom() - unit * 0.55;
         let pill = Vec2::new(unit * 1.6, unit * 0.62);
         let select = Rect::from_center_size(Pos2::new(dpad_center.x, bottom_y), pill);
         let start = Rect::from_center_size(Pos2::new((a.0.x + b.0.x) / 2.0, bottom_y), pill);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load }
     }
 
     /// Height of the one-handed control stack, in units.
-    const STACK_UNITS: f32 = 9.2;
+    const STACK_UNITS: f32 = 10.2;
     /// Width of the one-handed control stack, in units (without margins).
     const STACK_WIDTH_UNITS: f32 = 3.5;
 
@@ -187,7 +201,7 @@ impl Layout {
         let cx = if left { area.left() + margin + half_w } else { area.right() - margin - half_w };
         let gap = unit * 0.3;
         // Stack from the bottom up, where the thumb rests: Select/Start,
-        // D-pad, A/B, shoulders, then menu / fast-forward.
+        // D-pad, A/B, shoulders, then menu / fast-forward, then quick save / load.
         let mut y = area.bottom() - margin;
 
         let pill = Vec2::new(unit * 1.5, unit * 0.62);
@@ -217,8 +231,13 @@ impl Layout {
         y -= small.y / 2.0;
         let menu = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
         let fast = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
+        y -= small.y / 2.0 + gap;
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast }
+        y -= small.y / 2.0;
+        let quick_save = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
+        let quick_load = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
+
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load }
     }
 
     /// D-pad hugging `left_x`, A/B cluster hugging `right_x`, both around `y`.
@@ -271,6 +290,8 @@ impl Layout {
             (self.select, Buttons::SELECT),
             (self.menu, Buttons::MENU),
             (self.fast, Buttons::FAST),
+            (self.quick_save, Buttons::QUICK_SAVE),
+            (self.quick_load, Buttons::QUICK_LOAD),
         ] {
             if rect.expand(8.0).contains(p) {
                 bits |= bit;
@@ -411,6 +432,8 @@ pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look
         (l.r, Buttons::R, "R", Control::R),
         (l.select, Buttons::SELECT, "SELECT", Control::Select),
         (l.start, Buttons::START, "START", Control::Start),
+        (l.quick_save, Buttons::QUICK_SAVE, "SAVE", Control::QuickSave),
+        (l.quick_load, Buttons::QUICK_LOAD, "LOAD", Control::QuickLoad),
     ] {
         let down = held & bit != 0;
         if let Some(tex) = look.image(ctl, down) {
@@ -418,8 +441,10 @@ pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look
             draw_image(p, tex, rect, down && !own);
             continue;
         }
-        p.rect(rect, rect.height() / 2.0, fill(bit), stroke, egui::StrokeKind::Inside);
-        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(rect.height() * 0.42), k.label);
+        let radius = if ctl == Control::QuickSave || ctl == Control::QuickLoad { 8.0 } else { rect.height() / 2.0 };
+        p.rect(rect, radius, fill(bit), stroke, egui::StrokeKind::Inside);
+        let font_size = if ctl == Control::QuickSave || ctl == Control::QuickLoad { rect.height() * 0.36 } else { rect.height() * 0.42 };
+        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(font_size), k.label);
     }
 
     if let Some(tex) = look.image(Control::Fast, fast_forward) {
@@ -481,7 +506,7 @@ mod tests {
     fn landscape_controls_stay_off_the_game_image() {
         // Typical 20:9 phone in landscape (points).
         let l = Layout::compute(Rect::from_min_size(Pos2::ZERO, Vec2::new(914.0, 411.0)), Some([240, 160]));
-        for rect in [l.l, l.r, l.menu, l.fast, l.start, l.select] {
+        for rect in [l.l, l.r, l.menu, l.fast, l.quick_save, l.quick_load, l.start, l.select] {
             assert!(!rect.intersects(l.screen), "{rect:?} overlaps {:?}", l.screen);
         }
         assert!(l.dpad_center.x + l.dpad_radius <= l.screen.left());
@@ -496,6 +521,7 @@ mod tests {
             circle(l.a),
             circle(l.b),
             l.l, l.r, l.start, l.select, l.menu, l.fast,
+            l.quick_save, l.quick_load,
         ]
     }
 
@@ -524,6 +550,8 @@ mod tests {
                     (l.b.0, Buttons::B),
                     (l.menu.center(), Buttons::MENU),
                     (l.fast.center(), Buttons::FAST),
+                    (l.quick_save.center(), Buttons::QUICK_SAVE),
+                    (l.quick_load.center(), Buttons::QUICK_LOAD),
                     (l.l.center(), Buttons::L),
                     (l.r.center(), Buttons::R),
                     (l.select.center(), Buttons::SELECT),
@@ -546,6 +574,8 @@ mod tests {
             for (p, want) in [
                 (l.menu.center(), Buttons::MENU),
                 (l.fast.center(), Buttons::FAST),
+                (l.quick_save.center(), Buttons::QUICK_SAVE),
+                (l.quick_load.center(), Buttons::QUICK_LOAD),
                 (l.l.center(), Buttons::L),
                 (l.r.center(), Buttons::R),
                 (l.select.center(), Buttons::SELECT),

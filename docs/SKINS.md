@@ -74,7 +74,7 @@ Every field is optional.
   - `edge` is the outline colour and `label` is the text and arrow colour.
   - `background` is the colour behind the game.
 - **`images`**
-  - Image slots are named `dpad`, `a`, `b`, `l`, `r`, `start`, `select`, `menu` and `fast`.
+  - Image slots are named `dpad`, `a`, `b`, `l`, `r`, `start`, `select`, `menu`, `fast`, `quick_save` and `quick_load`.
   - Add `_pressed` to a name for the image shown while the button is held, for example `a_pressed`. Without one, the normal image is darkened while held.
   - `background_portrait` and `background_landscape` fill the whole screen behind the game.
   - Images must be PNG files, 2048×2048 pixels or smaller. They're stretched to fit the button, so square images work best for round buttons and the D-pad.

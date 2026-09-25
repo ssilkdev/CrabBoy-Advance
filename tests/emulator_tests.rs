@@ -327,11 +327,11 @@ mod tests {
 
         let output = AudioOutput::new();
         // Test SurroundMode getters and setters
-        assert_eq!(output.surround_mode(), SurroundMode::Headphone3D);
+        assert_eq!(output.surround_mode(), SurroundMode::Stereo);
         output.set_surround_mode(SurroundMode::Surround51);
         assert_eq!(output.surround_mode(), SurroundMode::Surround51);
-        output.set_surround_mode(SurroundMode::Stereo);
-        assert_eq!(output.surround_mode(), SurroundMode::Stereo);
+        output.set_surround_mode(SurroundMode::Headphone3D);
+        assert_eq!(output.surround_mode(), SurroundMode::Headphone3D);
 
         // Test Bass Boost & Surround Width
         output.set_bass_boost(0.75);

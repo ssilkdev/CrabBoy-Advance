@@ -56,10 +56,12 @@ pub enum Control {
     Select,
     Menu,
     Fast,
+    QuickSave,
+    QuickLoad,
 }
 
 impl Control {
-    pub const ALL: [Control; 9] = [
+    pub const ALL: [Control; 11] = [
         Control::Dpad,
         Control::A,
         Control::B,
@@ -69,6 +71,8 @@ impl Control {
         Control::Select,
         Control::Menu,
         Control::Fast,
+        Control::QuickSave,
+        Control::QuickLoad,
     ];
 
     pub fn key(self) -> &'static str {
@@ -82,6 +86,8 @@ impl Control {
             Control::Select => "select",
             Control::Menu => "menu",
             Control::Fast => "fast",
+            Control::QuickSave => "quick_save",
+            Control::QuickLoad => "quick_load",
         }
     }
 
@@ -96,6 +102,8 @@ impl Control {
             Control::Select => "Select",
             Control::Menu => "Menu",
             Control::Fast => "Fast-forward",
+            Control::QuickSave => "Quick Save",
+            Control::QuickLoad => "Quick Load",
         }
     }
 
@@ -162,6 +170,8 @@ pub fn control_rect(l: &Layout, c: Control) -> Rect {
         Control::Select => l.select,
         Control::Menu => l.menu,
         Control::Fast => l.fast,
+        Control::QuickSave => l.quick_save,
+        Control::QuickLoad => l.quick_load,
     }
 }
 
@@ -180,6 +190,8 @@ fn set_control_rect(l: &mut Layout, c: Control, r: Rect) {
         Control::Select => l.select = r,
         Control::Menu => l.menu = r,
         Control::Fast => l.fast = r,
+        Control::QuickSave => l.quick_save = r,
+        Control::QuickLoad => l.quick_load = r,
     }
 }
 

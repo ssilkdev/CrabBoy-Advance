@@ -282,6 +282,8 @@ struct CrabBoyApp {
     /// Layout editor: which control is selected, and whether it's open.
     layout_editor: Option<Option<Control>>,
     installed_skins: Vec<skin::InstalledSkin>,
+    /// Pending quick-load confirmation timestamp for accidental-tap protection.
+    load_confirm: Option<Instant>,
 }
 
 impl CrabBoyApp {
@@ -368,6 +370,7 @@ impl CrabBoyApp {
             skin_menu: false,
             layout_editor: None,
             installed_skins: Vec::new(),
+            load_confirm: None,
         };
         app.refresh_skins();
         app.refresh_library();
@@ -459,6 +462,7 @@ impl CrabBoyApp {
     }
 
     fn save_state(&mut self) {
+        self.load_confirm = None;
         let (Some(path), Some(g)) = (self.state_path(), self.game.as_ref()) else { return };
         match std::fs::write(&path, g.core.save_state()) {
             Ok(()) => self.toast("State saved"),
@@ -466,7 +470,28 @@ impl CrabBoyApp {
         }
     }
 
+    /// On-screen touch Quick Load: requires a double-tap within 2.5 seconds to
+    /// prevent catastrophic accidental loads during gameplay.
+    fn quick_load_with_confirm(&mut self) {
+        let Some(path) = self.state_path() else { return };
+        if !path.exists() {
+            self.toast("No saved state for this game yet");
+            return;
+        }
+        let now = Instant::now();
+        if let Some(t) = self.load_confirm {
+            if now.duration_since(t) < Duration::from_millis(2500) {
+                self.load_confirm = None;
+                self.load_state();
+                return;
+            }
+        }
+        self.load_confirm = Some(now);
+        self.toast("Tap LOAD again to confirm");
+    }
+
     fn load_state(&mut self) {
+        self.load_confirm = None;
         let Some(path) = self.state_path() else { return };
         let Ok(data) = std::fs::read(&path) else {
             self.toast("No saved state for this game yet");
@@ -1521,6 +1546,12 @@ impl eframe::App for CrabBoyApp {
                 }
                 if self.touch.just_pressed(Buttons::FAST) {
                     self.fast_forward = !self.fast_forward;
+                }
+                if self.touch.just_pressed(Buttons::QUICK_SAVE) {
+                    self.save_state();
+                }
+                if self.touch.just_pressed(Buttons::QUICK_LOAD) {
+                    self.quick_load_with_confirm();
                 }
                 let buttons = Buttons(touch.0 | gamepad::buttons().0);
 

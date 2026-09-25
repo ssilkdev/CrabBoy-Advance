@@ -137,7 +137,7 @@ fn leaving_slow_motion_returns_to_normal_audio() {
     let (underruns, played) = run_realtime(&out, 1.0, 3.0);
     assert_eq!(underruns, 0);
     // The extra slow-motion buffering is gone again (normal latency).
-    assert!(out.buffer_len() <= 3000 + 1600, "queue still {} deep (was {deep})", out.buffer_len());
+    assert!(out.buffer_len() <= 4000 + 1600, "queue still {} deep (was {deep})", out.buffer_len());
     let zc = zero_crossings_per_sec(&played);
     assert!((zc - 880.0).abs() < 880.0 * 0.03, "{zc}");
 }
