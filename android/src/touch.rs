@@ -326,19 +326,49 @@ impl TouchPad {
     }
 }
 
-const FILL: Color32 = Color32::from_rgba_premultiplied(40, 40, 48, 150);
-const FILL_DOWN: Color32 = Color32::from_rgba_premultiplied(130, 90, 60, 200);
-const EDGE: Color32 = Color32::from_rgba_premultiplied(160, 160, 170, 140);
-const LABEL: Color32 = Color32::from_rgba_premultiplied(230, 230, 235, 230);
+/// How to draw the controls: theme colours plus optional skin images.
+pub struct Look<'a> {
+    pub colors: crate::skin::ThemeColors,
+    /// Texture for a control, by (control, pressed). A pressed image falls
+    /// back to the normal one.
+    pub images: &'a dyn Fn(crate::skin::Control, bool) -> Option<egui::TextureId>,
+}
 
-pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool) {
-    let stroke = Stroke::new(2.0_f32, EDGE);
-    let fill = |bit: u16| if held & bit != 0 { FILL_DOWN } else { FILL };
+impl Look<'_> {
+    fn image(&self, c: crate::skin::Control, pressed: bool) -> Option<egui::TextureId> {
+        (self.images)(c, pressed).or_else(|| if pressed { (self.images)(c, false) } else { None })
+    }
+}
 
-    // D-pad: a plus shape made of four arms around a hub.
+/// Classic colours, no images.
+pub fn classic_look() -> Look<'static> {
+    Look { colors: crate::skin::Theme::CLASSIC.colors(1.0), images: &|_, _| None }
+}
+
+fn draw_image(p: &Painter, tex: egui::TextureId, rect: Rect, pressed: bool) {
+    // Pressed without its own image: darken the normal one.
+    let tint = if pressed { Color32::from_gray(170) } else { Color32::WHITE };
+    p.image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+}
+
+pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look<'_>) {
+    use crate::skin::Control;
+    let k = look.colors;
+    let stroke = Stroke::new(2.0_f32, k.edge);
+    let fill = |bit: u16| if held & bit != 0 { k.pressed } else { k.fill };
+
+    // D-pad: a plus shape made of four arms around a hub, or the skin's
+    // image (a pressed direction then shows as a highlighted arm).
     let arm = l.dpad_radius * 0.62;
     let thick = l.dpad_radius * 0.62;
     let c = l.dpad_center;
+    let dirs = Buttons::UP | Buttons::DOWN | Buttons::LEFT | Buttons::RIGHT;
+    let dpad_rect = Rect::from_center_size(c, Vec2::splat(l.dpad_radius * 2.0));
+    let dpad_img = look.image(Control::Dpad, held & dirs != 0);
+    if let Some(tex) = dpad_img {
+        let own_pressed = (look.images)(Control::Dpad, true).is_some();
+        draw_image(p, tex, dpad_rect, held & dirs != 0 && !own_pressed);
+    }
     for (bit, dir) in [
         (Buttons::UP, Vec2::new(0.0, -1.0)),
         (Buttons::DOWN, Vec2::new(0.0, 1.0)),
@@ -348,38 +378,68 @@ pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool) {
         let center = c + dir * arm;
         let size = if dir.x == 0.0 { Vec2::new(thick, arm * 1.1) } else { Vec2::new(arm * 1.1, thick) };
         let rect = Rect::from_center_size(center, size);
+        if dpad_img.is_some() {
+            if held & bit != 0 {
+                p.rect_filled(rect, 6.0, k.pressed.gamma_multiply(0.6));
+            }
+            continue;
+        }
         p.rect(rect, 6.0, fill(bit), stroke, egui::StrokeKind::Inside);
         // Arrow drawn as a triangle: the default fonts lack ▲/▼.
         let tip = center + dir * arm * 0.35;
         let base = center - dir * arm * 0.05;
         let side = dir.rot90() * thick * 0.2;
-        p.add(egui::Shape::convex_polygon(vec![tip, base + side, base - side], LABEL, Stroke::NONE));
+        p.add(egui::Shape::convex_polygon(vec![tip, base + side, base - side], k.label, Stroke::NONE));
     }
-    p.rect_filled(Rect::from_center_size(c, Vec2::splat(thick)), 2.0, FILL);
+    if dpad_img.is_none() {
+        p.rect_filled(Rect::from_center_size(c, Vec2::splat(thick)), 2.0, k.fill);
+    }
 
-    for ((center, r), bit, label) in [(l.a, Buttons::A, "A"), (l.b, Buttons::B, "B")] {
+    for ((center, r), bit, label, ctl) in [(l.a, Buttons::A, "A", Control::A), (l.b, Buttons::B, "B", Control::B)] {
+        let down = held & bit != 0;
+        if let Some(tex) = look.image(ctl, down) {
+            let own = (look.images)(ctl, true).is_some();
+            draw_image(p, tex, Rect::from_center_size(center, Vec2::splat(r * 2.0)), down && !own);
+            continue;
+        }
         p.circle(center, r, fill(bit), stroke);
-        p.text(center, Align2::CENTER_CENTER, label, FontId::proportional(r * 0.9), LABEL);
+        p.text(center, Align2::CENTER_CENTER, label, FontId::proportional(r * 0.9), k.label);
     }
 
-    for (rect, bit, label) in [
-        (l.l, Buttons::L, "L"),
-        (l.r, Buttons::R, "R"),
-        (l.select, Buttons::SELECT, "SELECT"),
-        (l.start, Buttons::START, "START"),
+    for (rect, bit, label, ctl) in [
+        (l.l, Buttons::L, "L", Control::L),
+        (l.r, Buttons::R, "R", Control::R),
+        (l.select, Buttons::SELECT, "SELECT", Control::Select),
+        (l.start, Buttons::START, "START", Control::Start),
     ] {
+        let down = held & bit != 0;
+        if let Some(tex) = look.image(ctl, down) {
+            let own = (look.images)(ctl, true).is_some();
+            draw_image(p, tex, rect, down && !own);
+            continue;
+        }
         p.rect(rect, rect.height() / 2.0, fill(bit), stroke, egui::StrokeKind::Inside);
-        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(rect.height() * 0.42), LABEL);
+        p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(rect.height() * 0.42), k.label);
     }
 
-    let ff_fill = if fast_forward { FILL_DOWN } else { FILL };
-    p.rect(l.fast, 10.0, ff_fill, stroke, egui::StrokeKind::Inside);
-    p.text(l.fast.center(), Align2::CENTER_CENTER, "⏩", FontId::proportional(l.fast.height() * 0.45), LABEL);
+    if let Some(tex) = look.image(Control::Fast, fast_forward) {
+        let own = (look.images)(Control::Fast, true).is_some();
+        draw_image(p, tex, l.fast, fast_forward && !own);
+    } else {
+        let ff_fill = if fast_forward { k.pressed } else { k.fill };
+        p.rect(l.fast, 10.0, ff_fill, stroke, egui::StrokeKind::Inside);
+        p.text(l.fast.center(), Align2::CENTER_CENTER, "⏩", FontId::proportional(l.fast.height() * 0.45), k.label);
+    }
 }
 
-pub fn paint_menu_button(p: &Painter, l: &Layout) {
-    p.rect(l.menu, 10.0, FILL, Stroke::new(2.0_f32, EDGE), egui::StrokeKind::Inside);
-    p.text(l.menu.center(), Align2::CENTER_CENTER, "☰", FontId::proportional(l.menu.height() * 0.5), LABEL);
+pub fn paint_menu_button(p: &Painter, l: &Layout, look: &Look<'_>) {
+    if let Some(tex) = look.image(crate::skin::Control::Menu, false) {
+        draw_image(p, tex, l.menu, false);
+        return;
+    }
+    let k = look.colors;
+    p.rect(l.menu, 10.0, k.fill, Stroke::new(2.0_f32, k.edge), egui::StrokeKind::Inside);
+    p.text(l.menu.center(), Align2::CENTER_CENTER, "☰", FontId::proportional(l.menu.height() * 0.5), k.label);
 }
 
 #[cfg(test)]

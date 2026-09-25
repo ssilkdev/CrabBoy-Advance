@@ -1,6 +1,7 @@
 //! The Android application: game library, emulation loop, in-game menu.
 
 use crate::orientation::Orientation;
+use crate::skin::{self, Control, SkinImage, SkinSettings};
 use crate::{gamepad, platform, touch};
 
 use std::path::{Path, PathBuf};
@@ -264,6 +265,19 @@ struct CrabBoyApp {
     game_refresh: bool,
     /// Time spent converting/uploading pictures since `stats_since`.
     upload_time: Duration,
+    /// On-screen control skin, layout and visibility (`skin.json`).
+    skin: SkinSettings,
+    skin_path: PathBuf,
+    skins_dir: PathBuf,
+    /// The active skin's textures, loaded on demand.
+    skin_textures: std::collections::BTreeMap<SkinImage, TextureHandle>,
+    /// The active custom skin, if any (its colours, images and layout).
+    custom_skin: Option<skin::InstalledSkin>,
+    skin_textures_for: String,
+    skin_menu: bool,
+    /// Layout editor: which control is selected, and whether it's open.
+    layout_editor: Option<Option<Control>>,
+    installed_skins: Vec<skin::InstalledSkin>,
 }
 
 impl CrabBoyApp {
@@ -295,6 +309,10 @@ impl CrabBoyApp {
             .map(|s| Orientation::parse(&s))
             .unwrap_or_default();
         platform::set_orientation(orientation.activity_info());
+        let skin_path = files_dir.join("skin.json");
+        let skin_settings = SkinSettings::parse(&std::fs::read_to_string(&skin_path).unwrap_or_default());
+        let skins_dir = files_dir.join("skins");
+        let _ = std::fs::create_dir_all(&skins_dir);
         let autosave_path = files_dir.join("autosave.txt");
         let (as_on, as_min) = crate::autosave_settings::parse(&std::fs::read_to_string(&autosave_path).unwrap_or_default());
         let autosaver = gba_simulator::autosave::AutoSaver::new(states_dir.clone(), as_on, as_min);
@@ -335,7 +353,17 @@ impl CrabBoyApp {
             uploaded: None,
             game_refresh: false,
             upload_time: Duration::ZERO,
+            skin: skin_settings,
+            skin_path,
+            skins_dir,
+            skin_textures: Default::default(),
+            custom_skin: None,
+            skin_textures_for: String::new(),
+            skin_menu: false,
+            layout_editor: None,
+            installed_skins: Vec::new(),
         };
+        app.refresh_skins();
         app.refresh_library();
         app
     }
@@ -474,10 +502,111 @@ impl CrabBoyApp {
         }
     }
 
+    /// A sheet over the game (settings, editor) is open: the game pauses.
+    fn any_sheet_open(&self) -> bool {
+        self.accessibility_menu || self.autosave_menu || self.skin_menu || self.layout_editor.is_some()
+    }
+
+    fn store_skin_settings(&self) {
+        if let Err(e) = std::fs::write(&self.skin_path, self.skin.to_json()) {
+            log::warn!("Could not save skin settings: {e}");
+        }
+    }
+
+    /// Rescan installed skins and re-resolve the active one.
+    fn refresh_skins(&mut self) {
+        self.installed_skins = skin::list_installed(&self.skins_dir);
+        self.custom_skin = self.installed_skins.iter().find(|s| s.id == self.skin.skin).cloned();
+        if self.custom_skin.is_none() && skin::built_in(&self.skin.skin).is_none() {
+            self.skin.skin = "classic".into();
+        }
+        self.skin_textures_for.clear(); // reload textures
+    }
+
+    fn theme(&self) -> skin::Theme {
+        match &self.custom_skin {
+            Some(c) => c.manifest.theme(),
+            None => skin::built_in(&self.skin.skin).map_or(skin::Theme::CLASSIC, |b| b.theme),
+        }
+    }
+
+    /// Load the active skin's images as textures (once per skin).
+    fn ensure_skin_textures(&mut self, ctx: &egui::Context) {
+        if self.skin_textures_for == self.skin.skin {
+            return;
+        }
+        self.skin_textures.clear();
+        self.skin_textures_for = self.skin.skin.clone();
+        let Some(custom) = &self.custom_skin else { return };
+        for (what, path) in custom.images() {
+            let loaded = std::fs::read(&path)
+                .ok()
+                .and_then(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Png).ok());
+            match loaded {
+                Some(img) => {
+                    let rgba = img.to_rgba8();
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    let ci = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                    let name = format!("skin-{what:?}");
+                    self.skin_textures.insert(what, ctx.load_texture(name, ci, TextureOptions::LINEAR));
+                }
+                None => log::warn!("Skin image {} could not be loaded", path.display()),
+            }
+        }
+    }
+
+    /// Touch layout for this frame: the default spots with the skin's and
+    /// the user's placements applied.
+    fn control_layout(&self, safe: egui::Rect, hand: touch::Hand) -> touch::Layout {
+        let mut layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
+        let portrait = safe.height() > safe.width();
+        // Moves made in the editor are for the standard two-handed layout;
+        // one-handed layouts (Accessibility) stack every control in one
+        // column, where those offsets would pile buttons on top of each
+        // other. They still get the skin's look and the global size.
+        let placements = if hand != touch::Hand::Both {
+            Default::default()
+        } else {
+            let user = self.skin.layout.for_orientation(portrait);
+            match &self.custom_skin {
+                Some(c) => skin::combined(c.manifest.layout.for_orientation(portrait), user),
+                None => user.clone(),
+            }
+        };
+        skin::apply(&mut layout, safe, &placements, self.skin.scale);
+        layout
+    }
+
+    fn import_skin(&mut self, path: &Path) {
+        let result = std::fs::read(path)
+            .map_err(|e| format!("Could not read the skin: {e}"))
+            .and_then(|bytes| skin::read_pack(&bytes));
+        let _ = std::fs::remove_file(path);
+        match result {
+            Ok(pack) => {
+                let fallback = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                match skin::install(&pack, &self.skins_dir, &fallback) {
+                    Ok(id) => {
+                        self.skin.skin = id;
+                        self.store_skin_settings();
+                        self.refresh_skins();
+                        let name = self.custom_skin.as_ref().map(|c| c.display_name().to_string()).unwrap_or_default();
+                        self.toast(format!("Skin \"{name}\" installed"));
+                    }
+                    Err(e) => self.toast(format!("Could not install the skin: {e}")),
+                }
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
     /// Poll the Java side for a freshly imported ROM or import error.
     fn poll_imports(&mut self) {
         if let Some(err) = platform::take_import_error() {
             self.toast(err);
+        }
+        if let Some(path) = platform::take_imported_skin() {
+            self.import_skin(Path::new(&path));
         }
         if let Some(path) = platform::take_imported_rom() {
             self.refresh_library();
@@ -490,15 +619,16 @@ impl CrabBoyApp {
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
-        let playing = self.game.is_some() && !(self.menu_open || self.accessibility_menu || self.autosave_menu);
+        let playing = self.game.is_some() && !(self.menu_open || self.any_sheet_open());
         if self.autosaver.tick(Duration::from_secs_f64(dt), playing) {
             match self.write_autosave() {
                 Ok(_) => self.toast("Auto-saved"),
                 Err(e) => self.toast(e),
             }
         }
+        let paused = self.menu_open || self.any_sheet_open();
         let Some(game) = self.game.as_mut() else { return };
-        if self.menu_open || self.accessibility_menu || self.autosave_menu {
+        if paused {
             self.frame_accum = 0.0;
             return;
         }
@@ -689,9 +819,19 @@ impl CrabBoyApp {
 
     fn game_ui(&mut self, ctx: &egui::Context, layout: &touch::Layout) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 12, 16)))
+            .frame(egui::Frame::NONE.fill(self.theme().colors(1.0).background))
             .show(ctx, |ui| {
                 let painter = ui.painter();
+                let full = ctx.screen_rect();
+                let portrait = full.height() > full.width();
+                if let Some(bg) = self.skin_textures.get(&SkinImage::Background { portrait }) {
+                    painter.image(
+                        bg.id(),
+                        full,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
                 if let Some(tex) = &self.texture {
                     painter.image(
                         tex.id(),
@@ -700,11 +840,20 @@ impl CrabBoyApp {
                         Color32::WHITE,
                     );
                 }
-                if !gamepad::recently_used() {
-                    touch::paint(painter, layout, self.touch.held(), self.fast_forward);
+                let colors = self.theme().colors(self.skin.opacity);
+                let textures = &self.skin_textures;
+                let images = |c: Control, pressed: bool| textures.get(&SkinImage::Control(c, pressed)).map(|t| t.id());
+                let look = touch::Look { colors, images: &images };
+                let show_controls = match self.skin.visibility {
+                    skin::Visibility::Always => true,
+                    skin::Visibility::Auto => !gamepad::recently_used(),
+                    skin::Visibility::MenuOnly => false,
+                } || self.layout_editor.is_some();
+                if show_controls {
+                    touch::paint(painter, layout, self.touch.held(), self.fast_forward, &look);
                 }
                 // The menu button stays visible even when a controller hides the rest.
-                touch::paint_menu_button(painter, layout);
+                touch::paint_menu_button(painter, layout, &look);
             });
 
         if self.menu_open {
@@ -804,6 +953,10 @@ impl CrabBoyApp {
                         }
                         if ui.button(self.orientation.label()).clicked() {
                             self.cycle_orientation();
+                        }
+                        if ui.button("Skin & controls...").clicked() {
+                            self.refresh_skins();
+                            self.skin_menu = true;
                         }
                         if ui.button("Accessibility...").clicked() {
                             self.accessibility_menu = true;
@@ -920,6 +1073,215 @@ impl CrabBoyApp {
         }
         if close {
             self.autosave_menu = false;
+        }
+    }
+
+    fn skin_ui(&mut self, ctx: &egui::Context) {
+        let mut close = false;
+        let mut changed = false;
+        let mut edit = false;
+        let mut remove: Option<String> = None;
+        let custom: Vec<(String, String)> =
+            self.installed_skins.iter().map(|s| (s.id.clone(), s.display_name().to_string())).collect();
+        egui::Window::new("Skin")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(290.0);
+                let max_h = (ctx.screen_rect().height() - 32.0).max(120.0);
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                    ui.vertical_centered_justified(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Skin & controls").strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Back").clicked() {
+                                    close = true;
+                                }
+                            });
+                        });
+                        ui.separator();
+                        ui.label(RichText::new("Skin").weak());
+                        for b in skin::BUILT_IN.iter() {
+                            let on = self.skin.skin == b.id;
+                            if ui.selectable_label(on, if on { format!("✔ {}", b.name) } else { b.name.to_string() }).clicked() {
+                                self.skin.skin = b.id.to_string();
+                                changed = true;
+                            }
+                        }
+                        for (id, name) in &custom {
+                            let on = &self.skin.skin == id;
+                            ui.horizontal(|ui| {
+                                let label = if on { format!("✔ {name}") } else { name.clone() };
+                                if ui.selectable_label(on, label).clicked() {
+                                    self.skin.skin = id.clone();
+                                    changed = true;
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    remove = Some(id.clone());
+                                }
+                            });
+                        }
+                        if ui.button("Import skin (.zip)...").clicked() {
+                            platform::pick_skin();
+                        }
+                        ui.separator();
+                        // "−  Size 100%  +" steppers across the full width.
+                        let stepper = |ui: &mut egui::Ui, label: String| -> i32 {
+                            let mut step = 0;
+                            ui.columns(3, |c| {
+                                if c[0].add_sized([c[0].available_width(), 44.0], egui::Button::new("−")).clicked() {
+                                    step = -1;
+                                }
+                                c[1].centered_and_justified(|ui| ui.label(label));
+                                if c[2].add_sized([c[2].available_width(), 44.0], egui::Button::new("+")).clicked() {
+                                    step = 1;
+                                }
+                            });
+                            step
+                        };
+                        let step = stepper(ui, format!("Size {:.0}%", self.skin.scale * 100.0));
+                        if step != 0 {
+                            self.skin.scale = (self.skin.scale + 0.1 * step as f32).clamp(skin::MIN_SCALE, skin::MAX_SCALE);
+                            changed = true;
+                        }
+                        let step = stepper(ui, format!("Opacity {:.0}%", self.skin.opacity * 100.0));
+                        if step != 0 {
+                            self.skin.opacity = (self.skin.opacity + 0.1 * step as f32).clamp(skin::MIN_OPACITY, 1.0);
+                            changed = true;
+                        }
+                        if ui.button(self.skin.visibility.label()).clicked() {
+                            self.skin.visibility = self.skin.visibility.next();
+                            changed = true;
+                        }
+                        ui.separator();
+                        if ui.button("Move & resize buttons...").clicked() {
+                            edit = true;
+                        }
+                        if !self.skin.layout.is_empty() && ui.button("Reset button layout").clicked() {
+                            self.skin.layout = Default::default();
+                            changed = true;
+                        }
+                        if ui.button("Back").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if let Some(id) = remove {
+            match skin::uninstall(&self.skins_dir, &id) {
+                Ok(()) => self.toast("Skin removed"),
+                Err(e) => self.toast(format!("Could not remove the skin: {e}")),
+            }
+            if self.skin.skin == id {
+                self.skin.skin = "classic".into();
+            }
+            changed = true;
+        }
+        if changed {
+            self.skin.sanitize();
+            self.store_skin_settings();
+            self.refresh_skins();
+        }
+        if edit {
+            self.skin_menu = false;
+            self.layout_editor = Some(None);
+        }
+        if close {
+            self.skin_menu = false;
+            self.menu_open = true;
+        }
+    }
+
+    /// Drag controls to move them; the bar at the top resizes the selected
+    /// one. Saved per orientation.
+    fn layout_editor_ui(&mut self, ctx: &egui::Context, safe: egui::Rect, hand: touch::Hand, layout: &touch::Layout) {
+        let portrait = safe.height() > safe.width();
+        let Some(mut selected) = self.layout_editor else { return };
+        if hand != touch::Hand::Both {
+            egui::Window::new("One-handed")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_max_width(280.0);
+                    ui.label("One-handed controls are on for this game (Accessibility). Buttons can be moved in the standard layout only.");
+                    if ui.button("OK").clicked() {
+                        self.layout_editor = None;
+                        self.skin_menu = true;
+                    }
+                });
+            return;
+        }
+        let mut changed = false;
+
+        // Drag handling on a full-screen layer under the toolbar.
+        let resp = egui::Area::new(egui::Id::new("layout-editor-drag"))
+            .fixed_pos(safe.min)
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| ui.allocate_rect(egui::Rect::from_min_size(safe.min, safe.size()), egui::Sense::click_and_drag()))
+            .inner;
+        if resp.drag_started() || resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                selected = skin::control_at(layout, p);
+            }
+        }
+        if resp.dragged() {
+            if let Some(c) = selected {
+                skin::drag(self.skin.layout.for_orientation_mut(portrait), c, resp.drag_delta(), safe);
+                changed = true;
+            }
+        }
+        // Highlight every control; the selected one strongly.
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("layout-editor-paint")));
+        for c in Control::ALL {
+            let r = skin::control_rect(layout, c);
+            let (w, col) = if Some(c) == selected { (3.0_f32, Color32::YELLOW) } else { (1.5_f32, Color32::from_white_alpha(120)) };
+            painter.rect_stroke(r, 6.0, egui::Stroke::new(w, col), egui::StrokeKind::Outside);
+        }
+
+        let mut done = false;
+        egui::Area::new(egui::Id::new("layout-editor-bar"))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, safe.top() + 8.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let name = selected.map_or("Tap a button", |c| c.label());
+                        ui.label(RichText::new(name).strong());
+                        ui.add_enabled_ui(selected.is_some(), |ui| {
+                            if ui.button(" − ").clicked() {
+                                skin::resize(self.skin.layout.for_orientation_mut(portrait), selected.unwrap(), 1.0 / 1.1);
+                                changed = true;
+                            }
+                            if ui.button(" + ").clicked() {
+                                skin::resize(self.skin.layout.for_orientation_mut(portrait), selected.unwrap(), 1.1);
+                                changed = true;
+                            }
+                            if ui.button("Reset").clicked() {
+                                self.skin.layout.for_orientation_mut(portrait).remove(&selected.unwrap());
+                                changed = true;
+                            }
+                        });
+                        if ui.button("Done").clicked() {
+                            done = true;
+                        }
+                    });
+                    ui.label(
+                        RichText::new(if portrait { "Portrait layout. Drag to move." } else { "Landscape layout. Drag to move." })
+                            .weak(),
+                    );
+                });
+            });
+        if changed {
+            self.skin.sanitize();
+            self.store_skin_settings();
+        }
+        self.layout_editor = if done { None } else { Some(selected) };
+        if done {
+            self.skin_menu = true;
         }
     }
 
@@ -1057,9 +1419,14 @@ impl eframe::App for CrabBoyApp {
         let back = gamepad::take_back_request() || ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let pad_menu = gamepad::take_menu_request();
         if (back || pad_menu) && self.screen == Screen::Playing {
-            if self.autosave_menu {
-                // Back from the auto-save sheet returns to the menu.
+            if self.layout_editor.is_some() {
+                // Back from the editor returns to the skin sheet.
+                self.layout_editor = None;
+                self.skin_menu = true;
+            } else if self.autosave_menu || self.skin_menu {
+                // Back from a sheet returns to the menu.
                 self.autosave_menu = false;
+                self.skin_menu = false;
                 self.menu_open = true;
             } else {
                 self.menu_open = !self.menu_open;
@@ -1075,8 +1442,9 @@ impl eframe::App for CrabBoyApp {
                     Handedness::LeftHand => touch::Hand::Left,
                     Handedness::RightHand => touch::Hand::Right,
                 };
-                let layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
-                let touch = if self.menu_open || self.accessibility_menu || self.autosave_menu {
+                self.ensure_skin_textures(ctx);
+                let layout = self.control_layout(safe, hand);
+                let touch = if self.menu_open || self.any_sheet_open() {
                     self.touch.clear();
                     Buttons::default()
                 } else {
@@ -1100,8 +1468,16 @@ impl eframe::App for CrabBoyApp {
                 self.upload_frame(ctx);
                 self.upload_time += t.elapsed();
                 // The texture size is known now; recompute for the first frame.
-                let layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
+                let layout = self.control_layout(safe, hand);
                 self.game_ui(ctx, &layout);
+                if self.layout_editor.is_some() {
+                    self.menu_open = false;
+                    self.layout_editor_ui(ctx, safe, hand, &layout);
+                }
+                if self.skin_menu {
+                    self.menu_open = false;
+                    self.skin_ui(ctx);
+                }
                 if self.accessibility_menu {
                     self.menu_open = false;
                     self.accessibility_ui(ctx);
@@ -1137,7 +1513,7 @@ impl eframe::App for CrabBoyApp {
         // plus a slow tick for ROM imports, toasts and screen insets.
         let emulating = self.screen == Screen::Playing
             && self.game.is_some()
-            && !(self.menu_open || self.accessibility_menu || self.autosave_menu);
+            && !(self.menu_open || self.any_sheet_open());
         if emulating {
             ctx.request_repaint();
         } else {

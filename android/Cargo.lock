@@ -454,8 +454,12 @@ dependencies = [
  "crabboy-advance",
  "eframe",
  "egui",
+ "image",
  "jni 0.21.1",
  "log",
+ "miniz_oxide 0.8.9",
+ "serde",
+ "serde_json",
  "winit",
 ]
 

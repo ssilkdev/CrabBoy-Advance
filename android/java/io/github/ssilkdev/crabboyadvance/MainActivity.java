@@ -28,10 +28,14 @@ import java.util.Locale;
  */
 public class MainActivity extends NativeActivity {
     private static final int PICK_ROM = 1001;
+    private static final int PICK_SKIN = 1002;
+    /** Largest skin pack accepted (checked again, more strictly, in Rust). */
+    private static final long MAX_SKIN_BYTES = 16L * 1024 * 1024;
     /** Largest GBA cartridge is 32 MiB (saves are far smaller). */
     private static final long MAX_ROM_BYTES = 32L * 1024 * 1024;
 
     private volatile String importedRom;
+    private volatile String importedSkin;
     private volatile String importError;
     private volatile int[] safeInsets = new int[4];
 
@@ -141,6 +145,25 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    public void pickSkin() {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            try {
+                startActivityForResult(intent, PICK_SKIN);
+            } catch (Exception e) {
+                importError = "No file picker available: " + e.getMessage();
+            }
+        });
+    }
+
+    public String takeImportedSkin() {
+        String r = importedSkin;
+        importedSkin = null;
+        return r;
+    }
+
     public String takeImportedRom() {
         String r = importedRom;
         importedRom = null;
@@ -158,10 +181,17 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_ROM || resultCode != RESULT_OK || data == null || data.getData() == null) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
         final Uri uri = data.getData();
+        if (requestCode == PICK_SKIN) {
+            new Thread(() -> importSkin(uri), "skin-import").start();
+            return;
+        }
+        if (requestCode != PICK_ROM) {
+            return;
+        }
         // Copy off the UI thread: a 32 MiB ROM from cloud storage can be slow.
         new Thread(() -> importRom(uri), "rom-import").start();
     }
@@ -214,6 +244,36 @@ public class MainActivity extends NativeActivity {
             return;
         }
         importedRom = dest.getAbsolutePath();
+    }
+
+    /** Copy a picked skin pack to a temporary file; Rust checks and installs it. */
+    private void importSkin(Uri uri) {
+        String name = queryName(uri);
+        if (name == null) name = "skin.zip";
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".zip")) {
+            importError = "\"" + name + "\" is not a .zip skin";
+            return;
+        }
+        name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        File dest = new File(getCacheDir(), name);
+        long total = 0;
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             OutputStream out = new FileOutputStream(dest)) {
+            if (in == null) throw new java.io.IOException("cannot open file");
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > MAX_SKIN_BYTES) throw new java.io.IOException("file is larger than 16 MB");
+                out.write(buf, 0, n);
+            }
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            dest.delete();
+            importError = "Skin import failed: " + e.getMessage();
+            return;
+        }
+        importedSkin = dest.getAbsolutePath();
     }
 
     private String queryName(Uri uri) {

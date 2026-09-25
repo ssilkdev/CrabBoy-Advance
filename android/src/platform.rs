@@ -77,6 +77,17 @@ fn take_string(method: &str) -> Option<String> {
     .flatten()
 }
 
+/// Open the file picker for a skin pack; the result arrives via
+/// `take_imported_skin`.
+pub fn pick_skin() {
+    with_activity(|env, act| env.call_method(act, "pickSkin", "()V", &[]).map(|_| ()));
+}
+
+/// Path of a skin pack the user just picked (a temporary copy), if any.
+pub fn take_imported_skin() -> Option<String> {
+    take_string("takeImportedSkin")
+}
+
 /// Absolute path of a ROM the user just imported, if any.
 pub fn take_imported_rom() -> Option<String> {
     take_string("takeImportedRom")

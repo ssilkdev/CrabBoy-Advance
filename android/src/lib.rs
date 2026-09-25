@@ -12,6 +12,7 @@
 pub mod autosave_settings;
 pub mod keymap;
 pub mod orientation;
+pub mod skin;
 pub mod touch;
 
 #[cfg(target_os = "android")]
