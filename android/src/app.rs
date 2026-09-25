@@ -168,15 +168,23 @@ impl Core {
         size
     }
 
-    /// Write battery-backed save RAM to disk now.
+    /// Write battery-backed save RAM to disk now and sync to SAF folder.
     fn flush_save(&mut self) {
         match self {
             Core::Gba(g) => {
                 if let Some(cart) = g.mmu.cartridge.as_mut() {
                     cart.save.sync_to_disk();
+                    if let Some(stem) = cart.save.save_path().and_then(|p| p.file_stem()).and_then(|s| s.to_str()) {
+                        platform::sync_save_to_folder(stem);
+                    }
                 }
             }
-            Core::GameBoy(g) => g.mmu.cart.sync_to_disk(),
+            Core::GameBoy(g) => {
+                g.mmu.cart.sync_to_disk();
+                if let Some(stem) = g.mmu.cart.save_path.as_deref().and_then(|p| p.file_stem()).and_then(|s| s.to_str()) {
+                    platform::sync_save_to_folder(stem);
+                }
+            }
         }
     }
 
@@ -314,6 +322,12 @@ struct CrabBoyApp {
     confirm_delete_rom: Option<PathBuf>,
     startup_settings_open: bool,
     menu_opened_at: Option<Instant>,
+    folder_name: Option<String>,
+    folder_dialog_open: bool,
+    was_scanning: bool,
+    haptics_enabled: bool,
+    audio_rumble_enabled: bool,
+    last_bass_rumble: Instant,
 }
 
 impl CrabBoyApp {
@@ -410,6 +424,12 @@ impl CrabBoyApp {
             confirm_delete_rom: None,
             startup_settings_open: false,
             menu_opened_at: None,
+            folder_name: platform::folder_name(),
+            folder_dialog_open: false,
+            was_scanning: false,
+            haptics_enabled: true,
+            audio_rumble_enabled: true,
+            last_bass_rumble: Instant::now() - Duration::from_secs(1),
         };
         app.refresh_skins();
         app.refresh_library();
@@ -580,6 +600,7 @@ impl CrabBoyApp {
             || self.layout_editor.is_some()
             || self.startup_settings_open
             || self.confirm_delete_rom.is_some()
+            || self.folder_dialog_open
     }
 
     fn store_skin_settings(&self) {
@@ -687,11 +708,22 @@ impl CrabBoyApp {
         }
     }
 
-    /// Poll the Java side for a freshly imported ROM or import error.
+    /// Poll the Java side for freshly imported files, scan notices, or errors.
     fn poll_imports(&mut self) {
         if let Some(err) = platform::take_import_error() {
             self.toast(err);
         }
+        if let Some(notice) = platform::take_scan_notice() {
+            self.toast(notice);
+            self.refresh_library();
+            self.folder_name = platform::folder_name();
+        }
+        let scanning = platform::is_scanning();
+        if self.was_scanning && !scanning {
+            self.refresh_library();
+            self.folder_name = platform::folder_name();
+        }
+        self.was_scanning = scanning;
         if let Some(path) = platform::take_imported_skin() {
             self.import_skin(Path::new(&path));
         }
@@ -739,6 +771,46 @@ impl CrabBoyApp {
             game.core.run_frame();
             self.frame_accum -= 1.0;
             self.stats.0 += 1;
+        }
+
+        // M18b: Physical Cartridge Tilt/Gyro & Haptics
+        if let Core::Gba(ref mut gba) = game.core {
+            let is_gyro = gba.mmu.cartridge.as_ref().map(|c| c.sensors.sensor_type == gba_simulator::gba::mmu::sensors::SensorType::GyroTilt).unwrap_or(false);
+            if is_gyro {
+                if !self.tilt_sensor_on {
+                    platform::set_tilt_sensor(true);
+                    self.tilt_sensor_on = true;
+                }
+                if let Some((gravity, rotation)) = platform::tilt() {
+                    let s = tilt::to_screen(gravity, rotation);
+                    let tx = (s[0] / 9.81).clamp(-1.0, 1.0);
+                    let ty = (s[1] / 9.81).clamp(-1.0, 1.0);
+                    if let Some(cart) = gba.mmu.cartridge.as_mut() {
+                        cart.sensors.set_tilt(tx, ty);
+                    }
+                }
+            }
+
+            if self.haptics_enabled {
+                let rumble_active = gba.mmu.cartridge.as_ref().map(|c| c.sensors.rumble_active).unwrap_or(false);
+                if rumble_active {
+                    let strength = gba.mmu.cartridge.as_ref().map(|c| c.sensors.rumble_strength).unwrap_or(0.8);
+                    platform::rumble(50, strength);
+                } else if self.audio_rumble_enabled && self.last_bass_rumble.elapsed() >= Duration::from_millis(80) {
+                    let mut bass_energy = 0.0f32;
+                    let mut lp = 0.0f32;
+                    for &s in &gba.mmu.apu.scope_buffer {
+                        lp += 0.03 * (s - lp);
+                        bass_energy += lp * lp;
+                    }
+                    let bass_rms = (bass_energy / 512.0).sqrt();
+                    if bass_rms > 0.15 {
+                        let intensity = ((bass_rms - 0.15) / 0.35).clamp(0.1, 1.0);
+                        platform::rumble(40, intensity);
+                        self.last_bass_rumble = Instant::now();
+                    }
+                }
+            }
         }
         self.stats.1 += 1;
         if self.stats_since.elapsed() >= Duration::from_secs(5) {
@@ -903,7 +975,7 @@ impl CrabBoyApp {
     }
 
     /// Library toolbar, added right-to-left: Resume (if a game is loaded),
-    /// Settings, Skins, Import.
+    /// Settings, Skins, Import, Folder.
     fn library_toolbar(&mut self, ui: &mut egui::Ui) {
         if self.game.is_some() {
             let resume_btn = egui::Button::new(RichText::new("▶ Resume").strong().color(Color32::from_rgb(80, 255, 170)))
@@ -919,10 +991,27 @@ impl CrabBoyApp {
             self.refresh_skins();
             self.skin_menu = true;
         }
-        let import_btn = egui::Button::new(RichText::new("📥 Import").strong().color(Color32::from_rgb(220, 240, 255)))
+        let import_btn = egui::Button::new(RichText::new("📥 Import").color(Color32::from_rgb(200, 220, 240)))
             .min_size(egui::vec2(0.0, 36.0));
-        if ui.add(import_btn).clicked() {
+        if ui.add(import_btn).on_hover_text("Import single ROM file").clicked() {
             platform::pick_rom();
+        }
+        if let Some(ref folder) = self.folder_name {
+            let scanning = platform::is_scanning();
+            let rescan_text = if scanning { "⏳ Scanning..." } else { "🔄 Rescan" };
+            if ui.add(egui::Button::new(rescan_text).min_size(egui::vec2(0.0, 36.0))).clicked() && !scanning {
+                platform::rescan_folder();
+            }
+            let label = format!("📁 {folder}");
+            if ui.add(egui::Button::new(RichText::new(label).strong().color(Color32::from_rgb(180, 220, 255))).min_size(egui::vec2(0.0, 36.0))).clicked() {
+                self.folder_dialog_open = true;
+            }
+        } else {
+            let folder_btn = egui::Button::new(RichText::new("📁 ROM Folder").strong().color(Color32::from_rgb(255, 215, 120)))
+                .min_size(egui::vec2(0.0, 36.0));
+            if ui.add(folder_btn).on_hover_text("Select ROMs folder (SAF auto-scan)").clicked() {
+                platform::pick_folder();
+            }
         }
     }
 
@@ -1213,32 +1302,42 @@ impl CrabBoyApp {
                 );
                 ui.add_space(16.0);
 
-                let cta_btn = egui::Button::new(
-                    RichText::new("📥  Import Your First ROM")
-                        .size(18.0)
+                let folder_btn = egui::Button::new(
+                    RichText::new("📁  Select ROMs Folder (SAF Auto-Scan)")
+                        .size(17.0)
                         .strong()
-                        .color(Color32::from_rgb(240, 245, 255)),
+                        .color(Color32::from_rgb(255, 255, 255)),
                 )
-                .fill(Color32::from_rgb(58, 80, 160))
-                .min_size(egui::vec2(240.0, 48.0))
+                .fill(Color32::from_rgb(50, 100, 190))
+                .min_size(egui::vec2(280.0, 50.0))
                 .corner_radius(egui::CornerRadius::same(10));
+
+                if ui.add(folder_btn).clicked() {
+                    platform::pick_folder();
+                }
+
+                ui.add_space(8.0);
+
+                let cta_btn = egui::Button::new(
+                    RichText::new("📥  Import Single ROM File")
+                        .size(15.0)
+                        .color(Color32::from_rgb(210, 230, 255)),
+                )
+                .fill(Color32::from_rgb(35, 45, 65))
+                .min_size(egui::vec2(240.0, 40.0))
+                .corner_radius(egui::CornerRadius::same(8));
 
                 if ui.add(cta_btn).clicked() {
                     platform::pick_rom();
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.label(
-                    RichText::new("Tap to pick a .gba, .gbc, or .gb file from your phone storage.")
+                    RichText::new("Select your ROMs folder once; CrabBoy will auto-scan all games and sync battery saves (.sav) automatically.")
                         .size(13.0)
                         .weak(),
                 );
-                ui.label(
-                    RichText::new("Have save files (.sav) from another emulator? Import them the same way.")
-                        .size(12.0)
-                        .weak(),
-                );
-                ui.add_space(24.0);
+                ui.add_space(20.0);
 
                 // Feature Highlights Grid/Cards
                 ui.label(
@@ -1445,6 +1544,20 @@ impl CrabBoyApp {
                             }
 
                             ui.separator();
+                            ui.label(RichText::new("Haptics & Force Feedback").weak());
+                            let haptic_lbl = if self.haptics_enabled { "Haptic Rumble: ON" } else { "Haptic Rumble: off" };
+                            if ui.button(haptic_lbl).clicked() {
+                                self.haptics_enabled = !self.haptics_enabled;
+                                if !self.haptics_enabled {
+                                    platform::stop_rumble();
+                                }
+                            }
+                            let bass_lbl = if self.audio_rumble_enabled { "Audio Bass Haptics: ON" } else { "Audio Bass Haptics: off" };
+                            if ui.button(bass_lbl).clicked() {
+                                self.audio_rumble_enabled = !self.audio_rumble_enabled;
+                            }
+
+                            ui.separator();
                             ui.label(RichText::new("Auto-Save").weak());
                             let on = if self.autosaver.enabled { "Auto-save: ON" } else { "Auto-save: off" };
                             if ui.button(on).clicked() {
@@ -1477,6 +1590,50 @@ impl CrabBoyApp {
             if close {
                 self.startup_settings_open = false;
             }
+        }
+
+        // ROM Library Folder Management Modal
+        if self.folder_dialog_open {
+            egui::Window::new("📁 ROM Library Folder")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        if let Some(ref name) = self.folder_name {
+                            ui.label(RichText::new(format!("Current: {name}")).strong().size(16.0).color(Color32::from_rgb(220, 235, 255)));
+                        } else {
+                            ui.label(RichText::new("No folder linked").strong().size(16.0).color(Color32::from_rgb(220, 235, 255)));
+                        }
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("CrabBoy automatically scans subdirectories for .gba, .gb, .gbc, .nds games and keeps battery saves (.sav) synchronized.").size(12.0).weak());
+                        ui.add_space(12.0);
+
+                        let scanning = platform::is_scanning();
+                        let scan_lbl = if scanning { "⏳ Scanning..." } else { "🔄 Rescan Folder Now" };
+                        if ui.add_enabled(!scanning, egui::Button::new(RichText::new(scan_lbl).strong()).min_size(egui::vec2(220.0, 38.0))).clicked() {
+                            platform::rescan_folder();
+                            self.folder_dialog_open = false;
+                        }
+                        ui.add_space(4.0);
+                        if ui.add(egui::Button::new("📂 Change / Pick New Folder").min_size(egui::vec2(220.0, 36.0))).clicked() {
+                            platform::pick_folder();
+                            self.folder_dialog_open = false;
+                        }
+                        ui.add_space(4.0);
+                        if ui.add(egui::Button::new(RichText::new("🗑 Unlink Folder").color(Color32::from_rgb(255, 110, 110))).min_size(egui::vec2(220.0, 36.0))).clicked() {
+                            platform::clear_folder();
+                            self.folder_name = None;
+                            self.folder_dialog_open = false;
+                        }
+                        ui.add_space(8.0);
+                        if ui.button("Close").clicked() {
+                            self.folder_dialog_open = false;
+                        }
+                    });
+                });
         }
     }
 
@@ -1677,6 +1834,13 @@ impl CrabBoyApp {
                         }
                         if ui.button("Accessibility...").clicked() {
                             self.accessibility_menu = true;
+                        }
+                        let haptic_lbl = if self.haptics_enabled { "Haptic Rumble: ON" } else { "Haptic Rumble: off" };
+                        if ui.button(haptic_lbl).clicked() {
+                            self.haptics_enabled = !self.haptics_enabled;
+                            if !self.haptics_enabled {
+                                platform::stop_rumble();
+                            }
                         }
                         if ui.button("Reset").clicked() {
                             if let Some(p) = self.game.as_ref().map(|g| g.rom_path.clone()) {
@@ -2341,7 +2505,7 @@ impl eframe::App for CrabBoyApp {
 fn is_rom(p: &Path) -> bool {
     matches!(
         p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
-        Some("gba" | "gb" | "gbc")
+        Some("gba" | "gb" | "gbc" | "nds")
     )
 }
 
@@ -2353,6 +2517,7 @@ fn console_tag(p: &Path) -> &'static str {
     match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("gba") => "GBA",
         Some("gbc") => "GBC",
+        Some("nds") => "NDS",
         _ => "GB",
     }
 }
