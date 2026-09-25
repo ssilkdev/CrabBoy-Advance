@@ -16,24 +16,12 @@ pub mod skin;
 pub mod tilt;
 pub mod touch;
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 mod app;
 #[cfg(target_os = "android")]
 mod gamepad;
 #[cfg(target_os = "android")]
 mod platform;
-
-/// iOS stand-ins for the Android-only modules: `platform` talks to UIKit
-/// through objc2, and there is no controller hook (yet).
-#[cfg(target_os = "ios")]
-#[path = "platform_ios.rs"]
-mod platform;
-#[cfg(target_os = "ios")]
-#[path = "gamepad_ios.rs"]
-mod gamepad;
-
-#[cfg(target_os = "ios")]
-pub use app::ios_main;
 
 /// The egui_glow patch (see Cargo.toml) must keep asking for highp floats:
 /// with mediump, phone GPUs draw a thin line beside letters.

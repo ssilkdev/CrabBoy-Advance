@@ -19,7 +19,6 @@ use gba_simulator::gba::ppu::hd_mode7::{HdMode7Config, HdScale};
 use gba_simulator::gba::shader::{apply_shader, ShaderPreset};
 use gba_simulator::gba::Gba;
 use gba_simulator::nds::Nds;
-#[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
 use touch::{Buttons, TouchPad};
@@ -33,7 +32,6 @@ const IDLE_TICK: Duration = Duration::from_millis(500);
 const FAST_FORWARD_SPEED: u32 = 3;
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/icon_256.png");
 
-#[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
@@ -71,30 +69,6 @@ fn android_main(app: AndroidApp) {
         Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, files_dir)))),
     ) {
         log::error!("eframe exited with error: {e}");
-    }
-}
-
-/// iOS / iPadOS entry point (called from the `crabboy-ios` binary's `main`).
-/// App data (ROMs, saves, settings) lives in the app's `Documents` folder,
-/// which the Files app shows under "On My iPad › CrabBoy Advance".
-#[cfg(target_os = "ios")]
-pub fn ios_main() {
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("CrabBoy panic: {info}\n{}", std::backtrace::Backtrace::force_capture());
-    }));
-    gamepad::install();
-    let files_dir = std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join("Documents"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/crabboy"));
-    platform::init(&files_dir);
-
-    let options = eframe::NativeOptions { vsync: true, ..Default::default() };
-    if let Err(e) = eframe::run_native(
-        "CrabBoy Advance",
-        options,
-        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, files_dir)))),
-    ) {
-        eprintln!("eframe exited with error: {e}");
     }
 }
 
@@ -739,10 +713,7 @@ impl CrabBoyApp {
         }
         if let Some(path) = platform::take_imported_rom() {
             self.refresh_library();
-            // iOS reports a multi-file import as "" (refresh, don't start).
-            if !path.is_empty() {
-                self.start_game(PathBuf::from(path));
-            }
+            self.start_game(PathBuf::from(path));
         }
     }
 
@@ -2433,16 +2404,7 @@ impl eframe::App for CrabBoyApp {
         }
     }
 
-    #[cfg(target_os = "android")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(g) = self.game.as_mut() {
-            g.core.flush_save();
-        }
-    }
-
-    /// The iOS build renders with wgpu, whose `on_exit` takes no GL context.
-    #[cfg(target_os = "ios")]
-    fn on_exit(&mut self) {
         if let Some(g) = self.game.as_mut() {
             g.core.flush_save();
         }
