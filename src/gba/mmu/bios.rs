@@ -383,6 +383,120 @@ pub fn execute_hle_swi(swi_number: u8, cpu: &mut Arm7Tdmi, read_mem8: &impl Fn(u
             cpu.regs[1] = dst;
             cpu.regs[3] = 0;
         }
+        0x13 => {
+            // HuffUnCompReadNormal (GBATEK "BIOS Decompression Functions").
+            //
+            // Header: bits 0-3 = data size (4 or 8), bits 4-7 = 2 (Huffman),
+            // bits 8-31 = decompressed size. Then the tree: one byte
+            // `tree_size` (table length / 2 - 1), the root node, and the
+            // rest of the node table; the bitstream starts right after the
+            // table, word aligned, read as 32-bit little-endian words, most
+            // significant bit first. Node byte: bits 0-5 = offset to the
+            // children (at (node_addr & !1) + offset * 2 + 2, left then
+            // right), bit 7 = left child is data, bit 6 = right child is
+            // data. Output is written in 32-bit units (4-bit data packs low
+            // nibble first).
+            let src = cpu.regs[0];
+            let mut dst = cpu.regs[1];
+            let read32 = |a: u32| {
+                (read_mem8(a) as u32)
+                    | ((read_mem8(a.wrapping_add(1)) as u32) << 8)
+                    | ((read_mem8(a.wrapping_add(2)) as u32) << 16)
+                    | ((read_mem8(a.wrapping_add(3)) as u32) << 24)
+            };
+            let header = read32(src);
+            let bits = header & 0xF;
+            let decomp_len = (header >> 8) as usize;
+            if (bits == 4 || bits == 8) && decomp_len > 0 {
+                let tree_size = read_mem8(src.wrapping_add(4)) as u32;
+                let root = src.wrapping_add(5);
+                let mut stream = src.wrapping_add(4).wrapping_add((tree_size + 1) * 2);
+                let mut out_word = 0u32;
+                let mut out_bits = 0u32;
+                let mut written = 0usize;
+                let mut node = root;
+                'outer: while written < decomp_len {
+                    let word = read32(stream);
+                    stream = stream.wrapping_add(4);
+                    for i in (0..32).rev() {
+                        let n = read_mem8(node);
+                        let child = (node & !1).wrapping_add(((n & 0x3F) as u32) * 2 + 2);
+                        let right = (word >> i) & 1 != 0;
+                        let (addr, is_data) =
+                            if right { (child.wrapping_add(1), n & 0x40 != 0) } else { (child, n & 0x80 != 0) };
+                        if is_data {
+                            let value = read_mem8(addr) as u32 & ((1 << bits) - 1);
+                            out_word |= value << out_bits;
+                            out_bits += bits;
+                            if out_bits == 32 {
+                                write_mem32(dst, out_word);
+                                dst = dst.wrapping_add(4);
+                                written += 4;
+                                out_word = 0;
+                                out_bits = 0;
+                                if written >= decomp_len {
+                                    break 'outer;
+                                }
+                            }
+                            node = root;
+                        } else {
+                            node = addr;
+                        }
+                    }
+                }
+                cpu.regs[0] = stream;
+                cpu.regs[1] = dst;
+            } else {
+                log::warn!("HuffUnComp: bad header {header:#010x} at {src:#010x}");
+            }
+        }
+        0x16 | 0x17 | 0x18 => {
+            // Diff8bitUnFilterWram (0x16) / Diff8bitUnFilterVram (0x17) /
+            // Diff16bitUnFilter (0x18): header like the decompressors (bits
+            // 8-31 = size), then the first unit followed by deltas; each
+            // output unit is the running sum. 8-bit VRAM output is written
+            // in halfwords (VRAM can't take byte writes).
+            let mut src = cpu.regs[0];
+            let mut dst = cpu.regs[1];
+            let header = (read_mem8(src) as u32)
+                | ((read_mem8(src.wrapping_add(1)) as u32) << 8)
+                | ((read_mem8(src.wrapping_add(2)) as u32) << 16)
+                | ((read_mem8(src.wrapping_add(3)) as u32) << 24);
+            src = src.wrapping_add(4);
+            let len = (header >> 8) as usize;
+            if swi_number == 0x18 {
+                let mut acc = 0u16;
+                for _ in 0..len / 2 {
+                    let d = read_mem8(src) as u16 | (read_mem8(src.wrapping_add(1)) as u16) << 8;
+                    src = src.wrapping_add(2);
+                    acc = acc.wrapping_add(d);
+                    write_mem16(dst, acc);
+                    dst = dst.wrapping_add(2);
+                }
+            } else {
+                let mut acc = 0u8;
+                let mut out = Vec::with_capacity(len);
+                for _ in 0..len {
+                    acc = acc.wrapping_add(read_mem8(src));
+                    src = src.wrapping_add(1);
+                    out.push(acc);
+                }
+                if swi_number == 0x16 {
+                    for b in out {
+                        write_mem8(dst, b);
+                        dst = dst.wrapping_add(1);
+                    }
+                } else {
+                    for pair in out.chunks(2) {
+                        let v = pair[0] as u16 | (*pair.get(1).unwrap_or(&0) as u16) << 8;
+                        write_mem16(dst, v);
+                        dst = dst.wrapping_add(2);
+                    }
+                }
+            }
+            cpu.regs[0] = src;
+            cpu.regs[1] = dst;
+        }
         0x14 | 0x15 => {
             // RLUnCompWram / RLUnCompVram
             let mut src = cpu.regs[0];
@@ -447,4 +561,199 @@ pub fn execute_hle_swi(swi_number: u8, cpu: &mut Arm7Tdmi, read_mem8: &impl Fn(u
         }
     }
     None
+}
+
+#[cfg(test)]
+mod decompression_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// Run one HLE SWI against a flat memory map (address -> byte).
+    fn run(swi: u8, mem: &mut BTreeMap<u32, u8>, r0: u32, r1: u32) -> Arm7Tdmi {
+        let mut cpu = Arm7Tdmi::new();
+        cpu.regs[0] = r0;
+        cpu.regs[1] = r1;
+        let snapshot = mem.clone();
+        let out = RefCell::new(BTreeMap::new());
+        let read = |a: u32| *snapshot.get(&a).unwrap_or(&0);
+        let mut w8 = |a: u32, v: u8| {
+            out.borrow_mut().insert(a, v);
+        };
+        let mut w16 = |a: u32, v: u16| {
+            let mut o = out.borrow_mut();
+            o.insert(a, v as u8);
+            o.insert(a + 1, (v >> 8) as u8);
+        };
+        let mut w32 = |a: u32, v: u32| {
+            let mut o = out.borrow_mut();
+            for i in 0..4 {
+                o.insert(a + i, (v >> (8 * i)) as u8);
+            }
+        };
+        execute_hle_swi(swi, &mut cpu, &read, &mut w8, &mut w16, &mut w32);
+        mem.extend(out.into_inner());
+        cpu
+    }
+
+    fn load(mem: &mut BTreeMap<u32, u8>, at: u32, data: &[u8]) {
+        for (i, b) in data.iter().enumerate() {
+            mem.insert(at + i as u32, *b);
+        }
+    }
+
+    fn read_out(mem: &BTreeMap<u32, u8>, at: u32, n: usize) -> Vec<u8> {
+        (0..n as u32).map(|i| *mem.get(&(at + i)).unwrap_or(&0)).collect()
+    }
+
+    /// Minimal Huffman encoder producing the GBA BIOS format, used to check
+    /// the decoder round-trips. Builds a canonical-ish tree and lays nodes
+    /// out breadth-first so child offsets stay within 6 bits for small
+    /// alphabets.
+    fn huff_encode(data: &[u8], bits: u32) -> Vec<u8> {
+        #[derive(Clone)]
+        enum T {
+            Leaf(u8),
+            Node(Box<T>, Box<T>),
+        }
+        let syms: Vec<u8> = if bits == 8 {
+            data.to_vec()
+        } else {
+            data.iter().flat_map(|b| [b & 0xF, b >> 4]).collect()
+        };
+        let mut freq = BTreeMap::new();
+        for &s in &syms {
+            *freq.entry(s).or_insert(0usize) += 1;
+        }
+        let mut heap: Vec<(usize, T)> = freq.iter().map(|(&s, &f)| (f, T::Leaf(s))).collect();
+        if heap.len() == 1 {
+            let only = heap[0].1.clone();
+            heap.push((0, only));
+        }
+        while heap.len() > 1 {
+            heap.sort_by(|a, b| b.0.cmp(&a.0));
+            let (fa, a) = heap.pop().unwrap();
+            let (fb, b) = heap.pop().unwrap();
+            heap.push((fa + fb, T::Node(Box::new(a), Box::new(b))));
+        }
+        let root = heap.pop().unwrap().1;
+        // Codes.
+        fn codes(t: &T, prefix: Vec<bool>, out: &mut BTreeMap<u8, Vec<bool>>) {
+            match t {
+                T::Leaf(s) => {
+                    out.entry(*s).or_insert(prefix);
+                }
+                T::Node(l, r) => {
+                    let mut pl = prefix.clone();
+                    pl.push(false);
+                    codes(l, pl, out);
+                    let mut pr = prefix;
+                    pr.push(true);
+                    codes(r, pr, out);
+                }
+            }
+        }
+        let mut code = BTreeMap::new();
+        codes(&root, vec![], &mut code);
+        // Table: slot 0 = root node; children pairs appended breadth-first.
+        let mut table: Vec<u8> = vec![0];
+        let mut queue: std::collections::VecDeque<(usize, T)> = std::collections::VecDeque::new();
+        queue.push_back((0, root));
+        while let Some((slot, t)) = queue.pop_front() {
+            if let T::Node(l, r) = t {
+                let child = table.len();
+                // Child pair index must be (slot & !1) + off*2 + 2, relative
+                // to table positions offset by 1 (root sits at src+5, odd).
+                let base = ((slot + 1) & !1) + 2; // in table-byte units, +1 for the size byte
+                let off = (child + 1 - base) / 2;
+                assert!(off < 64 && (child + 1 - base) % 2 == 0, "tree too wide for the test encoder");
+                let mut flags = off as u8;
+                table.push(0);
+                table.push(0);
+                for (i, c) in [(0usize, &*l), (1, &*r)] {
+                    match c {
+                        T::Leaf(s) => {
+                            table[child + i] = *s;
+                            flags |= if i == 0 { 0x80 } else { 0x40 };
+                        }
+                        T::Node(..) => queue.push_back((child + i, c.clone())),
+                    }
+                }
+                table[slot] = flags;
+            }
+        }
+        // tree_size byte: table length (incl. this byte) / 2 - 1, table padded
+        // so the stream is word aligned (header 4 + size byte + table).
+        while (1 + table.len()) % 4 != 0 {
+            table.push(0);
+        }
+        let tree_size = ((1 + table.len()) / 2 - 1) as u8;
+        let mut out = Vec::new();
+        out.extend_from_slice(&((data.len() as u32) << 8 | 0x20 | bits).to_le_bytes());
+        out.push(tree_size);
+        out.extend_from_slice(&table);
+        // Bitstream: 32-bit words, MSB first.
+        let mut word = 0u32;
+        let mut n = 0;
+        for s in syms {
+            for &b in &code[&s] {
+                word = (word << 1) | b as u32;
+                n += 1;
+                if n == 32 {
+                    out.extend_from_slice(&word.to_le_bytes());
+                    word = 0;
+                    n = 0;
+                }
+            }
+        }
+        if n > 0 {
+            word <<= 32 - n;
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn huffman_8bit_and_4bit_round_trip() {
+        let mut data = Vec::new();
+        for i in 0..512u32 {
+            data.push(b"synthwave!"[(i as usize * 7 + i as usize / 13) % 10]);
+        }
+        for bits in [8u32, 4] {
+            let enc = huff_encode(&data, bits);
+            let mut mem = BTreeMap::new();
+            load(&mut mem, 0x0800_0000, &enc);
+            let cpu = run(0x13, &mut mem, 0x0800_0000, 0x0200_0000);
+            assert_eq!(read_out(&mem, 0x0200_0000, data.len()), data, "{bits}-bit");
+            assert_eq!(cpu.regs[1], 0x0200_0000 + data.len() as u32);
+        }
+    }
+
+    #[test]
+    fn huffman_single_symbol() {
+        let data = vec![0xAB; 64];
+        let enc = huff_encode(&data, 8);
+        let mut mem = BTreeMap::new();
+        load(&mut mem, 0x0800_0000, &enc);
+        run(0x13, &mut mem, 0x0800_0000, 0x0200_0000);
+        assert_eq!(read_out(&mem, 0x0200_0000, 64), data);
+    }
+
+    #[test]
+    fn diff_unfilters() {
+        // 8-bit: [5, +1, +1, -2 (0xFE)] -> 5 6 7 5
+        let mut mem = BTreeMap::new();
+        load(&mut mem, 0x0800_0000, &[0x81, 4, 0, 0, 5, 1, 1, 0xFE]);
+        run(0x16, &mut mem, 0x0800_0000, 0x0200_0000);
+        assert_eq!(read_out(&mem, 0x0200_0000, 4), [5, 6, 7, 5]);
+        let mut mem = BTreeMap::new();
+        load(&mut mem, 0x0800_0000, &[0x81, 4, 0, 0, 5, 1, 1, 0xFE]);
+        run(0x17, &mut mem, 0x0800_0000, 0x0600_0000);
+        assert_eq!(read_out(&mem, 0x0600_0000, 4), [5, 6, 7, 5]);
+        // 16-bit: [0x1000, +0x0010, -0x0020] -> 0x1000 0x1010 0x0FF0
+        let mut mem = BTreeMap::new();
+        load(&mut mem, 0x0800_0000, &[0x82, 6, 0, 0, 0x00, 0x10, 0x10, 0x00, 0xE0, 0xFF]);
+        run(0x18, &mut mem, 0x0800_0000, 0x0200_0000);
+        assert_eq!(read_out(&mem, 0x0200_0000, 6), [0x00, 0x10, 0x10, 0x10, 0xF0, 0x0F]);
+    }
 }
