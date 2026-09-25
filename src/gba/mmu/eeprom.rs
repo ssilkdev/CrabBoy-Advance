@@ -187,7 +187,7 @@ impl Eeprom {
             return;
         }
         if let Some(ref path) = self.save_path {
-            if let Ok(()) = fs::write(path, &self.data[..]) {
+            if let Ok(()) = crate::fs_util::write_atomic(path, &self.data[..]) {
                 self.dirty = false;
                 log::info!("Flushed EEPROM save data to {:?}", path);
             }

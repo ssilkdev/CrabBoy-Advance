@@ -26,9 +26,36 @@ pub struct IoEvent {
 
 pub const FLIGHT_RECORDER_CAPACITY: usize = 512;
 
+/// What the ring buffer holds: plain data, so recording never allocates
+/// (it runs on every IO write). The register name is looked up when the
+/// events are read out.
+#[derive(Clone, Copy, Debug)]
+struct Recorded {
+    cycle: u64,
+    pc: u32,
+    addr: u32,
+    val: u32,
+    size: u8,
+    is_write: bool,
+}
+
+impl Recorded {
+    fn to_event(self) -> IoEvent {
+        IoEvent {
+            cycle: self.cycle,
+            pc: self.pc,
+            addr: self.addr,
+            val: self.val,
+            size: self.size,
+            is_write: self.is_write,
+            reg_name: get_io_register_name(self.addr).to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FlightRecorder {
-    buffer: Vec<Option<IoEvent>>,
+    buffer: Vec<Option<Recorded>>,
     head: usize,
     pub total_events: u64,
     pub enabled: bool,
@@ -55,16 +82,7 @@ impl FlightRecorder {
             return;
         }
 
-        let reg_name = get_io_register_name(addr & 0x3FF).to_string();
-        let event = IoEvent {
-            cycle,
-            pc,
-            addr: addr & 0x3FF,
-            val,
-            size,
-            is_write,
-            reg_name,
-        };
+        let event = Recorded { cycle, pc, addr: addr & 0x3FF, val, size, is_write };
 
         self.buffer[self.head] = Some(event);
         self.head = (self.head + 1) % FLIGHT_RECORDER_CAPACITY;
@@ -85,8 +103,8 @@ impl FlightRecorder {
 
         for i in 0..count {
             let idx = (start_pos + i) % FLIGHT_RECORDER_CAPACITY;
-            if let Some(ref ev) = self.buffer[idx] {
-                result.push(ev.clone());
+            if let Some(ev) = self.buffer[idx] {
+                result.push(ev.to_event());
             }
         }
 

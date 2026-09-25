@@ -503,6 +503,7 @@ impl Gba {
 
         // Flush frame audio samples and feed diagnostic linter
         self.mmu.apu.flush_samples();
+        self.mmu.apu.audio_output.recover_lost_device();
         if !self.mmu.apu.pending_diagnostic_samples.is_empty() {
             self.diagnostics.process_audio_samples(&self.mmu.apu.pending_diagnostic_samples);
             self.mmu.apu.pending_diagnostic_samples.clear();
@@ -692,7 +693,24 @@ impl Gba {
         w.buf
     }
 
+    /// Restore a state from `save_state`. On `false` (too short, corrupt, or
+    /// malformed) the machine is left exactly as it was: loading writes RAM
+    /// and registers before it reaches the later sections, so a failure
+    /// part-way would otherwise leave a running game with a mix of both.
     pub fn load_state(&mut self, data: &[u8]) -> bool {
+        let backup = self.save_state();
+        let (pipe_valid, irq_assert_time) = (self.cpu.pipe_valid, self.mmu.irq_assert_time);
+        if self.load_state_unchecked(data) {
+            return true;
+        }
+        let restored = self.load_state_unchecked(&backup);
+        debug_assert!(restored, "a state this core just saved must load");
+        self.cpu.pipe_valid = pipe_valid;
+        self.mmu.irq_assert_time = irq_assert_time;
+        false
+    }
+
+    fn load_state_unchecked(&mut self, data: &[u8]) -> bool {
         // The prefetch pipeline isn't part of the state format; refill it
         // from memory after loading.
         self.cpu.pipe_valid = false;
@@ -783,7 +801,13 @@ impl Gba {
         {
             offset += STATE_V2_MAGIC.len();
 
-            let need = 1 + 2 + 2 + 2 + 4 * 21 + 4 * 16;
+            // IME, IE, IF, WAITCNT; 4 DMA channels (sad, dad, count,
+            // cnt_h, internal sad/dad/count, enabled); 4 timers (reload,
+            // counter, cnt_h, enabled, prescaler, accumulator, cascade,
+            // irq_enable).
+            const DMA_CHANNEL: usize = 4 + 4 + 2 + 2 + 4 + 4 + 4 + 1;
+            const TIMER: usize = 2 + 2 + 2 + 1 + 4 + 4 + 1 + 1;
+            let need = 1 + 2 + 2 + 2 + 4 * DMA_CHANNEL + 4 * TIMER;
             if data.len() < offset + need {
                 return false;
             }

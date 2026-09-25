@@ -38,6 +38,18 @@ fn android_main(app: AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("CrabBoy"),
     );
+    // Android discards stderr, so a panic's message would be lost; release
+    // builds abort right after the hook, making this the only trace.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        log::error!("panic{location}: {message}\n{}", std::backtrace::Backtrace::force_capture());
+    }));
     gamepad::install();
     platform::init(&app);
 
@@ -79,6 +91,10 @@ impl Core {
             "gba" => {
                 let mut gba = Box::new(Gba::new());
                 gba.load_rom(path).map_err(|e| e.to_string())?;
+                // Nothing on Android reads the diagnostic report or the IO
+                // flight recorder; don't pay for them every frame.
+                gba.diagnostics.enabled = false;
+                gba.mmu.flight_recorder.enabled = false;
                 Ok(Core::Gba(gba))
             }
             other => Err(format!("Unsupported file type '.{other}'")),
@@ -131,13 +147,18 @@ impl Core {
         }
     }
 
-    /// Screen size and RGBA pixels (the cores store 0xAABBGGRR, i.e. RGBA
-    /// bytes in little-endian order).
-    fn frame_rgba(&self, out: &mut Vec<u8>) -> [usize; 2] {
-        let (fb, size): (&[u32], [usize; 2]) = match self {
+    /// The displayed frame (0xAABBGGRR words, i.e. RGBA bytes in
+    /// little-endian order) and its size.
+    fn framebuffer(&self) -> (&[u32], [usize; 2]) {
+        match self {
             Core::Gba(g) => (&g.get_framebuffer()[..], [240, 160]),
             Core::GameBoy(g) => (&g.get_framebuffer()[..], [160, 144]),
-        };
+        }
+    }
+
+    /// Screen size and RGBA pixels.
+    fn frame_rgba(&self, out: &mut Vec<u8>) -> [usize; 2] {
+        let (fb, size) = self.framebuffer();
         out.clear();
         out.reserve(fb.len() * 4);
         for &px in fb {
@@ -184,10 +205,7 @@ impl Core {
     /// Cheap fingerprint of the displayed frame, to skip re-uploading a
     /// picture that hasn't changed (menus, text boxes, pauses in-game).
     fn frame_fingerprint(&self) -> u64 {
-        let fb: &[u32] = match self {
-            Core::Gba(g) => &g.get_framebuffer()[..],
-            Core::GameBoy(g) => &g.get_framebuffer()[..],
-        };
+        let (fb, _) = self.framebuffer();
         // FNV-1a over 64-bit words: ~20 µs for a GBA frame.
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         for w in fb.chunks_exact(2) {
@@ -245,6 +263,8 @@ struct CrabBoyApp {
     stats: (u32, u32),
     stats_since: Instant,
     frame_blender: FrameBlender,
+    /// The last frame skipped the blender (see `upload_frame`).
+    blender_bypassed: bool,
     blend_mode: FrameBlendMode,
     shader_preset: ShaderPreset,
     hd_mode7: HdMode7Config,
@@ -356,6 +376,7 @@ impl CrabBoyApp {
             stats: (0, 0),
             stats_since: Instant::now(),
             frame_blender: FrameBlender::new(),
+            blender_bypassed: false,
             blend_mode: FrameBlendMode::Off,
             shader_preset: ShaderPreset::Crisp,
             hd_mode7: HdMode7Config::default(),
@@ -417,7 +438,7 @@ impl CrabBoyApp {
     fn cycle_orientation(&mut self) {
         self.orientation = self.orientation.next();
         platform::set_orientation(self.orientation.activity_info());
-        if let Err(e) = std::fs::write(&self.orientation_path, self.orientation.as_str()) {
+        if let Err(e) = gba_simulator::fs_util::write_atomic(&self.orientation_path, self.orientation.as_str()) {
             log::warn!("Could not save rotation setting: {e}");
         }
     }
@@ -428,7 +449,7 @@ impl CrabBoyApp {
         // without `commit` reporting it.
         self.accessibility.commit();
         {
-            if let Err(e) = std::fs::write(&self.accessibility_path, self.accessibility.store.to_json()) {
+            if let Err(e) = gba_simulator::fs_util::write_atomic(&self.accessibility_path, self.accessibility.store.to_json()) {
                 log::warn!("Could not save accessibility settings: {e}");
             }
         }
@@ -482,7 +503,7 @@ impl CrabBoyApp {
     fn save_state(&mut self) {
         self.load_confirm = None;
         let (Some(path), Some(g)) = (self.state_path(), self.game.as_ref()) else { return };
-        match std::fs::write(&path, g.core.save_state()) {
+        match gba_simulator::fs_util::write_atomic(&path, g.core.save_state()) {
             Ok(()) => self.toast("State saved"),
             Err(e) => self.toast(format!("Save state failed: {e}")),
         }
@@ -546,7 +567,7 @@ impl CrabBoyApp {
 
     fn store_autosave_settings(&self) {
         let body = crate::autosave_settings::format(self.autosaver.enabled, self.autosaver.interval_minutes());
-        if let Err(e) = std::fs::write(&self.autosave_path, body) {
+        if let Err(e) = gba_simulator::fs_util::write_atomic(&self.autosave_path, body) {
             log::warn!("Could not save auto-save settings: {e}");
         }
     }
@@ -562,7 +583,7 @@ impl CrabBoyApp {
     }
 
     fn store_skin_settings(&self) {
-        if let Err(e) = std::fs::write(&self.skin_path, self.skin.to_json()) {
+        if let Err(e) = gba_simulator::fs_util::write_atomic(&self.skin_path, self.skin.to_json()) {
             log::warn!("Could not save skin settings: {e}");
         }
     }
@@ -746,9 +767,18 @@ impl CrabBoyApp {
             && self.hd_mode7.scale == HdScale::Off
             && !matches!(&game.core, Core::Gba(g) if g.is_hd_pack_enabled());
         let settings = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&format!("{:?}{:?}", self.shader_preset, self.accessibility.active), &mut h);
-            std::hash::Hasher::finish(&h)
+            // Hash the settings' Debug text without building a String
+            // (this runs every UI frame).
+            struct HashWriter(std::collections::hash_map::DefaultHasher);
+            impl std::fmt::Write for HashWriter {
+                fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                    std::hash::Hasher::write(&mut self.0, s.as_bytes());
+                    Ok(())
+                }
+            }
+            let mut w = HashWriter(Default::default());
+            let _ = std::fmt::Write::write_fmt(&mut w, format_args!("{:?}{:?}", self.shader_preset, self.accessibility.active));
+            std::hash::Hasher::finish(&w.0)
         };
         let key = (game.core.frame_fingerprint(), settings);
         if static_pipeline && self.texture.is_some() && self.uploaded == Some(key) {
@@ -794,6 +824,37 @@ impl CrabBoyApp {
                 }
             }
         }
+
+        // Nothing to change about the pixels (no blending, a pass-through
+        // shader, no colour filter): one pass from the core's framebuffer
+        // straight into the texture image, instead of converting to bytes,
+        // back to words, through the blender and shader and back again.
+        let plain = self.blend_mode == FrameBlendMode::Off
+            && self.shader_preset.is_passthrough()
+            && self.accessibility.active.colorblind_mode == ColorblindMode::None;
+        if plain {
+            if !self.blender_bypassed {
+                // Blending turned back on later must not blend with frames
+                // from before it was bypassed.
+                self.frame_blender.reset();
+                self.blender_bypassed = true;
+            }
+            let (fb, size) = game.core.framebuffer();
+            let pixels = fb
+                .iter()
+                .map(|&px| {
+                    let [r, g, b, _] = px.to_le_bytes();
+                    Color32::from_rgb(r, g, b)
+                })
+                .collect();
+            let image = ColorImage { size, pixels };
+            match self.texture.as_mut() {
+                Some(t) if t.size() == size => t.set(image, TextureOptions::NEAREST),
+                _ => self.texture = Some(ctx.load_texture("screen", image, TextureOptions::NEAREST)),
+            }
+            return;
+        }
+        self.blender_bypassed = false;
 
         let size = game.core.frame_rgba(&mut self.rgba);
         if size != [240, 160] && self.accessibility.active.colorblind_mode != ColorblindMode::None {

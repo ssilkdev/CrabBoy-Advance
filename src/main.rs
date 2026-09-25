@@ -4,6 +4,7 @@
 pub mod autosave;
 pub mod dmg;
 pub mod frame_pacing;
+pub mod fs_util;
 pub mod gba;
 pub mod ui;
 
