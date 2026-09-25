@@ -463,9 +463,12 @@ impl Gba {
         {
             if let Some(ref cart) = self.mmu.cartridge {
                 self.m4a.sync_from_wram(&self.mmu.ewram[..], &self.mmu.iwram[..], &cart.rom);
-                while self.mmu.apu.hd_sample_stream.len() < 1024 {
-                    let s = self.m4a.render_sample(&cart.rom);
-                    self.mmu.apu.hd_sample_stream.push_back(s);
+                let has_hd = self.m4a.is_playing || self.m4a.sampler.voices.iter().any(|v| v.is_active);
+                if has_hd {
+                    while self.mmu.apu.hd_sample_stream.len() < 1024 {
+                        let s = self.m4a.render_sample(&cart.rom);
+                        self.mmu.apu.hd_sample_stream.push_back(s);
+                    }
                 }
             }
         }
@@ -927,7 +930,11 @@ impl Gba {
     /// Play an M4A song by ID from the game's song table via the standalone HD sequencer
     pub fn play_m4a_song(&mut self, song_id: u16) -> bool {
         if let Some(ref cart) = self.mmu.cartridge {
-            self.m4a.play_song(&cart.rom, song_id)
+            let res = self.m4a.play_song(&cart.rom, song_id);
+            if res {
+                self.mmu.apu.set_hd_audio_mode(m4a::AudioEngineMode::HdReSynthesis);
+            }
+            res
         } else {
             false
         }
@@ -936,6 +943,8 @@ impl Gba {
     /// Stop standalone HD sequencer playback
     pub fn stop_m4a_song(&mut self) {
         self.m4a.stop();
+        self.mmu.apu.hd_sample_stream.clear();
+        self.mmu.apu.set_hd_audio_mode(m4a::AudioEngineMode::HardwareOnly);
     }
 
     /// Export an M4A song as Standard MIDI File Type 1 (.mid)

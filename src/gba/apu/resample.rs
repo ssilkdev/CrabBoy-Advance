@@ -45,8 +45,12 @@ impl Resampler {
     /// ROADMAP M10).
     pub fn process_at_speed(&mut self, input: &[f32], fill: usize, low: usize, high: usize, speed: f32) -> Vec<f32> {
         let speed = (speed as f64).clamp(0.05, 1.0);
-        let adjust = if fill > high {
+        let adjust = if fill > high + high / 2 {
+            1.015
+        } else if fill > high {
             1.005
+        } else if fill < low / 2 {
+            0.985
         } else if fill < low {
             0.995
         } else {

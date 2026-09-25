@@ -36,9 +36,9 @@ pub fn set_headless(on: bool) -> bool {
 }
 
 /// Queue fill band the resampler's rate control aims for (interleaved
-/// samples): below LOW it speeds up output by 0.5%, above HIGH it slows it.
-const RATE_LOW: usize = 1000;
-const RATE_HIGH: usize = 3000;
+/// samples): below LOW it speeds up output, above HIGH it slows it.
+const RATE_LOW: usize = 2000;
+const RATE_HIGH: usize = 4000;
 /// Interleaved samples the device plays between two emulated frames at
 /// slow-motion `speed`.
 fn slowmo_gap(speed: f32) -> usize {
@@ -127,13 +127,15 @@ impl AudioOutput {
 
     pub fn new() -> Self {
         // ~90 ms of stereo at 44.1 kHz; the rate control in Apu keeps the
-        // fill around 1000-3000 samples.
+        // fill around 2000-4000 samples.
         let buffer = Arc::new(SampleRing::new(QUEUE_CAPACITY));
+        // Pre-fill target cushion with silence so audio callback never starves at startup
+        buffer.push_stereo_slice(&vec![0.0; (RATE_LOW + RATE_HIGH) / 2]);
         let buffer_clone = Arc::clone(&buffer);
 
-        let surround_mode = Arc::new(AtomicU8::new(SurroundMode::Headphone3D as u8));
-        let bass_boost = Arc::new(AtomicU32::new(0.65_f32.to_bits()));
-        let surround_width = Arc::new(AtomicU32::new(0.85_f32.to_bits()));
+        let surround_mode = Arc::new(AtomicU8::new(SurroundMode::Stereo as u8));
+        let bass_boost = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+        let surround_width = Arc::new(AtomicU32::new(0.5_f32.to_bits()));
         let channel_mute_mask = Arc::new(AtomicU8::new(0)); // All unmuted
         let fast_forward_mode = Arc::new(AtomicU8::new(1)); // Default Smart Mute during fast-forward
         let is_fast_forwarding = Arc::new(AtomicBool::new(false));
@@ -215,11 +217,7 @@ impl AudioOutput {
                     // Lock-free: never blocks, and an underrun plays
                     // silence (every frame is always written).
                     for frame in data.chunks_mut(channels) {
-                        let (left, right) = if buffer.len() >= 2 {
-                            (buffer.pop().unwrap_or(0.0), buffer.pop().unwrap_or(0.0))
-                        } else {
-                            (0.0, 0.0)
-                        };
+                        let (left, right) = buffer.pop_frame().unwrap_or((0.0, 0.0));
                         dsp.process(left, right, mode, bass, width, frame);
                     }
                 },
@@ -376,7 +374,7 @@ impl AudioOutput {
             }
             scaled.truncate(keep);
         }
-        self.buffer.push_slice(&scaled);
+        self.buffer.push_stereo_slice(&scaled);
     }
 
     /// Queue a batch of core-rate (`CORE_SAMPLE_RATE`) interleaved stereo

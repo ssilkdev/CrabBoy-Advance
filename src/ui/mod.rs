@@ -237,8 +237,8 @@ impl GbaApp {
             gba.set_widescreen_config(widescreen_config.clone());
 
             let audio_mode = match config.audio.mode.to_lowercase().as_str() {
-                "hardware" | "hardwareonly" | "off" => crate::gba::m4a::AudioEngineMode::HardwareOnly,
-                _ => crate::gba::m4a::AudioEngineMode::HdReSynthesis,
+                "hd" | "hdresynthesis" => crate::gba::m4a::AudioEngineMode::HdReSynthesis,
+                _ => crate::gba::m4a::AudioEngineMode::HardwareOnly,
             };
             gba.set_hd_audio_mode(audio_mode);
 

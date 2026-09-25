@@ -28,6 +28,12 @@ All of this is saved in `files/skin.json`.
   - Pulsing neon buttons that flare when pressed.
 
   Run `python3 docs/skins/make_synthwave_skin.py Synthwave.zip`; it needs Pillow.
+- `docs/skins/make_emerald_synthwave_skin.py` builds **Emerald Synthwave**, an animated skin:
+  - Fuses the 80s outrun synthwave aesthetic with Pokémon Emerald's Rayquaza theme.
+  - Electric neon emerald rolling grid, a dual-gradient retro sun (solar gold to radioactive lime to neon emerald), and a celestial delta crest glowing in an abyssal jade sky.
+  - Pulsing neon emerald 'A' and solar-gold 'B' buttons, and an emerald cross D-pad with golden chevron arrows.
+
+  Run `python3 docs/skins/make_emerald_synthwave_skin.py Emerald-Synthwave.zip`; it needs Pillow.
 
 ## Making a skin
 

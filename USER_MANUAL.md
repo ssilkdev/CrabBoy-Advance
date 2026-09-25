@@ -544,6 +544,6 @@ Happy playing. 🦀
 ---
 
 *CrabBoy Advance is an open-source Game Boy Advance emulator written in
-Rust. This manual covers version 5.1.0. For the full technical
+Rust. This manual covers version 5.2.0. For the full technical
 specifications, see the project's README; for in-game strategy, the
 built-in Trainer's Guide (**F1**).*

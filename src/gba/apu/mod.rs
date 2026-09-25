@@ -142,7 +142,7 @@ impl Apu {
             pending_diagnostic_samples: Vec::with_capacity(2048),
             capture: None,
             speculative: false,
-            hd_audio_mode: crate::gba::m4a::AudioEngineMode::HdReSynthesis,
+            hd_audio_mode: crate::gba::m4a::AudioEngineMode::HardwareOnly,
             hd_sample_stream: VecDeque::with_capacity(2048),
         }
     }

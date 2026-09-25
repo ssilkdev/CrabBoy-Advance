@@ -136,7 +136,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            mode: "hd".to_string(),
+            mode: "hardware".to_string(),
             interpolation: "cubic".to_string(),
             reverb_enabled: true,
             reverb_level: 0.25,

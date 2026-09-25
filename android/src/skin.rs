@@ -1184,6 +1184,22 @@ mod tests {
         assert!(pack.manifest.animations["background_portrait"].columns > 1);
     }
 
+    /// The generated Emerald Synthwave pack (docs/skins/make_emerald_synthwave_skin.py)
+    /// validates, with its animations, if present.
+    #[test]
+    fn emerald_synthwave_pack_reads() {
+        let Some(home) = std::env::var_os("HOME") else { return };
+        let p = std::path::Path::new(&home).join(".hermes/cache/scratch/EmeraldSynthwave-skin.zip");
+        let Ok(bytes) = std::fs::read(&p) else { return };
+        let pack = read_pack(&bytes).unwrap();
+        assert_eq!(pack.manifest.name, "Emerald Synthwave");
+        assert!(pack.manifest.animations.len() >= 9);
+        assert_eq!(pack.manifest.animations["background_portrait"].frames, 8);
+        assert_eq!(pack.manifest.animations["background_portrait"].columns, 4);
+        assert_eq!(pack.manifest.animations["background_landscape"].frames, 8);
+        assert_eq!(pack.manifest.animations["background_landscape"].columns, 2);
+    }
+
     #[test]
     fn animation_frames_and_scrolling() {
         // 2x2 grid: frames go left to right, then down.

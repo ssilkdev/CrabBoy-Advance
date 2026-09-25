@@ -55,6 +55,20 @@ impl SampleRing {
         n
     }
 
+    /// Producer: append as many stereo frames as fit, strictly preserving
+    /// left/right pair alignment even if the consumer is mid-read.
+    pub fn push_stereo_slice(&self, samples: &[f32]) -> usize {
+        let w = self.write.load(Ordering::Relaxed);
+        let r = self.read.load(Ordering::Acquire);
+        let free = self.capacity() - w.wrapping_sub(r);
+        let n = (samples.len().min(free)) & !1;
+        for (i, &s) in samples[..n].iter().enumerate() {
+            self.slots[(w + i) % self.capacity()].store(s.to_bits(), Ordering::Relaxed);
+        }
+        self.write.store(w.wrapping_add(n), Ordering::Release);
+        n
+    }
+
     /// Consumer: pop one sample.
     #[inline]
     pub fn pop(&self) -> Option<f32> {
@@ -66,6 +80,22 @@ impl SampleRing {
         let v = f32::from_bits(self.slots[r % self.capacity()].load(Ordering::Relaxed));
         self.read.store(r.wrapping_add(1), Ordering::Release);
         Some(v)
+    }
+
+    /// Consumer: pop one stereo frame (left, right) atomically, ensuring
+    /// channels are never swapped or phase-offset by partial reads.
+    #[inline]
+    pub fn pop_frame(&self) -> Option<(f32, f32)> {
+        let r = self.read.load(Ordering::Relaxed);
+        let w = self.write.load(Ordering::Acquire);
+        if w.wrapping_sub(r) < 2 {
+            return None;
+        }
+        let cap = self.capacity();
+        let left = f32::from_bits(self.slots[r % cap].load(Ordering::Relaxed));
+        let right = f32::from_bits(self.slots[(r + 1) % cap].load(Ordering::Relaxed));
+        self.read.store(r.wrapping_add(2), Ordering::Release);
+        Some((left, right))
     }
 }
 
@@ -105,5 +135,21 @@ mod tests {
             }
         }
         t.join().unwrap();
+    }
+
+    #[test]
+    fn stereo_push_and_pop_frame_preserves_alignment() {
+        let ring = SampleRing::new(6);
+        // Odd slice length truncated to even
+        assert_eq!(ring.push_stereo_slice(&[1.0, 2.0, 3.0]), 2);
+        assert_eq!(ring.pop_frame(), Some((1.0, 2.0)));
+        assert_eq!(ring.pop_frame(), None);
+
+        // Fill capacity (6) with 3 stereo frames
+        assert_eq!(ring.push_stereo_slice(&[10.0, 11.0, 20.0, 21.0, 30.0, 31.0, 40.0, 41.0]), 6);
+        assert_eq!(ring.pop_frame(), Some((10.0, 11.0)));
+        assert_eq!(ring.pop_frame(), Some((20.0, 21.0)));
+        assert_eq!(ring.pop_frame(), Some((30.0, 31.0)));
+        assert_eq!(ring.pop_frame(), None);
     }
 }

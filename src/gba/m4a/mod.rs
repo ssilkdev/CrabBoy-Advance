@@ -25,9 +25,9 @@ pub use stem_export::{render_song_to_stems, write_wav_file, StemTrack};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AudioEngineMode {
     /// 100% bit-identical native hardware audio (DirectSound 8-bit FIFO + DMG PSG)
+    #[default]
     HardwareOnly,
     /// 48 kHz high-precision floating point re-synthesis (M4A Sappy games)
-    #[default]
     HdReSynthesis,
 }
 

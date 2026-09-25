@@ -919,6 +919,52 @@ impl CrabBoyApp {
                         if ui.button(mute).clicked() {
                             self.muted = !self.muted;
                         }
+                        if let Some(ref mut g) = self.game {
+                            match g.core {
+                                Core::Gba(ref mut gba) => {
+                                    let sur_label = match gba.mmu.apu.audio_output.surround_mode() {
+                                        gba_simulator::gba::apu::SurroundMode::Stereo => "Output: Pure Stereo",
+                                        gba_simulator::gba::apu::SurroundMode::Headphone3D => "Output: 3D Headphones",
+                                        gba_simulator::gba::apu::SurroundMode::Surround51 => "Output: 5.1 Surround",
+                                    };
+                                    if ui.button(sur_label).clicked() {
+                                        let next = match gba.mmu.apu.audio_output.surround_mode() {
+                                            gba_simulator::gba::apu::SurroundMode::Stereo => gba_simulator::gba::apu::SurroundMode::Headphone3D,
+                                            gba_simulator::gba::apu::SurroundMode::Headphone3D => gba_simulator::gba::apu::SurroundMode::Surround51,
+                                            gba_simulator::gba::apu::SurroundMode::Surround51 => gba_simulator::gba::apu::SurroundMode::Stereo,
+                                        };
+                                        gba.mmu.apu.audio_output.set_surround_mode(next);
+                                    }
+
+                                    let audio_label = match gba.hd_audio_mode() {
+                                        gba_simulator::gba::m4a::AudioEngineMode::HardwareOnly => "Audio: Native APU",
+                                        gba_simulator::gba::m4a::AudioEngineMode::HdReSynthesis => "Audio: HD Re-Synthesis",
+                                    };
+                                    if ui.button(audio_label).clicked() {
+                                        let next = match gba.hd_audio_mode() {
+                                            gba_simulator::gba::m4a::AudioEngineMode::HardwareOnly => gba_simulator::gba::m4a::AudioEngineMode::HdReSynthesis,
+                                            gba_simulator::gba::m4a::AudioEngineMode::HdReSynthesis => gba_simulator::gba::m4a::AudioEngineMode::HardwareOnly,
+                                        };
+                                        gba.set_hd_audio_mode(next);
+                                    }
+                                }
+                                Core::GameBoy(ref mut gb) => {
+                                    let sur_label = match gb.mmu.apu.audio_output.surround_mode() {
+                                        gba_simulator::gba::apu::SurroundMode::Stereo => "Output: Pure Stereo",
+                                        gba_simulator::gba::apu::SurroundMode::Headphone3D => "Output: 3D Headphones",
+                                        gba_simulator::gba::apu::SurroundMode::Surround51 => "Output: 5.1 Surround",
+                                    };
+                                    if ui.button(sur_label).clicked() {
+                                        let next = match gb.mmu.apu.audio_output.surround_mode() {
+                                            gba_simulator::gba::apu::SurroundMode::Stereo => gba_simulator::gba::apu::SurroundMode::Headphone3D,
+                                            gba_simulator::gba::apu::SurroundMode::Headphone3D => gba_simulator::gba::apu::SurroundMode::Surround51,
+                                            gba_simulator::gba::apu::SurroundMode::Surround51 => gba_simulator::gba::apu::SurroundMode::Stereo,
+                                        };
+                                        gb.mmu.apu.audio_output.set_surround_mode(next);
+                                    }
+                                }
+                            }
+                        }
                         let blend_label = match self.blend_mode {
                             FrameBlendMode::Off => "Blend: Off (Instant)",
                             FrameBlendMode::Simple50 => "Blend: 50/50",
