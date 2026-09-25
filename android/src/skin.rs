@@ -730,6 +730,47 @@ impl Visibility {
     }
 }
 
+/// Experimental: strips down the sides of the screen that press a button,
+/// for a finger wrapped around the edge of the phone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeZones {
+    #[default]
+    Off,
+    /// Left edge B, right edge A.
+    FaceButtons,
+    /// Left edge L, right edge R.
+    Shoulders,
+}
+
+impl EdgeZones {
+    pub fn label(self) -> &'static str {
+        match self {
+            EdgeZones::Off => "Edge zones: off",
+            EdgeZones::FaceButtons => "Edge zones: B | A",
+            EdgeZones::Shoulders => "Edge zones: L | R",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            EdgeZones::Off => EdgeZones::FaceButtons,
+            EdgeZones::FaceButtons => EdgeZones::Shoulders,
+            EdgeZones::Shoulders => EdgeZones::Off,
+        }
+    }
+
+    /// (left edge, right edge) buttons; 0 = none.
+    pub fn buttons(self) -> (u16, u16) {
+        use crate::touch::Buttons;
+        match self {
+            EdgeZones::Off => (0, 0),
+            EdgeZones::FaceButtons => (Buttons::B, Buttons::A),
+            EdgeZones::Shoulders => (Buttons::L, Buttons::R),
+        }
+    }
+}
+
 /// Saved in `skin.json` in the app's files directory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -746,6 +787,9 @@ pub struct SkinSettings {
     pub layout: LayoutOverrides,
     /// Vibrate briefly when an on-screen button is pressed.
     pub haptics: bool,
+    pub edge_zones: EdgeZones,
+    /// Experimental: tilt the phone to press the D-pad.
+    pub tilt_dpad: bool,
 }
 
 impl Default for SkinSettings {
@@ -757,6 +801,8 @@ impl Default for SkinSettings {
             visibility: Visibility::Auto,
             layout: LayoutOverrides::default(),
             haptics: true,
+            edge_zones: EdgeZones::Off,
+            tilt_dpad: false,
         }
     }
 }

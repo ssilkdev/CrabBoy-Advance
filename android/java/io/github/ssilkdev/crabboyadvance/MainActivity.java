@@ -2,6 +2,10 @@ package io.github.ssilkdev.crabboyadvance;
 
 import android.app.NativeActivity;
 import android.content.Intent;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -28,7 +32,8 @@ import java.util.Locale;
  * ROM into app storage, immersive fullscreen, and safe-area insets.
  *
  * Rust calls pickRom(), takeImportedRom(), takeImportError(),
- * getSafeInsets(), setOrientation() and vibrate() over JNI.
+ * getSafeInsets(), setOrientation(), vibrate(), setTiltSensor() and getTilt()
+ * over JNI.
  */
 public class MainActivity extends NativeActivity {
     private static final int PICK_ROM = 1001;
@@ -43,8 +48,41 @@ public class MainActivity extends NativeActivity {
     private volatile String importError;
     private volatile int[] safeInsets = new int[4];
     private Vibrator vibrator;
-    /** Vibrator calls are binder IPC; keep them off the emulation thread. */
-    private Handler hapticsHandler;
+    /**
+     * Vibrator calls are binder IPC and sensor events need a looper; both
+     * run here, off the emulation thread.
+     */
+    private Handler background;
+
+    private SensorManager sensors;
+    /** Whether Rust wants tilt readings (kept across pause/resume). */
+    private volatile boolean tiltWanted;
+    private boolean tiltRegistered;
+    /** Latest gravity reading (m/s^2, device axes) and display rotation; null until the first one. */
+    private volatile float[] tilt;
+    private final float[] lowPass = new float[3];
+    private boolean lowPassSeeded;
+    private boolean rawAccelerometer;
+    private final SensorEventListener tiltListener = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent e) {
+            float[] g = e.values;
+            if (rawAccelerometer) {
+                // No fused gravity sensor: smooth out hand shake.
+                float k = lowPassSeeded ? 0.2f : 1f;
+                lowPassSeeded = true;
+                for (int i = 0; i < 3; i++) lowPass[i] += k * (e.values[i] - lowPass[i]);
+                g = lowPass;
+            }
+            @SuppressWarnings("deprecation")
+            int rotation = getWindowManager().getDefaultDisplay().getRotation();
+            tilt = new float[]{g[0], g[1], g[2], rotation};
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,14 +101,28 @@ public class MainActivity extends NativeActivity {
         });
         hideSystemBars();
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
-        HandlerThread haptics = new HandlerThread("haptics");
-        haptics.start();
-        hapticsHandler = new Handler(haptics.getLooper());
+        sensors = (SensorManager) getSystemService(SENSOR_SERVICE);
+        HandlerThread thread = new HandlerThread("haptics-sensors");
+        thread.start();
+        background = new Handler(thread.getLooper());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateTiltSensor();
+    }
+
+    @Override
+    protected void onPause() {
+        unregisterTilt();
+        super.onPause();
     }
 
     @Override
     protected void onDestroy() {
-        if (hapticsHandler != null) hapticsHandler.getLooper().quitSafely();
+        unregisterTilt();
+        if (background != null) background.getLooper().quitSafely();
         super.onDestroy();
     }
 
@@ -115,7 +167,7 @@ public class MainActivity extends NativeActivity {
     /** A short click for an on-screen button press. */
     public void vibrate() {
         final Vibrator v = vibrator;
-        final Handler h = hapticsHandler;
+        final Handler h = background;
         if (v == null || h == null || !v.hasVibrator()) return;
         h.post(() -> {
             try {
@@ -127,6 +179,38 @@ public class MainActivity extends NativeActivity {
             } catch (Exception ignored) {
             }
         });
+    }
+
+    /** Experimental tilt controls: start or stop gravity readings. */
+    public void setTiltSensor(final boolean on) {
+        tiltWanted = on;
+        runOnUiThread(this::updateTiltSensor);
+    }
+
+    /** {x, y, z, displayRotation}, or null when there is no reading yet. */
+    public float[] getTilt() {
+        return tiltWanted ? tilt : null;
+    }
+
+    private void updateTiltSensor() {
+        if (!tiltWanted) {
+            unregisterTilt();
+            return;
+        }
+        if (tiltRegistered || sensors == null || background == null) return;
+        Sensor s = sensors.getDefaultSensor(Sensor.TYPE_GRAVITY);
+        rawAccelerometer = s == null;
+        if (s == null) s = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        if (s == null) return;
+        tilt = null;
+        lowPassSeeded = false;
+        tiltRegistered = sensors.registerListener(tiltListener, s, SensorManager.SENSOR_DELAY_GAME, background);
+    }
+
+    private void unregisterTilt() {
+        if (tiltRegistered && sensors != null) sensors.unregisterListener(tiltListener);
+        tiltRegistered = false;
+        tilt = null;
     }
 
     /** ActivityInfo.SCREEN_ORIENTATION_* value chosen in the in-game menu. */

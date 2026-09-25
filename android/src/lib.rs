@@ -6,13 +6,14 @@
 //! activity in `java/` adds the system ROM picker, fullscreen, and safe-area
 //! insets. Controllers arrive through the patched winit gamepad hook.
 //!
-//! `touch` and `keymap` are plain logic and build (and test) on any host:
+//! `touch`, `tilt` and `keymap` are plain logic and build (and test) on any host:
 //! `cargo test --manifest-path android/Cargo.toml`.
 
 pub mod autosave_settings;
 pub mod keymap;
 pub mod orientation;
 pub mod skin;
+pub mod tilt;
 pub mod touch;
 
 #[cfg(target_os = "android")]

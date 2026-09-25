@@ -2,7 +2,7 @@
 
 use crate::orientation::Orientation;
 use crate::skin::{self, Control, SkinImage, SkinSettings};
-use crate::{gamepad, platform, touch};
+use crate::{gamepad, platform, tilt, touch};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -228,6 +228,9 @@ struct CrabBoyApp {
     texture: Option<TextureHandle>,
     rgba: Vec<u8>,
     touch: TouchPad,
+    /// Experimental tilt controls, and whether the sensor is running.
+    tilt: tilt::Tilt,
+    tilt_sensor_on: bool,
     last_tick: Instant,
     pacer: gba_simulator::frame_pacing::FramePacer,
     frame_accum: f64,
@@ -330,6 +333,8 @@ impl CrabBoyApp {
             texture: None,
             rgba: Vec::with_capacity(240 * 160 * 4),
             touch: TouchPad::default(),
+            tilt: tilt::Tilt::default(),
+            tilt_sensor_on: false,
             last_tick: Instant::now(),
             pacer: Default::default(),
             frame_accum: 0.0,
@@ -573,7 +578,7 @@ impl CrabBoyApp {
 
     /// Touch layout for this frame: the default spots with the skin's and
     /// the user's placements applied.
-    fn control_layout(&self, safe: egui::Rect, hand: touch::Hand) -> touch::Layout {
+    fn control_layout(&self, full: egui::Rect, safe: egui::Rect, hand: touch::Hand) -> touch::Layout {
         let mut layout = touch::Layout::compute_for(safe, self.texture.as_ref().map(|t| t.size()), hand);
         let portrait = safe.height() > safe.width();
         // Moves made in the editor are for the standard two-handed layout;
@@ -590,6 +595,8 @@ impl CrabBoyApp {
             }
         };
         skin::apply(&mut layout, safe, &placements, self.skin.scale);
+        let (left, right) = self.skin.edge_zones.buttons();
+        layout.set_edge_zones(full, left, right);
         layout
     }
 
@@ -870,7 +877,7 @@ impl CrabBoyApp {
                     skin::Visibility::MenuOnly => false,
                 } || self.layout_editor.is_some();
                 if show_controls {
-                    touch::paint(painter, layout, self.touch.held(), self.fast_forward, &look);
+                    touch::paint(painter, layout, self.touch.held() | self.tilt.held(), self.fast_forward, &look);
                 }
                 // The menu button stays visible even when a controller hides the rest.
                 touch::paint_menu_button(painter, layout, &look);
@@ -1227,6 +1234,20 @@ impl CrabBoyApp {
                             changed = true;
                         }
                         ui.separator();
+                        ui.label("Experimental");
+                        if ui.button(self.skin.edge_zones.label()).clicked() {
+                            self.skin.edge_zones = self.skin.edge_zones.next();
+                            changed = true;
+                        }
+                        let tilt = if self.skin.tilt_dpad { "Tilt to move: ON" } else { "Tilt to move: off" };
+                        if ui.button(tilt).clicked() {
+                            self.skin.tilt_dpad = !self.skin.tilt_dpad;
+                            changed = true;
+                        }
+                        if self.skin.tilt_dpad {
+                            ui.small("Hold the phone how you like to play; that pose is neutral. Closing a menu re-centres.");
+                        }
+                        ui.separator();
                         if ui.button("Move & resize buttons...").clicked() {
                             edit = true;
                         }
@@ -1514,7 +1535,7 @@ impl eframe::App for CrabBoyApp {
                     Handedness::RightHand => touch::Hand::Right,
                 };
                 self.ensure_skin_textures(ctx);
-                let layout = self.control_layout(safe, hand);
+                let layout = self.control_layout(ctx.screen_rect(), safe, hand);
                 let touch = if self.menu_open || self.any_sheet_open() {
                     self.touch.clear();
                     Buttons::default()
@@ -1530,7 +1551,11 @@ impl eframe::App for CrabBoyApp {
                 if self.touch.just_pressed(Buttons::FAST) {
                     self.fast_forward = !self.fast_forward;
                 }
-                let buttons = Buttons(touch.0 | gamepad::buttons().0);
+                let tilted = match self.tilt_sensor_on.then(platform::tilt).flatten() {
+                    Some((gravity, rotation)) => self.tilt.update(gravity, rotation),
+                    None => Buttons::default(),
+                };
+                let buttons = Buttons(touch.0 | tilted.0 | gamepad::buttons().0);
 
                 let (muted, ff) = (self.muted, self.fast_forward);
                 let sm = self.accessibility.active.slow_motion;
@@ -1542,7 +1567,7 @@ impl eframe::App for CrabBoyApp {
                 self.upload_frame(ctx);
                 self.upload_time += t.elapsed();
                 // The texture size is known now; recompute for the first frame.
-                let layout = self.control_layout(safe, hand);
+                let layout = self.control_layout(ctx.screen_rect(), safe, hand);
                 self.game_ui(ctx, &layout);
                 if self.layout_editor.is_some() {
                     self.menu_open = false;
@@ -1588,6 +1613,15 @@ impl eframe::App for CrabBoyApp {
         let emulating = self.screen == Screen::Playing
             && self.game.is_some()
             && !(self.menu_open || self.any_sheet_open());
+        // Tilt controls: the sensor only runs while a game is being played.
+        // Every start (a game, or closing a menu) takes the current pose as
+        // neutral.
+        let want_tilt = emulating && self.skin.tilt_dpad;
+        if want_tilt != self.tilt_sensor_on {
+            self.tilt_sensor_on = want_tilt;
+            self.tilt.recenter();
+            platform::set_tilt_sensor(want_tilt);
+        }
         let animating = self.screen == Screen::Playing && !self.skin_animations.is_empty();
         if emulating {
             ctx.request_repaint();

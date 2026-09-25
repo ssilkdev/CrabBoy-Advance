@@ -65,6 +65,30 @@ pub fn vibrate() {
     with_activity(|env, act| env.call_method(act, "vibrate", "()V", &[]).map(|_| ()));
 }
 
+/// Start or stop the motion sensor for tilt controls.
+pub fn set_tilt_sensor(on: bool) {
+    with_activity(|env, act| env.call_method(act, "setTiltSensor", "(Z)V", &[on.into()]).map(|_| ()));
+}
+
+/// Latest gravity reading (m/s², device axes) and the display rotation
+/// (0..=3), if the tilt sensor is on and has reported.
+pub fn tilt() -> Option<([f32; 3], i32)> {
+    // Called every frame: the local frame frees the array reference.
+    with_activity(|env, act| {
+        env.with_local_frame(4, |env| {
+            let arr = env.call_method(act, "getTilt", "()[F", &[])?.l()?;
+            if arr.is_null() {
+                return Ok(None);
+            }
+            let arr = jni::objects::JFloatArray::from(arr);
+            let mut buf = [0f32; 4];
+            env.get_float_array_region(&arr, 0, &mut buf)?;
+            Ok(Some(([buf[0], buf[1], buf[2]], buf[3] as i32)))
+        })
+    })
+    .flatten()
+}
+
 /// Apply an `ActivityInfo.SCREEN_ORIENTATION_*` value.
 pub fn set_orientation(value: i32) {
     with_activity(|env, act| env.call_method(act, "setOrientation", "(I)V", &[value.into()]).map(|_| ()));
