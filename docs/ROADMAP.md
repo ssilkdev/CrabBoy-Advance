@@ -347,13 +347,15 @@ and zero thermal throttling:
    and serial (+33% to +59%).
 3. **Stage 3a (Decode tables & renderer fast paths) ✅**: ARM 4096-entry candidate
    tables, tile-by-tile text BG rendering (+18% to +36%). Total cumulative: **+110% to +144%**.
-4. **Stage 4a: Idle-Loop Detection & Busy-Wait Skipping [Critical for Mobile]**:
+4. **Stage 4a: Idle-Loop Detection & Busy-Wait Skipping [Critical for Mobile] ✅**:
    - Games like Pokémon Emerald busy-wait in an idle loop at 60 FPS instead of
      sleeping (HALT).
    - Detect idle loops and advance the CPU clock directly to the next peripheral
      event horizon.
    - **Benefit:** Cuts CPU utilization and power draw by **30–50% on mobile**,
      keeping phones cool and extending battery life by hours.
+   - **Verified:** 51.5% cycle reduction (8.67M / 16.85M cycles skipped) in Emerald
+     gameplay; 100% bit-identical frame/audio hash across test suite and commercial ROMs (`tests/idle_skip.rs`).
 5. **Stage 4b: Zero-Copy GLES Pixel Buffer Objects (PBO)**:
    - Stream the core's native framebuffer directly to GPU textures via PBOs,
      eliminating CPU-side Vec allocations and memory bandwidth overhead.

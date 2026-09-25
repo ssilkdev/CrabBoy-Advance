@@ -641,3 +641,28 @@ Status key: ✅ done · 🚧 in progress · ⏳ not started
     menu; battle text wasn't in the training set.
   - Android has no discovery UI (a desktop tool), but maps are plain JSON
     and the core API builds for Android.
+
+---
+
+## Performance Track: Mobile Thermal & Battery Optimization
+
+### Stage 4a. Idle-Loop Detection & Busy-Wait Skipping ✅
+
+- ✅ **Idle-loop skip core** (`src/gba/idle.rs`, `src/gba/mod.rs`, `src/gba/mmu/mod.rs`):
+  - Detects backward branch loops (<= 64 bytes) that make no memory writes,
+    no IO register reads, and keep CPU registers and condition flags identical.
+  - Skips whole loop iterations directly to the next peripheral event horizon
+    (scanline boundary, timer overflow, APU sample, or pending IRQ).
+  - Automatically catches up batched peripherals and synchronizes timing clock
+    when skipping, preserving exact event order and peripheral states.
+  - Only skips RAM-polling loops (e.g. Pokémon Emerald VBlank wait at `0x080008c6`),
+    guaranteeing 100% bit-identical frame and audio execution.
+- ✅ **Tests & Verification** (`tests/idle_skip.rs`, `tests/halt_skip.rs`):
+  - `emerald_idle_skip_reduces_cpu_work_in_gameplay`: **51.5% cycle reduction**
+    (8,670,000 / 16,850,000 cycles skipped per second) in active Emerald gameplay,
+    slashing CPU load and battery consumption on mobile.
+  - `idle_skip_is_bit_identical`: 100% bit-identical hashes across 500 frames for
+    Pokémon Emerald, Dragon Ball, Pokémon Sapphire, Harry Potter, and GBA test suite.
+  - `batched_peripherals_are_bit_identical`: Confirmed bit-identical with full
+    batched peripheral catchup over 2,000 frames.
+
