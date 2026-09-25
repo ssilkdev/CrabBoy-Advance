@@ -109,6 +109,8 @@ impl Engine3D {
                 }
             }
             0x0400_0400..=0x0400_05CC => self.geom.write_command_port(addr, val as u32),
+            0x0400_0600 => self.geom.write_gxstat(val as u32),
+            0x0400_0602 => self.geom.write_gxstat(((val as u32) << 16) | (self.geom.read_gxstat() & 0xFFFF & !(1 << 15))),
             _ => {}
         }
     }

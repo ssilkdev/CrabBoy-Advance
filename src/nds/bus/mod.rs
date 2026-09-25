@@ -84,6 +84,14 @@ pub enum VramRegion {
     BBg,
     BObj,
     Arm7,
+    /// BG extended palettes, 4 slots x 8 KiB.
+    ABgExt,
+    AObjExt,
+    BBgExt,
+    BObjExt,
+    /// 3D texture image slots (4 x 128 KiB) and texture palette (6 x 16 KiB).
+    Tex,
+    TexPal,
 }
 
 impl VramRegion {
@@ -93,6 +101,10 @@ impl VramRegion {
             VramRegion::AObj => 0x4_0000,
             VramRegion::BBg | VramRegion::BObj => 0x2_0000,
             VramRegion::Arm7 => 0x4_0000,
+            VramRegion::ABgExt | VramRegion::BBgExt => 0x8000,
+            VramRegion::AObjExt | VramRegion::BObjExt => 0x2000,
+            VramRegion::Tex => 0x8_0000,
+            VramRegion::TexPal => 0x1_8000,
         }
     }
 }
@@ -104,6 +116,12 @@ pub struct VramViews {
     pub a_obj: Vec<u8>,
     pub b_bg: Vec<u8>,
     pub b_obj: Vec<u8>,
+    pub a_bg_ext: Vec<u8>,
+    pub a_obj_ext: Vec<u8>,
+    pub b_bg_ext: Vec<u8>,
+    pub b_obj_ext: Vec<u8>,
+    pub tex: Vec<u8>,
+    pub tex_pal: Vec<u8>,
 }
 
 /// Minimal HLE BIOS images. Common SWIs are emulated in the executor; these
@@ -334,7 +352,17 @@ impl NdsBus {
             (7, 1) => (BBg, 0),
             (8, 1) => (BBg, 0x8000),
             (8, 2) => (BObj, 0),
-            _ => return None, // LCDC, textures, extended palettes
+            // 3D textures / texture palettes
+            (0..=3, 3) => (Tex, 0x20000 * ofs),
+            (4, 3) => (TexPal, 0),
+            (5..=6, 3) => (TexPal, 0x4000 * (ofs & 1) + 0x10000 * (ofs >> 1)),
+            // Extended palettes
+            (4, 4) => (ABgExt, 0),
+            (5..=6, 4) => (ABgExt, 0x4000 * (ofs & 1)),
+            (5..=6, 5) => (AObjExt, 0),
+            (7, 2) => (BBgExt, 0),
+            (8, 3) => (BObjExt, 0),
+            _ => return None, // LCDC
         })
     }
 
@@ -391,6 +419,12 @@ impl NdsBus {
             (VramRegion::AObj, &mut views.a_obj),
             (VramRegion::BBg, &mut views.b_bg),
             (VramRegion::BObj, &mut views.b_obj),
+            (VramRegion::ABgExt, &mut views.a_bg_ext),
+            (VramRegion::AObjExt, &mut views.a_obj_ext),
+            (VramRegion::BBgExt, &mut views.b_bg_ext),
+            (VramRegion::BObjExt, &mut views.b_obj_ext),
+            (VramRegion::Tex, &mut views.tex),
+            (VramRegion::TexPal, &mut views.tex_pal),
         ] {
             buf.resize(region.size(), 0);
             buf.fill(0);
@@ -574,7 +608,13 @@ impl NdsBus {
         d.cur_count = Self::dma_count(arm9, ch, val);
         match self.dma_mode(arm9, ch) {
             0 => self.run_dma(arm9, ch),
-            5 if self.card.data_ready() => self.run_dma(arm9, ch),
+            5 if self.card.data_ready() => {
+                self.run_dma(arm9, ch);
+                self.pump_card_dma(arm9, ch);
+            }
+            // Geometry FIFO: commands execute instantly, so the FIFO is
+            // always ready for the whole block.
+            7 if arm9 => self.run_dma(arm9, ch),
             _ => {}
         }
     }
@@ -602,8 +642,24 @@ impl NdsBus {
                 };
                 if hit {
                     self.run_dma(arm9, ch);
+                    if event == DmaEvent::Card {
+                        self.pump_card_dma(arm9, ch);
+                    }
                 }
             }
+        }
+    }
+
+    /// Card DMA fires once per word/block the card makes ready; games often
+    /// program a repeating 1-word channel, so keep it running while the card
+    /// still has data and the channel is still armed for card transfers.
+    fn pump_card_dma(&mut self, arm9: bool, ch: usize) {
+        for _ in 0..0x2_0000 {
+            let armed = (if arm9 { self.dma_arm9[ch].cnt } else { self.dma_arm7[ch].cnt }) & (1 << 31) != 0;
+            if !armed || self.dma_mode(arm9, ch) != 5 || !self.card.data_ready() {
+                break;
+            }
+            self.run_dma(arm9, ch);
         }
     }
 
@@ -1138,6 +1194,12 @@ impl NdsBus {
         match addr {
             0x0200_0000..=0x02FF_FFFF => self.main_ram[(addr & 0x3F_FFFF) as usize] = val,
             0x0300_0000..=0x03FF_FFFF => self.shared_wram[(addr & 0x7FFF) as usize] = val,
+            0x0400_0000..=0x0400_0003 | 0x0400_0008..=0x0400_005F | 0x0400_006C..=0x0400_006D => {
+                self.ppu.engine_a.write_reg8(addr & 0xFF, val)
+            }
+            0x0400_1000..=0x0400_1003 | 0x0400_1008..=0x0400_105F | 0x0400_106C..=0x0400_106D => {
+                self.ppu.engine_b.write_reg8(addr & 0xFF, val)
+            }
             0x0400_0208 => self.ime_arm9 = (val & 1) != 0,
             0x0400_0240..=0x0400_0249 => self.vramcnt[(addr - 0x0400_0240) as usize] = val,
             0x0400_0300 => self.postflg_arm9 = val,

@@ -700,6 +700,9 @@ impl CrabBoyApp {
             }
         };
         skin::apply(&mut layout, safe, &placements, self.skin.scale);
+        if matches!(self.game.as_ref().map(|g| &g.core), Some(Core::Nds(_))) {
+            layout.enable_xy(safe);
+        }
         let (left, right) = self.skin.edge_zones.buttons();
         layout.set_edge_zones(full, left, right);
         layout

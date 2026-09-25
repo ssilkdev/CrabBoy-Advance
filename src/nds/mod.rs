@@ -300,7 +300,7 @@ impl Nds {
             // VBlank Start IRQ (Line 192)
             if line == 192 {
                 self.bus.trigger_dma(crate::nds::bus::DmaEvent::VBlank);
-                self.bus.ppu.engine_3d.on_vblank(&self.bus.vram_a[..], &self.bus.ppu.engine_a.palette);
+                self.bus.ppu.engine_3d.on_vblank(&self.bus.vram_views.tex, &self.bus.vram_views.tex_pal);
                 if (self.bus.ppu.dispstat_a & (1 << 3)) != 0 {
                     self.bus.if_arm9 |= 1 << 0;
                 }
@@ -329,6 +329,11 @@ impl Nds {
                 while a7_cycles < chunk_sys {
                     let c = step_arm7(&mut self.arm7, &mut self.bus);
                     a7_cycles += c;
+                }
+
+                // Geometry FIFO IRQ (level-triggered while its condition holds).
+                if self.bus.ppu.engine_3d.geom.fifo_irq() {
+                    self.bus.if_arm9 |= 1 << 21;
                 }
 
                 // Tick timers
@@ -760,15 +765,18 @@ mod tests {
 
         // 1. Set Matrix Mode to 2 (Position & Vector Simultaneous) via port 0x0400_0440
         bus.write_arm9_u32(0x0400_0440, 2);
-        assert_eq!(bus.read_arm9_u32(0x0400_0600) & (3 << 25), 2 << 25);
+        assert_eq!(bus.ppu.engine_3d.geom.mtx_mode as u32, 2);
 
         // 2. Load Identity Matrix (Cmd 0x15 via port 0x0400_0454)
         bus.write_arm9_u32(0x0400_0454, 0);
 
         // 3. Push to Stack (Cmd 0x11 via port 0x0400_0444)
         bus.write_arm9_u32(0x0400_0444, 0);
-        // pos_sp should now be 1 (bits 28..31 of GXSTAT)
-        assert_eq!((bus.read_arm9_u32(0x0400_0600) >> 28) & 0x1F, 1);
+        // GXSTAT bits 8-12: position stack level (GBATEK "DS 3D Status");
+        // the geometry FIFO always reads empty (bits 25-26).
+        let stat = bus.read_arm9_u32(0x0400_0600);
+        assert_eq!((stat >> 8) & 0x1F, 1);
+        assert_eq!(stat & (3 << 25), 3 << 25);
 
         // 4. Scale position: Scale(2.0, 3.0, 4.0) (Cmd 0x1B via port 0x0400_046C)
         // 2.0 = 8192, 3.0 = 12288, 4.0 = 16384 in 12-bit fixed point
@@ -785,7 +793,7 @@ mod tests {
 
         // 5. Pop from Stack (Cmd 0x12 via port 0x0400_0448)
         bus.write_arm9_u32(0x0400_0448, 1);
-        assert_eq!((bus.read_arm9_u32(0x0400_0600) >> 28) & 0x1F, 0);
+        assert_eq!((bus.read_arm9_u32(0x0400_0600) >> 8) & 0x1F, 0);
         // Position matrix should be restored to Identity
         assert_eq!(bus.ppu.engine_3d.geom.pos_mtx.m[0], 4096);
     }

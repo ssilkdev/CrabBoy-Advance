@@ -7,7 +7,7 @@ pub mod engine_2d;
 pub mod engine_3d;
 
 use crate::nds::bus::VramViews;
-use engine_2d::{Engine2D, SCREEN_HEIGHT, SCREEN_WIDTH};
+use engine_2d::{Engine2D, EngineVram, SCREEN_HEIGHT, SCREEN_WIDTH};
 use engine_3d::Engine3D;
 
 pub const TOTAL_SCANLINES: usize = 263;
@@ -92,9 +92,14 @@ impl NdsPpu {
             return;
         }
 
-        // Render both 2D engines for this scanline
-        self.engine_a.render_scanline(line, &views.a_bg, &views.a_obj);
-        self.engine_b.render_scanline(line, &views.b_bg, &views.b_obj);
+        if line == 0 {
+            self.engine_a.reset_scanline_affine();
+            self.engine_b.reset_scanline_affine();
+        }
+        let va = EngineVram { bg: &views.a_bg, obj: &views.a_obj, bg_ext: &views.a_bg_ext, obj_ext: &views.a_obj_ext };
+        let vb = EngineVram { bg: &views.b_bg, obj: &views.b_obj, bg_ext: &views.b_bg_ext, obj_ext: &views.b_obj_ext };
+        self.engine_a.render_scanline(line, &va, Some(&self.engine_3d.rasterizer.color_buffer));
+        self.engine_b.render_scanline(line, &vb, None);
 
         // DISPCNT bits 16-17 pick what the engine actually outputs.
         // Engine A: 0 = display off (white), 1 = graphics, 2 = VRAM display
@@ -120,18 +125,6 @@ impl NdsPpu {
         }
         if (self.engine_b.dispcnt >> 16) & 1 == 0 {
             self.engine_b.framebuffer[row..row + SCREEN_WIDTH].fill(0xFFFF_FFFF);
-        }
-        let vram_display = (self.engine_a.dispcnt >> 16) & 3 == 2;
-
-        // If Engine A has 3D display enabled (DISPCNT bit 3), composite 3D layer into Engine A
-        if !vram_display && (self.engine_a.dispcnt & (1 << 3)) != 0 {
-            let offset_3d = line * SCREEN_WIDTH;
-            for x in 0..SCREEN_WIDTH {
-                let pixel_3d = self.engine_3d.rasterizer.color_buffer[offset_3d + x];
-                if (pixel_3d & 0xFF00_0000) != 0 {
-                    self.engine_a.framebuffer[offset_3d + x] = pixel_3d;
-                }
-            }
         }
 
         // Copy scanlines into dual framebuffer based on POWCNT1 display swap.
@@ -166,14 +159,13 @@ impl NdsPpu {
     /// Read 32-bit I/O register for Engine A and 3D Engine (0x0400_0000..=0x0400_06A0)
     pub fn read_io_a(&mut self, addr: u32) -> u32 {
         match addr {
-            0x0400_0000 => self.engine_a.dispcnt,
             0x0400_0004 => (self.dispstat_a as u32) | ((self.vcount as u32) << 16),
-            0x0400_0008 => (self.engine_a.bgcnt[0] as u32) | ((self.engine_a.bgcnt[1] as u32) << 16),
-            0x0400_000C => (self.engine_a.bgcnt[2] as u32) | ((self.engine_a.bgcnt[3] as u32) << 16),
-            0x0400_0050 => (self.engine_a.bldcnt as u32) | ((self.engine_a.bldalpha as u32) << 16),
             0x0400_0060 => self.engine_3d.rasterizer.disp3dcnt as u32,
-            0x0400_006C => self.engine_a.master_bright as u32,
             0x0400_0320..=0x0400_06A0 => self.engine_3d.read_io(addr),
+            0x0400_0000..=0x0400_006F => {
+                let o = addr & 0xFC;
+                self.engine_a.read_reg16(o) as u32 | ((self.engine_a.read_reg16(o + 2) as u32) << 16)
+            }
             _ => 0,
         }
     }
@@ -181,41 +173,13 @@ impl NdsPpu {
     /// Write 32-bit I/O register for Engine A and 3D Engine
     pub fn write_io_a(&mut self, addr: u32, val: u32) {
         match addr {
-            0x0400_0000 => self.engine_a.dispcnt = val,
-            0x0400_0004 => {
-                self.dispstat_a = (self.dispstat_a & 0x07) | ((val as u16) & !0x07);
-            }
-            0x0400_0008 => {
-                self.engine_a.bgcnt[0] = val as u16;
-                self.engine_a.bgcnt[1] = (val >> 16) as u16;
-            }
-            0x0400_000C => {
-                self.engine_a.bgcnt[2] = val as u16;
-                self.engine_a.bgcnt[3] = (val >> 16) as u16;
-            }
-            0x0400_0010 => {
-                self.engine_a.bghofs[0] = val as u16;
-                self.engine_a.bgvofs[0] = (val >> 16) as u16;
-            }
-            0x0400_0014 => {
-                self.engine_a.bghofs[1] = val as u16;
-                self.engine_a.bgvofs[1] = (val >> 16) as u16;
-            }
-            0x0400_0018 => {
-                self.engine_a.bghofs[2] = val as u16;
-                self.engine_a.bgvofs[2] = (val >> 16) as u16;
-            }
-            0x0400_001C => {
-                self.engine_a.bghofs[3] = val as u16;
-                self.engine_a.bgvofs[3] = (val >> 16) as u16;
-            }
-            0x0400_0050 => {
-                self.engine_a.bldcnt = val as u16;
-                self.engine_a.bldalpha = (val >> 16) as u16;
-            }
+            0x0400_0004 => self.dispstat_a = (self.dispstat_a & 0x07) | ((val as u16) & !0x07),
             0x0400_0060 => self.engine_3d.rasterizer.disp3dcnt = val as u16,
-            0x0400_006C => self.engine_a.master_bright = val as u16,
             0x0400_0320..=0x0400_06A0 => self.engine_3d.write_io(addr, val),
+            0x0400_0000..=0x0400_006F => {
+                self.engine_a.write_reg16(addr & 0xFC, val as u16);
+                self.engine_a.write_reg16((addr & 0xFC) + 2, (val >> 16) as u16);
+            }
             _ => {}
         }
     }
@@ -223,107 +187,41 @@ impl NdsPpu {
     /// Write 16-bit I/O register for Engine A and 3D Engine
     pub fn write_io_a_u16(&mut self, addr: u32, val: u16) {
         match addr {
-            0x0400_0000 => self.engine_a.dispcnt = (self.engine_a.dispcnt & 0xFFFF_0000) | (val as u32),
-            0x0400_0002 => self.engine_a.dispcnt = (self.engine_a.dispcnt & 0x0000_FFFF) | ((val as u32) << 16),
             0x0400_0004 => self.dispstat_a = (self.dispstat_a & 0x07) | (val & !0x07),
-            0x0400_0008 => self.engine_a.bgcnt[0] = val,
-            0x0400_000A => self.engine_a.bgcnt[1] = val,
-            0x0400_000C => self.engine_a.bgcnt[2] = val,
-            0x0400_000E => self.engine_a.bgcnt[3] = val,
-            0x0400_0010 => self.engine_a.bghofs[0] = val,
-            0x0400_0012 => self.engine_a.bgvofs[0] = val,
-            0x0400_0014 => self.engine_a.bghofs[1] = val,
-            0x0400_0016 => self.engine_a.bgvofs[1] = val,
-            0x0400_0018 => self.engine_a.bghofs[2] = val,
-            0x0400_001A => self.engine_a.bgvofs[2] = val,
-            0x0400_001C => self.engine_a.bghofs[3] = val,
-            0x0400_001E => self.engine_a.bgvofs[3] = val,
-            0x0400_0050 => self.engine_a.bldcnt = val,
-            0x0400_0052 => self.engine_a.bldalpha = val,
-            0x0400_0054 => self.engine_a.bldy = val,
             0x0400_0060 => self.engine_3d.rasterizer.disp3dcnt = val,
-            0x0400_006C => self.engine_a.master_bright = val,
             0x0400_0320..=0x0400_06A0 => self.engine_3d.write_io_u16(addr, val),
+            0x0400_0000..=0x0400_006F => self.engine_a.write_reg16(addr & 0xFE, val),
             _ => {}
         }
     }
 
-    /// Read 32-bit I/O register for Engine B (0x0400_1000..0x0400_1060)
+    /// Read 32-bit I/O register for Engine B (0x0400_1000..0x0400_106F)
     pub fn read_io_b(&self, addr: u32) -> u32 {
         match addr {
-            0x0400_1000 => self.engine_b.dispcnt,
             0x0400_1004 => (self.dispstat_b as u32) | ((self.vcount as u32) << 16),
-            0x0400_1008 => (self.engine_b.bgcnt[0] as u32) | ((self.engine_b.bgcnt[1] as u32) << 16),
-            0x0400_100C => (self.engine_b.bgcnt[2] as u32) | ((self.engine_b.bgcnt[3] as u32) << 16),
-            0x0400_1050 => (self.engine_b.bldcnt as u32) | ((self.engine_b.bldalpha as u32) << 16),
-            0x0400_106C => self.engine_b.master_bright as u32,
-            _ => 0,
+            _ => {
+                let o = addr & 0xFC;
+                self.engine_b.read_reg16(o) as u32 | ((self.engine_b.read_reg16(o + 2) as u32) << 16)
+            }
         }
     }
 
     /// Write 32-bit I/O register for Engine B
     pub fn write_io_b(&mut self, addr: u32, val: u32) {
         match addr {
-            0x0400_1000 => self.engine_b.dispcnt = val,
-            0x0400_1004 => {
-                self.dispstat_b = (self.dispstat_b & 0x07) | ((val as u16) & !0x07);
+            0x0400_1004 => self.dispstat_b = (self.dispstat_b & 0x07) | ((val as u16) & !0x07),
+            _ => {
+                self.engine_b.write_reg16(addr & 0xFC, val as u16);
+                self.engine_b.write_reg16((addr & 0xFC) + 2, (val >> 16) as u16);
             }
-            0x0400_1008 => {
-                self.engine_b.bgcnt[0] = val as u16;
-                self.engine_b.bgcnt[1] = (val >> 16) as u16;
-            }
-            0x0400_100C => {
-                self.engine_b.bgcnt[2] = val as u16;
-                self.engine_b.bgcnt[3] = (val >> 16) as u16;
-            }
-            0x0400_1010 => {
-                self.engine_b.bghofs[0] = val as u16;
-                self.engine_b.bgvofs[0] = (val >> 16) as u16;
-            }
-            0x0400_1014 => {
-                self.engine_b.bghofs[1] = val as u16;
-                self.engine_b.bgvofs[1] = (val >> 16) as u16;
-            }
-            0x0400_1018 => {
-                self.engine_b.bghofs[2] = val as u16;
-                self.engine_b.bgvofs[2] = (val >> 16) as u16;
-            }
-            0x0400_101C => {
-                self.engine_b.bghofs[3] = val as u16;
-                self.engine_b.bgvofs[3] = (val >> 16) as u16;
-            }
-            0x0400_1050 => {
-                self.engine_b.bldcnt = val as u16;
-                self.engine_b.bldalpha = (val >> 16) as u16;
-            }
-            0x0400_106C => self.engine_b.master_bright = val as u16,
-            _ => {}
         }
     }
 
     /// Write 16-bit I/O register for Engine B
     pub fn write_io_b_u16(&mut self, addr: u32, val: u16) {
         match addr {
-            0x0400_1000 => self.engine_b.dispcnt = (self.engine_b.dispcnt & 0xFFFF_0000) | (val as u32),
-            0x0400_1002 => self.engine_b.dispcnt = (self.engine_b.dispcnt & 0x0000_FFFF) | ((val as u32) << 16),
             0x0400_1004 => self.dispstat_b = (self.dispstat_b & 0x07) | (val & !0x07),
-            0x0400_1008 => self.engine_b.bgcnt[0] = val,
-            0x0400_100A => self.engine_b.bgcnt[1] = val,
-            0x0400_100C => self.engine_b.bgcnt[2] = val,
-            0x0400_100E => self.engine_b.bgcnt[3] = val,
-            0x0400_1010 => self.engine_b.bghofs[0] = val,
-            0x0400_1012 => self.engine_b.bgvofs[0] = val,
-            0x0400_1014 => self.engine_b.bghofs[1] = val,
-            0x0400_1016 => self.engine_b.bgvofs[1] = val,
-            0x0400_1018 => self.engine_b.bghofs[2] = val,
-            0x0400_101A => self.engine_b.bgvofs[2] = val,
-            0x0400_101C => self.engine_b.bghofs[3] = val,
-            0x0400_101E => self.engine_b.bgvofs[3] = val,
-            0x0400_1050 => self.engine_b.bldcnt = val,
-            0x0400_1052 => self.engine_b.bldalpha = val,
-            0x0400_1054 => self.engine_b.bldy = val,
-            0x0400_106C => self.engine_b.master_bright = val,
-            _ => {}
+            _ => self.engine_b.write_reg16(addr & 0xFE, val),
         }
     }
 }

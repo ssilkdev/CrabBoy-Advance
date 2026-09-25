@@ -87,6 +87,8 @@ pub struct Layout {
     /// Optional strips along the left and right edges of the display, each
     /// with the button it presses (0 = off). See `set_edge_zones`.
     pub edges: [(Rect, u16); 2],
+    /// DS X / Y buttons (None for GBA / GB games). See `enable_xy`.
+    pub xy: Option<[(Pos2, f32); 2]>,
 }
 
 /// Width of an edge zone, in points (about 4-5 mm): enough for a finger
@@ -156,7 +158,7 @@ impl Layout {
         let menu = Rect::from_center_size(Pos2::new(cx - (small.x + small_gap) / 2.0, shoulder_y), small);
         let fast = Rect::from_center_size(Pos2::new(cx + (small.x + small_gap) / 2.0, shoulder_y), small);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES, xy: None }
     }
 
     /// Width of a landscape control column, in units: margins (0.35 each
@@ -202,7 +204,7 @@ impl Layout {
         let quick_save = Rect::from_center_size(Pos2::new(select.center().x, util_y), pill);
         let quick_load = Rect::from_center_size(Pos2::new(start.center().x, util_y), pill);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES, xy: None }
     }
 
     /// Height of the one-handed control stack, in units.
@@ -282,7 +284,7 @@ impl Layout {
         let menu = Rect::from_center_size(Pos2::new(cx - small.x / 2.0 - gap, y), small);
         let fast = Rect::from_center_size(Pos2::new(cx + small.x / 2.0 + gap, y), small);
 
-        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES }
+        Self { screen, dpad_center, dpad_radius, a, b, l, r, start, select, menu, fast, quick_save, quick_load, edges: NO_EDGES, xy: None }
     }
 
     /// D-pad hugging `left_x`, A/B cluster hugging `right_x`, both around `y`.
@@ -304,6 +306,25 @@ impl Layout {
         self.edges = [(strip(full.left()), left), (strip(full.right() - w), right)];
     }
 
+    /// Rearrange A/B into the DS diamond (X top, A right, B bottom, Y left)
+    /// around where A/B were, kept inside `safe`.
+    pub fn enable_xy(&mut self, safe: Rect) {
+        let r = self.a.1.min(self.b.1) * 0.86;
+        let s = r * 1.8;
+        let mut c = Pos2::new((self.a.0.x + self.b.0.x) / 2.0, (self.a.0.y + self.b.0.y) / 2.0);
+        // Keep the whole diamond on screen and off the D-pad.
+        let half = s + r;
+        c.x = c.x.clamp(safe.left() + half, (safe.right() - half).max(safe.left() + half));
+        c.y = c.y.clamp(safe.top() + half, (safe.bottom() - half).max(safe.top() + half));
+        let dpad_right = self.dpad_center.x + self.dpad_radius * 1.25;
+        if c.x - half < dpad_right && c.x > self.dpad_center.x {
+            c.x = (dpad_right + half).min(safe.right() - half);
+        }
+        self.a = (c + Vec2::new(s, 0.0), r);
+        self.b = (c + Vec2::new(0.0, s), r);
+        self.xy = Some([(c + Vec2::new(0.0, -s), r), (c + Vec2::new(-s, 0.0), r)]);
+    }
+
     /// Buttons under one finger. The D-pad resolves to one or two directions
     /// (diagonals only in a narrow band, see `DPAD_ARM_HALF_ANGLE`), and face buttons get a generous hit radius so a thumb
     /// resting between A and B presses both, like on real hardware.
@@ -318,6 +339,18 @@ impl Layout {
 
         for ((center, r), bit) in [(self.a, Buttons::A), (self.b, Buttons::B)] {
             if (p - center).length() <= r * 1.3 {
+                bits |= bit;
+            }
+        }
+        if let Some([x, y]) = self.xy {
+            // The diamond is tight: take only the nearest face button.
+            let face = [(self.a, Buttons::A), (self.b, Buttons::B), (x, Buttons::X), (y, Buttons::Y)];
+            bits &= !(Buttons::A | Buttons::B);
+            let (d, bit) = face
+                .iter()
+                .map(|&((c, _), bit)| ((p - c).length(), bit))
+                .fold((f32::MAX, 0), |best, cur| if cur.0 < best.0 { cur } else { best });
+            if d <= self.a.1 * 1.3 {
                 bits |= bit;
             }
         }
@@ -492,6 +525,15 @@ pub fn paint(p: &Painter, l: &Layout, held: u16, fast_forward: bool, look: &Look
         p.text(center, Align2::CENTER_CENTER, label, FontId::proportional(r * 0.9), k.label);
     }
 
+    if let Some([x, y]) = l.xy {
+        for ((center, r), bit, label) in [(x, Buttons::X, "X"), (y, Buttons::Y, "Y")] {
+            // Skins have no X/Y art (their A/B images have the letter baked
+            // in), so these are always drawn in the theme colours.
+            p.circle(center, r, fill(bit), stroke);
+            p.text(center, Align2::CENTER_CENTER, label, FontId::proportional(r * 0.9), k.label);
+        }
+    }
+
     for (rect, bit, label, ctl) in [
         (l.l, Buttons::L, "L", Control::L),
         (l.r, Buttons::R, "R", Control::R),
@@ -536,6 +578,24 @@ mod tests {
 
     fn portrait() -> Layout {
         Layout::compute(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 860.0)), Some([240, 160]))
+    }
+
+    #[test]
+    fn ds_diamond_has_four_distinct_face_buttons() {
+        let mut l = portrait();
+        let safe = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 860.0));
+        l.enable_xy(safe);
+        let [x, y] = l.xy.unwrap();
+        assert_eq!(l.hit(x.0), Buttons::X);
+        assert_eq!(l.hit(y.0), Buttons::Y);
+        assert_eq!(l.hit(l.a.0), Buttons::A);
+        assert_eq!(l.hit(l.b.0), Buttons::B);
+        // Diamond: X above, B below, Y left of A, all right of the D-pad.
+        assert!(x.0.y < l.a.0.y && l.b.0.y > l.a.0.y && y.0.x < l.a.0.x);
+        assert!(y.0.x - y.1 > l.dpad_center.x + l.dpad_radius);
+        for (c, r) in [x, y, l.a, l.b] {
+            assert!(safe.contains(c - Vec2::splat(r)) && safe.contains(c + Vec2::splat(r)));
+        }
     }
 
     #[test]

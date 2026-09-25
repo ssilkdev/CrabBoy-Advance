@@ -232,17 +232,31 @@ impl GeometryEngine {
 
     /// Read GXSTAT register (0x0400_0600)
     pub fn read_gxstat(&self) -> u32 {
-        let mut stat = self.gxstat & 0x0000_8001; // Box test result (bit 0) and stack error (bit 15)
-        stat |= (self.mtx_mode as u32) << 25;
-        stat |= (self.proj_sp as u32 & 1) << 27;
-        stat |= (self.pos_sp as u32 & 0x1F) << 28;
+        // GBATEK "DS 3D Status": bit 1 box/pos test result, 8-12 position
+        // stack level, 13 projection stack level, 15 stack error, 16-24 FIFO
+        // entries, 25 FIFO less than half full, 26 FIFO empty, 27 geometry
+        // busy, 30-31 FIFO IRQ mode. Commands execute as soon as they are
+        // written, so the FIFO always reads as empty and idle.
+        let mut stat = self.gxstat & ((1 << 1) | (1 << 15) | (3 << 30));
+        stat |= (self.pos_sp as u32 & 0x1F) << 8;
+        stat |= (self.proj_sp as u32 & 1) << 13;
+        stat |= (1 << 25) | (1 << 26);
         stat
     }
 
-    /// Write GXSTAT register (clears stack error on bit 15 write)
+    /// FIFO IRQ requested by GXSTAT bits 30-31 (1 = less than half full,
+    /// 2 = empty); both always hold with the instant FIFO.
+    pub fn fifo_irq(&self) -> bool {
+        matches!((self.gxstat >> 30) & 3, 1 | 2)
+    }
+
+    /// Write GXSTAT: bits 30-31 set the FIFO IRQ mode; writing 1 to bit 15
+    /// acknowledges a stack error and resets the projection stack pointer.
     pub fn write_gxstat(&mut self, val: u32) {
+        self.gxstat = (self.gxstat & !(3 << 30)) | (val & (3 << 30));
         if (val & (1 << 15)) != 0 {
             self.gxstat &= !(1 << 15);
+            self.proj_sp = 0;
         }
     }
 
@@ -816,7 +830,7 @@ impl GeometryEngine {
                 if params.len() >= 3 {
                     self.update_clip_matrix();
                     // Box test logic: transforms box coordinates and sets bit 0 of GXSTAT if visible
-                    self.gxstat |= 1; // Mark inside frustum
+                    self.gxstat |= 1 << 1; // Result: inside frustum
                 }
             }
             0x71 => {
